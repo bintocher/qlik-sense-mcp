@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 from typing import Any, Dict, List, Optional
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
@@ -18,11 +19,37 @@ class QlikSenseMCPServer:
     """MCP Server for Qlik Sense Enterprise APIs."""
 
     def __init__(self):
-        self.config = QlikSenseConfig.from_env()
-        self.repository_api = QlikRepositoryAPI(self.config)
-        self.engine_api = QlikEngineAPI(self.config)
+        try:
+            self.config = QlikSenseConfig.from_env()
+            self.config_valid = self._validate_config()
+        except Exception as e:
+            self.config = None
+            self.config_valid = False
+
+        # Initialize API clients safely
+        self.repository_api = None
+        self.engine_api = None
+
+        if self.config_valid:
+            try:
+                self.repository_api = QlikRepositoryAPI(self.config)
+                self.engine_api = QlikEngineAPI(self.config)
+            except Exception as e:
+                # API clients will be None, tools will return errors
+                pass
+
         self.server = Server("qlik-sense-mcp-server")
         self._setup_handlers()
+
+    def _validate_config(self) -> bool:
+        """Validate that required configuration is present."""
+        if not self.config:
+            return False
+        return bool(
+            self.config.server_url and
+            self.config.user_directory and
+            self.config.user_id
+        )
 
     def _setup_handlers(self):
         """Setup MCP server handlers."""
@@ -63,6 +90,22 @@ class QlikSenseMCPServer:
 
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: Dict[str, Any]):
+            # Check configuration before processing any tool calls
+            if not self.config_valid:
+                error_msg = {
+                    "error": "Qlik Sense configuration missing",
+                    "message": "Please set the following environment variables:",
+                    "required": [
+                        "QLIK_SERVER_URL - Qlik Sense server URL",
+                        "QLIK_USER_DIRECTORY - User directory",
+                        "QLIK_USER_ID - User ID",
+                        "QLIK_CLIENT_CERT_PATH - Path to client certificate",
+                        "QLIK_CLIENT_KEY_PATH - Path to client key",
+                        "QLIK_CA_CERT_PATH - Path to CA certificate"
+                    ],
+                    "example": "uvx --with-env QLIK_SERVER_URL=https://qlik.company.com qlik-sense-mcp-server"
+                }
+                return [TextContent(type="text", text=json.dumps(error_msg, indent=2))]
             """
             Handle MCP tool calls by routing to appropriate API handlers.
 
@@ -1086,7 +1129,83 @@ def main():
     This function is used as the entry point in pyproject.toml
     for the qlik-sense-mcp-server command.
     """
+    # Handle command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] in ["--help", "-h"]:
+            print_help()
+            return
+        elif sys.argv[1] in ["--version", "-v"]:
+            print("qlik-sense-mcp-server 1.0.2")
+            return
+
     asyncio.run(async_main())
+
+
+def print_help():
+    """Print help information."""
+    help_text = """
+Qlik Sense MCP Server - Model Context Protocol server for Qlik Sense Enterprise APIs
+
+USAGE:
+    qlik-sense-mcp-server [OPTIONS]
+    uvx qlik-sense-mcp-server [OPTIONS]
+
+OPTIONS:
+    -h, --help     Show this help message
+    -v, --version  Show version information
+
+CONFIGURATION:
+    Set these environment variables before running:
+
+    QLIK_SERVER_URL       - Qlik Sense server URL (required)
+                           Example: https://qlik.company.com
+
+    QLIK_USER_DIRECTORY   - User directory (required)
+                           Example: COMPANY
+
+    QLIK_USER_ID          - User ID (required)
+                           Example: your-username
+
+    QLIK_CLIENT_CERT_PATH - Path to client certificate (required)
+                           Example: /path/to/certs/client.pem
+
+    QLIK_CLIENT_KEY_PATH  - Path to client key (required)
+                           Example: /path/to/certs/client_key.pem
+
+    QLIK_CA_CERT_PATH     - Path to CA certificate (required)
+                           Example: /path/to/certs/root.pem
+
+    QLIK_REPOSITORY_PORT  - Repository API port (optional, default: 4242)
+    QLIK_ENGINE_PORT      - Engine API port (optional, default: 4747)
+    QLIK_VERIFY_SSL       - Verify SSL certificates (optional, default: true)
+
+EXAMPLES:
+    # Using uvx with environment variables
+    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \\
+        --with-env QLIK_USER_DIRECTORY=COMPANY \\
+        --with-env QLIK_USER_ID=username \\
+        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \\
+        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \\
+        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \\
+        qlik-sense-mcp-server
+
+    # Using environment file
+    export QLIK_SERVER_URL=https://qlik.company.com
+    export QLIK_USER_DIRECTORY=COMPANY
+    export QLIK_USER_ID=username
+    qlik-sense-mcp-server
+
+AVAILABLE TOOLS:
+    Repository API: get_apps, get_users, get_streams, get_tasks, start_task, etc.
+    Engine API: engine_get_fields, engine_create_hypercube, engine_get_data, etc.
+
+    Total: 21 tools for Qlik Sense operations
+
+MORE INFO:
+    GitHub: https://github.com/bintocher/qlik-sense-mcp
+    PyPI: https://pypi.org/project/qlik-sense-mcp-server/
+"""
+    print(help_text)
 
 
 if __name__ == "__main__":
