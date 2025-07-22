@@ -1068,9 +1068,9 @@ class QlikSenseMCPServer:
             )
 
 
-async def main():
+async def async_main():
     """
-    Main entry point for the Qlik Sense MCP Server.
+    Async main entry point for the Qlik Sense MCP Server.
 
     Creates and starts the MCP server instance with configured
     Qlik Sense Repository and Engine API connections.
@@ -1079,5 +1079,15 @@ async def main():
     await server.run()
 
 
+def main():
+    """
+    Synchronous entry point for CLI usage.
+
+    This function is used as the entry point in pyproject.toml
+    for the qlik-sense-mcp-server command.
+    """
+    asyncio.run(async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
