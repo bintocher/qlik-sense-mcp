@@ -36,9 +36,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bintocher/qlik-sense-mcp-server"
-Repository = "https://github.com/bintocher/qlik-sense-mcp-server"
-Issues = "https://github.com/bintocher/qlik-sense-mcp-server/issues"
+Homepage = "https://github.com/bintocher/qlik-sense-mcp"
+Repository = "https://github.com/bintocher/qlik-sense-mcp"
+Issues = "https://github.com/bintocher/qlik-sense-mcp/issues"
 
 [project.scripts]
 qlik-sense-mcp-server = "qlik_sense_mcp_server.server:main"

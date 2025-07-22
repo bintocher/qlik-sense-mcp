@@ -79,8 +79,8 @@ pip install qlik-sense-mcp-server
 
 #### From Source (Development)
 ```bash
-git clone https://github.com/bintocher/qlik-sense-mcp-server.git
-cd qlik-sense-mcp-server
+git clone https://github.com/bintocher/qlik-sense-mcp.git
+cd qlik-sense-mcp
 make dev
 ```
 
@@ -137,9 +137,8 @@ Create `mcp.json` file for MCP client integration:
 {
   "mcpServers": {
     "qlik-sense": {
-      "command": "python3",
-      "args": ["-m", "qlik_sense_mcp_server.server"],
-      "cwd": "/path/to/your/project",
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
       "env": {
         "QLIK_SERVER_URL": "https://your-qlik-server.company.com",
         "QLIK_USER_DIRECTORY": "COMPANY",
@@ -190,7 +189,7 @@ uvx qlik-sense-mcp-server
 # Using installed package
 qlik-sense-mcp-server
 
-# From source
+# From source (development)
 python -m qlik_sense_mcp_server.server
 ```
 
@@ -413,7 +412,7 @@ Exports data in various formats.
 
 ### Project Structure
 ```
-qlik-sense-mcp-server/
+qlik-sense-mcp/
 ├── qlik_sense_mcp_server/
 │   ├── __init__.py
 │   ├── server.py          # Main MCP server
