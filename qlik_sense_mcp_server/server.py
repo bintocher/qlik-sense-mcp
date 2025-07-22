@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import ServerCapabilities
+from mcp.types import ServerCapabilities, Tool
 from mcp.types import CallToolResult, TextContent
 
 from .config import QlikSenseConfig
@@ -63,28 +63,28 @@ class QlikSenseMCPServer:
             including applications, users, data connections, analytics tools, and data export.
             """
             tools_list = [
-                {"name": "get_apps", "description": "Get list of Qlik Sense applications", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}},
-                {"name": "get_app_details", "description": "Get detailed information about a specific application", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "get_users", "description": "Get list of users in Qlik Sense", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}},
-                {"name": "get_streams", "description": "Get list of streams in Qlik Sense", "inputSchema": {"type": "object", "properties": {}}},
-                {"name": "get_data_connections", "description": "Get list of data connections", "inputSchema": {"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}},
-                {"name": "get_tasks", "description": "Get list of tasks", "inputSchema": {"type": "object", "properties": {"task_type": {"type": "string", "enum": ["reload", "external", "all"], "description": "Type of tasks"}}}},
-                {"name": "start_task", "description": "Start execution of a task", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID"}}, "required": ["task_id"]}},
-                {"name": "get_extensions", "description": "Get list of extensions", "inputSchema": {"type": "object", "properties": {}}},
-                {"name": "get_content_libraries", "description": "Get list of content libraries", "inputSchema": {"type": "object", "properties": {}}},
-                {"name": "get_app_metadata", "description": "Get app metadata via REST API - faster than Engine API for metadata queries", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "engine_get_doc_list", "description": "Get list of documents via Engine API", "inputSchema": {"type": "object", "properties": {}}},
-                {"name": "engine_open_app", "description": "Open an app via Engine API", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
+                Tool(name="get_apps", description="Get list of Qlik Sense applications", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
+                Tool(name="get_app_details", description="Get detailed information about a specific application", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="get_users", description="Get list of users in Qlik Sense", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
+                Tool(name="get_streams", description="Get list of streams in Qlik Sense", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="get_data_connections", description="Get list of data connections", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
+                Tool(name="get_tasks", description="Get list of tasks", inputSchema={"type": "object", "properties": {"task_type": {"type": "string", "enum": ["reload", "external", "all"], "description": "Type of tasks"}}}),
+                Tool(name="start_task", description="Start execution of a task", inputSchema={"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID"}}, "required": ["task_id"]}),
+                Tool(name="get_extensions", description="Get list of extensions", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="get_content_libraries", description="Get list of content libraries", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="get_app_metadata", description="Get app metadata via REST API - faster than Engine API for metadata queries", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="engine_get_doc_list", description="Get list of documents via Engine API", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="engine_open_app", description="Open an app via Engine API", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
-                {"name": "engine_get_script", "description": "Get load script from app", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "engine_get_fields", "description": "Get fields from app", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "engine_get_sheets", "description": "Get sheets from app", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "engine_get_table_data", "description": "Get data from specific table or all tables", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional - if not provided, returns info about all tables)"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id"]}},
-                {"name": "engine_get_field_values", "description": "Get field values with frequency information", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}},
-                {"name": "engine_get_field_statistics", "description": "Get comprehensive statistics for a field", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}},
-                {"name": "engine_get_data_model", "description": "Get complete data model with tables and associations", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}},
-                {"name": "engine_create_hypercube", "description": "Create hypercube for data analysis", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]}},
-                {"name": "engine_create_data_export", "description": "Export data in various formats (JSON, CSV, simple)", "inputSchema": {"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional)"}, "fields": {"type": "array", "items": {"type": "string"}, "description": "List of fields to export (optional)"}, "format_type": {"type": "string", "enum": ["json", "csv", "simple"], "description": "Export format", "default": "json"}, "max_rows": {"type": "integer", "description": "Maximum rows to export", "default": 10000}, "filters": {"type": "object", "description": "Field filters (optional)"}}, "required": ["app_id"]}}
+                Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="engine_get_fields", description="Get fields from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="engine_get_sheets", description="Get sheets from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="engine_get_table_data", description="Get data from specific table or all tables", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional - if not provided, returns info about all tables)"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id"]}),
+                Tool(name="engine_get_field_values", description="Get field values with frequency information", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}),
+                Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
+                Tool(name="engine_get_data_model", description="Get complete data model with tables and associations", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]}),
+                Tool(name="engine_create_data_export", description="Export data in various formats (JSON, CSV, simple)", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional)"}, "fields": {"type": "array", "items": {"type": "string"}, "description": "List of fields to export (optional)"}, "format_type": {"type": "string", "enum": ["json", "csv", "simple"], "description": "Export format", "default": "json"}, "max_rows": {"type": "integer", "description": "Maximum rows to export", "default": 10000}, "filters": {"type": "object", "description": "Field filters (optional)"}}, "required": ["app_id"]})
                 ]
             return tools_list
 
@@ -1135,7 +1135,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.0.2")
+            print("qlik-sense-mcp-server 1.0.3")
             return
 
     asyncio.run(async_main())
