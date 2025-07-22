@@ -1,0 +1,43 @@
+{
+  "mcpServers": {
+    "qlik-sense": {
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
+      "env": {
+        "QLIK_SERVER_URL": "https://your-qlik-server",
+        "QLIK_USER_DIRECTORY": "your-domain",
+        "QLIK_USER_ID": "your-username",
+        "QLIK_CLIENT_CERT_PATH": "/path/to/certs/client.pem",
+        "QLIK_CLIENT_KEY_PATH": "/path/to/certs/client_key.pem",
+        "QLIK_CA_CERT_PATH": "/path/to/certs/root.pem",
+        "QLIK_REPOSITORY_PORT": "4242",
+        "QLIK_ENGINE_PORT": "4747",
+        "QLIK_VERIFY_SSL": "false"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "get_apps",
+        "get_app_details",
+        "get_app_metadata",
+        "get_users",
+        "get_streams",
+        "get_tasks",
+        "start_task",
+        "get_data_connections",
+        "get_extensions",
+        "get_content_libraries",
+        "engine_get_doc_list",
+        "engine_open_app",
+        "engine_get_script",
+        "engine_get_fields",
+        "engine_get_sheets",
+        "engine_get_table_data",
+        "engine_get_field_values",
+        "engine_get_field_statistics",
+        "engine_get_data_model",
+        "engine_create_hypercube",
+        "engine_create_data_export"
+      ]
+    }
+  }
+}
