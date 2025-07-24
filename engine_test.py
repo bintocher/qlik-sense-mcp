@@ -43,7 +43,9 @@ class QlikEngineTestClient:
         self.verify_ssl = os.getenv("QLIK_VERIFY_SSL", "true").lower() == "true"
 
         # Логируем основную конфигурацию
-        logger.info(f"Подключение к: {self.server_url}:{self.engine_port} как {self.user_id}@{self.user_directory}")
+        logger.info(
+            f"Подключение к: {self.server_url}:{self.engine_port} как {self.user_id}@{self.user_directory}"
+        )
 
         # Проверяем что все необходимые параметры заданы
         if not all([self.server_url, self.user_directory, self.user_id]):
@@ -224,9 +226,7 @@ class QlikEngineTestClient:
         logger.info(f"=== Создание объекта SheetList для документа handle: {doc_handle} ===")
 
         sheet_list_def = {
-            "qInfo": {
-                "qType": "SheetList"
-            },
+            "qInfo": {"qType": "SheetList"},
             "qAppObjectListDef": {
                 "qType": "sheet",
                 "qData": {
@@ -236,12 +236,14 @@ class QlikEngineTestClient:
                     "cells": "/cells",
                     "rank": "/rank",
                     "columns": "/columns",
-                    "rows": "/rows"
-                }
-            }
+                    "rows": "/rows",
+                },
+            },
         }
 
-        response = self.send_request("CreateSessionObject", [sheet_list_def], handle=doc_handle)
+        response = self.send_request(
+            "CreateSessionObject", [sheet_list_def], handle=doc_handle
+        )
 
         if "result" in response and "qReturn" in response["result"]:
             sheet_list_handle = response["result"]["qReturn"]["qHandle"]
@@ -264,9 +266,9 @@ class QlikEngineTestClient:
 
         return response
 
-    def get_sheets(self, app_id: str) -> Dict[str, Any]:
-        """Получение всех листов приложения."""
-        logger.info(f"=== Получение листов приложения {app_id} ===")
+    def get_sheets_with_objects(self, app_id: str) -> Dict[str, Any]:
+        """Получение всех листов приложения с объектами."""
+        logger.info(f"=== Получение листов и объектов приложения {app_id} ===")
 
         # Открываем приложение если не открыто
         if not self.ws or self.current_app_id != app_id:
@@ -293,13 +295,44 @@ class QlikEngineTestClient:
                 sheets = layout["qAppObjectList"]["qItems"]
                 logger.info(f"✅ Найдено {len(sheets)} листов")
 
-                # Логируем краткую информацию о каждом листе
+                # Обрабатываем каждый лист и извлекаем объекты из cells
+                processed_sheets = []
+                total_objects = 0
+
                 for i, sheet in enumerate(sheets, 1):
                     title = sheet.get("qMeta", {}).get("title", "Без названия")
                     sheet_id = sheet.get("qInfo", {}).get("qId", "Неизвестно")
-                    logger.info(f"  {i}. {title} (ID: {sheet_id})")
 
-                return {"sheets": sheets, "total_count": len(sheets)}
+                    # Извлекаем объекты (cells) из данных листа
+                    cells = sheet.get("qData", {}).get("cells", [])
+
+                    logger.info(f"  {i}. {title} (ID: {sheet_id}) - {len(cells)} объектов")
+
+                    # Логируем детали объектов если они есть
+                    if cells:
+                        for j, cell in enumerate(cells, 1):
+                            obj_name = cell.get("name", "Неизвестно")
+                            obj_type = cell.get("type", "Неизвестно")
+                            logger.info(f"    {j}. {obj_name} ({obj_type})")
+
+                    # Добавляем обработанную информацию о листе
+                    processed_sheet = {
+                        "sheet_info": sheet,
+                        "sheet_id": sheet_id,
+                        "title": title,
+                        "objects": cells,
+                        "objects_count": len(cells),
+                    }
+                    processed_sheets.append(processed_sheet)
+                    total_objects += len(cells)
+
+                logger.info(f"📊 Итого объектов на всех листах: {total_objects}")
+
+                return {
+                    "sheets": processed_sheets,
+                    "total_sheets": len(sheets),
+                    "total_objects": total_objects,
+                }
             else:
                 logger.warning("❌ В ответе нет данных о листах")
                 return {"error": "No sheets data in response"}
@@ -312,9 +345,7 @@ class QlikEngineTestClient:
         logger.info(f"=== Создание объекта для получения объектов листа {sheet_id} ===")
 
         object_list_def = {
-            "qInfo": {
-                "qType": "SheetObjectList"
-            },
+            "qInfo": {"qType": "SheetObjectList"},
             "qAppObjectListDef": {
                 "qType": "visualization",
                 "qFilter": f"qParent eq '{sheet_id}'",
@@ -323,12 +354,14 @@ class QlikEngineTestClient:
                     "description": "/qMetaDef/description",
                     "objectType": "/qInfo/qType",
                     "visualization": "/visualization",
-                    "showTitles": "/showTitles"
-                }
-            }
+                    "showTitles": "/showTitles",
+                },
+            },
         }
 
-        response = self.send_request("CreateSessionObject", [object_list_def], handle=doc_handle)
+        response = self.send_request(
+            "CreateSessionObject", [object_list_def], handle=doc_handle
+        )
 
         if "result" in response and "qReturn" in response["result"]:
             object_list_handle = response["result"]["qReturn"]["qHandle"]
@@ -340,7 +373,9 @@ class QlikEngineTestClient:
 
     def get_sheet_objects(self, app_id: str, sheet_id: str) -> Dict[str, Any]:
         """Получение всех объектов конкретного листа."""
-        logger.info(f"=== Получение объектов листа {sheet_id} в приложении {app_id} ===")
+        logger.info(
+            f"=== Получение объектов листа {sheet_id} в приложении {app_id} ==="
+        )
 
         # Открываем приложение если не открыто
         if not self.ws or self.current_app_id != app_id:
@@ -389,7 +424,7 @@ class QlikEngineTestClient:
         try:
             # Получаем список документов
             doc_list = self.get_doc_list()
-            #logger.info(f"Список документов: {json.dumps(doc_list, indent=2)}")
+            # logger.info(f"Список документов: {json.dumps(doc_list, indent=2)}")
 
             return "result" in doc_list and "qDocList" in doc_list["result"]
 
@@ -478,40 +513,21 @@ class QlikEngineTestClient:
         logger.info(f"=== ТЕСТ: Получение листов и объектов для {app_id} ===")
 
         try:
-            # Получаем листы
-            sheets_response = self.get_sheets(app_id)
+            # Получаем листы с объектами
+            sheets_response = self.get_sheets_with_objects(app_id)
 
             if "error" in sheets_response:
                 logger.error(f"❌ Ошибка получения листов: {sheets_response}")
                 return False
 
             sheets = sheets_response.get("sheets", [])
+            total_objects = sheets_response.get("total_objects", 0)
+
             if not sheets:
                 logger.warning("⚠️ В приложении нет листов")
                 return True
 
-            logger.info(f"📋 Обработка {len(sheets)} листов:")
-
-            # Получаем объекты для каждого листа (только для первых 2 листов)
-            for i, sheet in enumerate(sheets[:2], 1):
-                sheet_id = sheet.get("qInfo", {}).get("qId")
-                sheet_title = sheet.get("qMeta", {}).get("title", "Без названия")
-
-                if not sheet_id:
-                    logger.warning(f"⚠️ Лист {i} не имеет ID, пропускаем")
-                    continue
-
-                logger.info(f"--- Анализ листа {i}: {sheet_title} ---")
-
-                objects_response = self.get_sheet_objects(app_id, sheet_id)
-
-                if "error" in objects_response:
-                    logger.error(f"❌ Ошибка получения объектов листа {sheet_title}: {objects_response}")
-                    continue
-
-                objects = objects_response.get("objects", [])
-                logger.info(f"📊 На листе '{sheet_title}' найдено {len(objects)} объектов")
-
+            logger.info(f"📋 Найдено листов: {len(sheets)}, объектов: {total_objects}")
             return True
 
         except Exception as e:
