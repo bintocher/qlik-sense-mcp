@@ -771,6 +771,204 @@ class QlikEngineTestClient:
 
         return result
 
+    def get_tables_and_keys(self, app_id: str) -> Dict[str, Any]:
+        """Получение структуры таблиц и полей модели данных."""
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Параметры запроса
+        params = {
+            "qWindowSize": {
+                "qcx": 0,
+                "qcy": 0
+            },
+            "qNullSize": {
+                "qcx": 0,
+                "qcy": 0
+            },
+            "qCellHeight": 0,
+            "qSyntheticMode": False,
+            "qIncludeSysVars": False,
+            "qIncludeProfiling": False
+        }
+
+        # Получаем структуру таблиц
+        response = self.send_request("GetTablesAndKeys", params, handle=self.app_handle)
+
+        if "result" not in response or "qtr" not in response["result"]:
+            logger.error(f"❌ Ошибка получения таблиц и ключей: {response}")
+            return {"error": f"Failed to get tables and keys: {response}"}
+
+        return response
+
+    def get_field_samples(self, app_id: str, field_name: str, table_name: str, max_values: int = 10) -> Dict[str, Any]:
+        """Получение примеров значений для поля."""
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Параметры запроса
+        params = {
+            "qFieldsOrColumnsWithWildcards": [{
+                "qFieldName": field_name,
+                "qTableName": table_name
+            }],
+            "qMaxNumberOfValues": max_values,
+            "qRandSeed": 0
+        }
+
+        # Получаем примеры данных
+        response = self.send_request("GetFieldAndColumnSamples", params, handle=self.app_handle)
+
+        if "result" not in response or "qResult" not in response["result"]:
+            logger.error(f"❌ Ошибка получения примеров для поля {field_name}: {response}")
+            return {"error": f"Failed to get field samples: {response}"}
+
+        return response
+
+    def analyze_data_model(self, app_id: str, include_samples: bool = True, max_samples: int = 5) -> Dict[str, Any]:
+        """Полный анализ модели данных приложения."""
+        logger.info(f"=== АНАЛИЗ МОДЕЛИ ДАННЫХ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        # Получаем структуру таблиц
+        tables_response = self.get_tables_and_keys(app_id)
+        if "error" in tables_response:
+            logger.error(f"❌ Ошибка получения модели данных: {tables_response}")
+            return tables_response
+
+        tables_data = tables_response.get("result", {})
+        tables = tables_data.get("qtr", [])
+
+        if not tables:
+            logger.info("📊 Таблицы в модели данных не найдены")
+            return {"tables": [], "summary": {"total_tables": 0, "total_fields": 0}}
+
+        logger.info(f"📊 Найдено {len(tables)} таблиц в модели данных")
+
+        result = {
+            "tables": [],
+            "summary": {
+                "total_tables": len(tables),
+                "total_fields": 0,
+                "total_rows": 0,
+                "field_types": {}
+            }
+        }
+
+        for i, table in enumerate(tables, 1):
+            table_name = table.get("qName", f"Table_{i}")
+            fields = table.get("qFields", [])
+
+            logger.info(f"\n📋 Таблица {i}/{len(tables)}: {table_name}")
+            logger.info(f"  📊 Полей: {len(fields)}")
+
+            table_info = {
+                "name": table_name,
+                "fields": [],
+                "field_count": len(fields),
+                "total_rows": 0
+            }
+
+            # Анализируем поля таблицы
+            for j, field in enumerate(fields, 1):
+                field_name = field.get("qName", "")
+                is_present = field.get("qPresent", False)
+                has_duplicates = field.get("qHasDuplicates", False)
+                non_nulls = field.get("qnNonNulls", 0)
+                total_rows = field.get("qnRows", 0)
+                distinct_values = field.get("qnTotalDistinctValues", 0)
+                key_type = field.get("qKeyType", "")
+                tags = field.get("qTags", [])
+
+                # Определяем тип данных из тегов
+                data_type = "unknown"
+                if "$numeric" in tags:
+                    if "$integer" in tags:
+                        data_type = "integer"
+                    else:
+                        data_type = "numeric"
+                elif "$text" in tags:
+                    data_type = "text"
+                elif "$date" in tags:
+                    data_type = "date"
+                elif "$timestamp" in tags:
+                    data_type = "timestamp"
+
+                logger.info(f"    {j:2d}. {field_name}")
+                logger.info(f"        🏷️  Тип: {data_type}")
+                logger.info(f"        📊 Строк: {total_rows:,}")
+                logger.info(f"        ✅ Не null: {non_nulls:,}")
+                logger.info(f"        🔢 Уникальных: {distinct_values:,}")
+                if has_duplicates:
+                    logger.info(f"        🔄 Есть дубликаты")
+                if key_type and key_type != "NOT_KEY":
+                    logger.info(f"        🔑 Ключ: {key_type}")
+
+                field_info = {
+                    "name": field_name,
+                    "data_type": data_type,
+                    "is_present": is_present,
+                    "has_duplicates": has_duplicates,
+                    "non_nulls": non_nulls,
+                    "total_rows": total_rows,
+                    "distinct_values": distinct_values,
+                    "key_type": key_type,
+                    "tags": tags,
+                    "samples": []
+                }
+
+                # Получаем примеры данных если запрошено
+                if include_samples and is_present and field_name:
+                    samples_response = self.get_field_samples(app_id, field_name, table_name, max_samples)
+                    if "error" not in samples_response:
+                        samples_data = samples_response.get("result", {}).get("qResult", [])
+                        if samples_data:
+                            sample_values = samples_data[0].get("qValues", [])
+                            field_samples = []
+
+                            for sample in sample_values:
+                                is_numeric = sample.get("qIsNumeric", False)
+                                if is_numeric:
+                                    value = sample.get("qNumber", "")
+                                else:
+                                    value = sample.get("qText", "")
+                                field_samples.append(str(value))
+
+                            if field_samples:
+                                field_info["samples"] = field_samples
+                                logger.info(f"        💾 Примеры: {', '.join(field_samples[:3])}{'...' if len(field_samples) > 3 else ''}")
+
+                table_info["fields"].append(field_info)
+
+                # Обновляем общую статистику
+                if total_rows > table_info["total_rows"]:
+                    table_info["total_rows"] = total_rows
+
+                # Подсчитываем типы полей
+                if data_type in result["summary"]["field_types"]:
+                    result["summary"]["field_types"][data_type] += 1
+                else:
+                    result["summary"]["field_types"][data_type] = 1
+
+            result["tables"].append(table_info)
+            result["summary"]["total_fields"] += len(fields)
+            result["summary"]["total_rows"] += table_info["total_rows"]
+
+        # Выводим сводку
+        summary = result["summary"]
+        logger.info(f"\n📊 Сводка модели данных:")
+        logger.info(f"  📋 Таблиц: {summary['total_tables']}")
+        logger.info(f"  📊 Полей: {summary['total_fields']}")
+        logger.info(f"  📈 Общих строк: {summary['total_rows']:,}")
+
+        if summary["field_types"]:
+            logger.info(f"  🏷️ Типы полей:")
+            for field_type, count in summary["field_types"].items():
+                logger.info(f"    {field_type}: {count}")
+
+        return result
+
     def get_layout(self, object_handle: int) -> Dict[str, Any]:
         """Получение layout объекта по handle."""
         response = self.send_request("GetLayout", [], handle=object_handle)
@@ -1555,6 +1753,10 @@ def main():
         # Тест 6: Анализ метаданных приложения
         logger.info(f"=== ТЕСТ: Анализ метаданных для {test_app_id} ===")
         client.analyze_app_metadata(test_app_id)
+
+        # Тест 7: Анализ модели данных
+        logger.info(f"=== ТЕСТ: Анализ модели данных для {test_app_id} ===")
+        client.analyze_data_model(test_app_id)
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
