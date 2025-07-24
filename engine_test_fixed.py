@@ -6697,4 +6697,103 @@ class QlikEngineTestClient:
 
         logger.info(f"\n🎯 Использование полей:")
         logger.info(f"  ✅ Используемых: {used_count}/{total_count} ({usage_pct}%)")
-        logger.info(f
+        logger.info(f"  ❌ Неиспользуемых: {unused_count}/{total_count} ({100-usage_pct:.1f}%)")
+        
+        # Статистика по типам объектов
+        usage_stats = report.get("data_fields", {}).get("usage_statistics", {})
+        by_object_type = usage_stats.get("by_object_type", {})
+        if by_object_type:
+            logger.info(f"\n📈 Использование по типам объектов:")
+            for obj_type, count in sorted(by_object_type.items(), key=lambda x: x[1], reverse=True):
+                logger.info(f"  {obj_type}: {count} полей")
+
+        # Мастер-элементы
+        master_items = report.get("master_items", {})
+        logger.info(f"\n🎭 Мастер-элементы:")
+        logger.info(f"  📏 Мастер-меры: {master_items.get('total_measures', 0)}")
+        logger.info(f"  📐 Мастер-измерения: {master_items.get('total_dimensions', 0)}")
+
+        # Переменные
+        variables = report.get("variables", {})
+        user_vars = len(variables.get("user_variables", []))
+        system_vars = len(variables.get("system_variables", []))
+        logger.info(f"\n📝 Переменные:")
+        logger.info(f"  👤 Пользовательские: {user_vars}")
+        logger.info(f"  🔧 Системные: {system_vars}")
+
+        # Возможности улучшения
+        improvements = report.get("improvement_opportunities", {})
+        unused_fields = len(improvements.get("unused_fields", []))
+        tables_affected = len(improvements.get("potential_savings", {}).get("tables_affected", []))
+
+        if unused_fields > 0:
+            logger.info(f"\n💡 Возможности улучшения:")
+            logger.info(f"  🗑️ Полей для удаления: {unused_fields}")
+            logger.info(f"  📁 Затронутых таблиц: {tables_affected}")
+            logger.info(f"  💾 Потенциальная экономия места: ~{(unused_fields/total_count)*100:.1f}% модели")
+
+        logger.info("\n" + "="*80)
+
+
+def main():
+    """Основная функция для тестирования."""
+    logger.info("🚀 Запуск тестирования Engine API")
+    logger.info(f"Время запуска: {datetime.now()}")
+
+    try:
+        # Создаем клиент
+        client = QlikEngineTestClient()
+
+        # Тестируем базовое подключение
+        if client.test_basic_connection():
+            logger.info("✅ Базовое тестирование прошло успешно")
+        else:
+            logger.error("❌ Базовое тестирование провалилось")
+            return
+
+        # Тестируем открытие документов
+        if client.test_multiple_documents():
+            logger.info("✅ Тестирование открытия документов прошло успешно")
+        else:
+            logger.error("❌ Тестирование открытия документов провалилось")
+            return
+
+        # Тестируем получение листов и объектов
+        test_app_id = "e2958865-2aed-4f8a-b3c7-20e6f21d275c"  # dashboard
+        if client.test_sheets_and_objects(test_app_id):
+            logger.info("✅ Тестирование листов и объектов прошло успешно")
+        else:
+            logger.error("❌ Тестирование листов и объектов провалилось")
+            return
+
+        # Тестируем детальный анализ объектов
+        if client.test_object_analysis(test_app_id):
+            logger.info("✅ Тестирование анализа объектов прошло успешно")
+        else:
+            logger.error("❌ Тестирование анализа объектов провалилось")
+
+        # ГЛАВНЫЙ ТЕСТ: Генерация комплексного JSON отчета для LLM агентов
+        logger.info(f"=== ГЛАВНЫЙ ТЕСТ: Генерация комплексного JSON отчета для {test_app_id} ===")
+        report = client.generate_comprehensive_report(test_app_id)
+        
+        if "error" not in report:
+            # Сохраняем отчет в JSON файл
+            filename = client.save_comprehensive_report(test_app_id, report)
+            if filename:
+                logger.info(f"✅ Комплексный JSON отчет сохранен: {filename}")
+                logger.info("🎯 Отчет готов для использования LLM агентами!")
+            else:
+                logger.error("❌ Ошибка сохранения отчета")
+        else:
+            logger.error(f"❌ Ошибка генерации отчета: {report}")
+
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка: {e}")
+        import traceback
+        logger.error(f"Трассировка: {traceback.format_exc()}")
+
+    logger.info("🏁 Завершение тестирования")
+
+
+if __name__ == "__main__":
+    main()
