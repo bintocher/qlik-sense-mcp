@@ -627,6 +627,150 @@ class QlikEngineTestClient:
 
         return result
 
+    def get_app_layout(self, app_id: str) -> Dict[str, Any]:
+        """Получение layout приложения с метаданными."""
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Получаем layout приложения
+        response = self.send_request("GetAppLayout", {}, handle=self.app_handle)
+
+        if "result" not in response or "qLayout" not in response["result"]:
+            logger.error(f"❌ Ошибка получения layout приложения: {response}")
+            return {"error": f"Failed to get app layout: {response}"}
+
+        return response
+
+    def analyze_app_metadata(self, app_id: str) -> Dict[str, Any]:
+        """Полный анализ метаданных приложения."""
+        logger.info(f"=== АНАЛИЗ МЕТАДАННЫХ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        # Получаем layout приложения
+        layout_response = self.get_app_layout(app_id)
+        if "error" in layout_response:
+            logger.error(f"❌ Ошибка получения метаданных: {layout_response}")
+            return layout_response
+
+        layout = layout_response.get("result", {}).get("qLayout", {})
+
+        # Основная информация
+        title = layout.get("qTitle", "")
+        filename = layout.get("qFileName", "")
+        description = layout.get("description", "")
+        usage = layout.get("qUsage", "")
+        has_script = layout.get("qHasScript", False)
+        has_data = layout.get("qHasData", False)
+
+        logger.info(f"📱 Название: {title}")
+        logger.info(f"📄 Файл: {filename}")
+        if description:
+            logger.info(f"📝 Описание: {description}")
+        logger.info(f"🎯 Назначение: {usage}")
+        logger.info(f"📜 Есть скрипт: {'Да' if has_script else 'Нет'}")
+        logger.info(f"💾 Есть данные: {'Да' if has_data else 'Нет'}")
+
+        # Размер приложения
+        size_bytes = layout.get("qStaticByteSize", 0)
+        if size_bytes > 0:
+            # Конвертируем в удобный формат
+            if size_bytes >= 1024*1024*1024:
+                size_str = f"{size_bytes / (1024*1024*1024):.2f} ГБ"
+            elif size_bytes >= 1024*1024:
+                size_str = f"{size_bytes / (1024*1024):.2f} МБ"
+            elif size_bytes >= 1024:
+                size_str = f"{size_bytes / 1024:.2f} КБ"
+            else:
+                size_str = f"{size_bytes} байт"
+
+            logger.info(f"📦 Размер: {size_str} ({size_bytes:,} байт)")
+
+        # Даты
+        created_date = layout.get("createdDate", "")
+        modified_date = layout.get("modifiedDate", "")
+        last_reload_time = layout.get("qLastReloadTime", "")
+
+        if created_date:
+            logger.info(f"📅 Создано: {created_date}")
+        if modified_date:
+            logger.info(f"✏️ Изменено: {modified_date}")
+        if last_reload_time:
+            logger.info(f"🔄 Последняя перезагрузка: {last_reload_time}")
+
+        # Публикация
+        published = layout.get("published", False)
+        publish_time = layout.get("publishTime", "")
+
+        if published:
+            logger.info(f"✅ Опубликовано: Да")
+            if publish_time:
+                logger.info(f"📤 Время публикации: {publish_time}")
+        else:
+            logger.info(f"❌ Опубликовано: Нет")
+
+        # Стрим (если опубликовано)
+        stream_info = layout.get("stream", {})
+        if stream_info:
+            stream_id = stream_info.get("id", "")
+            stream_name = stream_info.get("name", "")
+            logger.info(f"🌊 Стрим: {stream_name}")
+            logger.info(f"🆔 ID стрима: {stream_id}")
+
+        # Права доступа
+        privileges = layout.get("privileges", [])
+        if privileges:
+            logger.info(f"🔑 Права доступа: {', '.join(privileges)}")
+
+        # Локализация
+        locale_info = layout.get("qLocaleInfo", {})
+        if locale_info:
+            collation = locale_info.get("qCollation", "")
+            decimal_sep = locale_info.get("qDecimalSep", "")
+            thousand_sep = locale_info.get("qThousandSep", "")
+            date_fmt = locale_info.get("qDateFmt", "")
+
+            logger.info(f"🌍 Локализация:")
+            if collation:
+                logger.info(f"  📍 Регион: {collation}")
+            if decimal_sep:
+                logger.info(f"  🔢 Разделитель десятичных: '{decimal_sep}'")
+            if thousand_sep:
+                logger.info(f"  📊 Разделитель тысяч: '{thousand_sep}'")
+            if date_fmt:
+                logger.info(f"  📅 Формат даты: {date_fmt}")
+
+        # Возможности создания объектов
+        create_permissions = layout.get("create", [])
+        if create_permissions:
+            logger.info(f"🛠️ Возможности создания объектов:")
+            for perm in create_permissions:
+                resource = perm.get("resource", "")
+                can_create = perm.get("canCreate", False)
+                status = "✅" if can_create else "❌"
+                logger.info(f"  {status} {resource}")
+
+        # Формируем результат
+        result = {
+            "title": title,
+            "filename": filename,
+            "description": description,
+            "usage": usage,
+            "has_script": has_script,
+            "has_data": has_data,
+            "size_bytes": size_bytes,
+            "created_date": created_date,
+            "modified_date": modified_date,
+            "last_reload_time": last_reload_time,
+            "published": published,
+            "publish_time": publish_time,
+            "stream": stream_info,
+            "privileges": privileges,
+            "locale_info": locale_info,
+            "create_permissions": create_permissions
+        }
+
+        return result
+
     def get_layout(self, object_handle: int) -> Dict[str, Any]:
         """Получение layout объекта по handle."""
         response = self.send_request("GetLayout", [], handle=object_handle)
@@ -1407,6 +1551,10 @@ def main():
         # Тест 5: Анализ переменных
         logger.info(f"=== ТЕСТ: Анализ переменных для {test_app_id} ===")
         client.analyze_variables(test_app_id)
+
+        # Тест 6: Анализ метаданных приложения
+        logger.info(f"=== ТЕСТ: Анализ метаданных для {test_app_id} ===")
+        client.analyze_app_metadata(test_app_id)
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
