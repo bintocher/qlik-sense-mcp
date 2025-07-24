@@ -223,8 +223,6 @@ class QlikEngineTestClient:
 
     def create_sheet_list_object(self, doc_handle: int) -> Dict[str, Any]:
         """Создание SessionObject для получения списка листов."""
-        logger.info(f"=== Создание объекта SheetList для документа handle: {doc_handle} ===")
-
         sheet_list_def = {
             "qInfo": {"qType": "SheetList"},
             "qAppObjectListDef": {
@@ -245,24 +243,17 @@ class QlikEngineTestClient:
             "CreateSessionObject", [sheet_list_def], handle=doc_handle
         )
 
-        if "result" in response and "qReturn" in response["result"]:
-            sheet_list_handle = response["result"]["qReturn"]["qHandle"]
-            logger.info(f"✅ SheetList объект создан, handle: {sheet_list_handle}")
-        else:
+        if "result" not in response or "qReturn" not in response["result"]:
             logger.error(f"❌ Ошибка создания SheetList объекта: {response}")
 
         return response
 
     def get_layout(self, object_handle: int) -> Dict[str, Any]:
         """Получение layout объекта по handle."""
-        logger.info(f"=== Получение layout для объекта handle: {object_handle} ===")
-
         response = self.send_request("GetLayout", [], handle=object_handle)
 
-        if "result" in response and "qLayout" in response["result"]:
-            logger.info(f"✅ Layout получен для handle: {object_handle}")
-        else:
-            logger.error(f"❌ Ошибка получения layout: {response}")
+        if "result" not in response or "qLayout" not in response["result"]:
+            logger.error(f"❌ Ошибка получения layout для handle {object_handle}: {response}")
 
         return response
 
@@ -417,6 +408,198 @@ class QlikEngineTestClient:
             logger.error("❌ Некорректный ответ layout")
             return {"error": "Invalid layout response"}
 
+    def get_object(self, app_id: str, object_id: str) -> Dict[str, Any]:
+        """Получение объекта по ID."""
+        # Открываем приложение если не открыто
+        if not self.ws or self.current_app_id != app_id:
+            open_response = self.open_app(app_id)
+            if "error" in open_response:
+                return open_response
+
+        # Получаем объект по ID
+        response = self.send_request("GetObject", {"qId": object_id}, handle=self.app_handle)
+
+        if "result" in response and "qReturn" in response["result"]:
+            object_handle = response["result"]["qReturn"]["qHandle"]
+            object_type = response["result"]["qReturn"]["qGenericType"]
+        else:
+            logger.error(f"❌ Ошибка получения объекта {object_id}: {response}")
+
+        return response
+
+    def get_object_properties(self, object_handle: int) -> Dict[str, Any]:
+        """Получение свойств объекта по handle."""
+        response = self.send_request("GetProperties", [], handle=object_handle)
+
+        if "result" not in response or "qProp" not in response["result"]:
+            logger.error(f"❌ Ошибка получения свойств для handle {object_handle}: {response}")
+
+        return response
+
+    def analyze_object(self, app_id: str, object_id: str, object_name: str = None) -> Dict[str, Any]:
+        """Комплексный анализ объекта: получение handle, layout и properties."""
+        display_name = object_name or object_id
+        logger.info(f"=== АНАЛИЗ ОБЪЕКТА: {display_name} ({object_id}) ===")
+
+        # Получаем объект
+        object_response = self.get_object(app_id, object_id)
+        if "error" in object_response:
+            return {"error": f"Failed to get object: {object_response}"}
+
+        object_handle = object_response["result"]["qReturn"]["qHandle"]
+        object_type = object_response["result"]["qReturn"]["qGenericType"]
+
+        # Получаем layout
+        layout_response = self.get_layout(object_handle)
+        if "error" in layout_response:
+            return {"error": f"Failed to get layout: {layout_response}"}
+
+        # Получаем properties
+        properties_response = self.get_object_properties(object_handle)
+        if "error" in properties_response:
+            return {"error": f"Failed to get properties: {properties_response}"}
+
+        # Анализируем данные
+        layout = layout_response.get("result", {}).get("qLayout", {})
+        properties = properties_response.get("result", {}).get("qProp", {})
+
+        # Извлекаем основную информацию
+        title = properties.get("qMetaDef", {}).get("title", "Без названия")
+        description = properties.get("qMetaDef", {}).get("description", "")
+
+        logger.info(f"📊 Тип: {object_type}")
+        logger.info(f"📊 Название: {title}")
+        if description:
+            logger.info(f"📊 Описание: {description}")
+
+        # Анализируем меры
+        measures = self._extract_measures(properties)
+        if measures:
+            logger.info(f"📏 Меры ({len(measures)}):")
+            for i, measure in enumerate(measures, 1):
+                label = measure.get("qDef", {}).get("qLabel", "Без названия")
+                expression = measure.get("qDef", {}).get("qDef", "")
+                logger.info(f"  {i}. {label}: {expression}")
+
+        # Анализируем измерения
+        dimensions = self._extract_dimensions(properties)
+        if dimensions:
+            logger.info(f"📐 Измерения ({len(dimensions)}):")
+            for i, dimension in enumerate(dimensions, 1):
+                label = dimension.get("qDef", {}).get("qLabel", "Без названия")
+                field = dimension.get("qDef", {}).get("qFieldDefs", [""])[0] if dimension.get("qDef", {}).get("qFieldDefs") else ""
+                logger.info(f"  {i}. {label}: {field}")
+
+        return {
+            "object_id": object_id,
+            "handle": object_handle,
+            "type": object_type,
+            "title": title,
+            "description": description,
+            "measures": measures,
+            "dimensions": dimensions,
+            "layout": layout,
+            "properties": properties
+        }
+
+    def _extract_measures(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Извлечение мер из свойств объекта."""
+        measures = []
+
+        # Ищем меры в разных местах в зависимости от типа объекта
+        # qHyperCubeDef для стандартных визуализаций
+        hypercube = properties.get("qHyperCubeDef", {})
+        if "qMeasures" in hypercube:
+            measures.extend(hypercube["qMeasures"])
+
+        # qListObjectDef для других объектов
+        listobj = properties.get("qListObjectDef", {})
+        if "qMeasures" in listobj:
+            measures.extend(listobj["qMeasures"])
+
+        # Специфичные места для KPI
+        if "qMeasure" in properties:
+            measures.append(properties["qMeasure"])
+
+        return measures
+
+    def _extract_dimensions(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Извлечение измерений из свойств объекта."""
+        dimensions = []
+
+        # Ищем измерения в разных местах
+        # qHyperCubeDef для стандартных визуализаций
+        hypercube = properties.get("qHyperCubeDef", {})
+        if "qDimensions" in hypercube:
+            dimensions.extend(hypercube["qDimensions"])
+
+        # qListObjectDef для других объектов
+        listobj = properties.get("qListObjectDef", {})
+        if "qDimensions" in listobj:
+            dimensions.extend(listobj["qDimensions"])
+
+        return dimensions
+
+    def analyze_all_objects(self, app_id: str, limit_objects: int = 5) -> Dict[str, Any]:
+        """Анализ всех объектов приложения с детальной информацией."""
+        logger.info(f"=== ПОЛНЫЙ АНАЛИЗ ОБЪЕКТОВ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        # Получаем листы с объектами
+        sheets_response = self.get_sheets_with_objects(app_id)
+        if "error" in sheets_response:
+            return sheets_response
+
+        sheets = sheets_response.get("sheets", [])
+        total_objects = sheets_response.get("total_objects", 0)
+
+        logger.info(f"🔍 Будет проанализировано до {limit_objects} объектов из {total_objects}")
+
+        analyzed_objects = []
+        processed_count = 0
+
+        try:
+            for sheet in sheets:
+                sheet_title = sheet.get("title", "Без названия")
+                objects = sheet.get("objects", [])
+
+                logger.info(f"--- Анализ листа: {sheet_title} ({len(objects)} объектов) ---")
+
+                for obj in objects:
+                    if processed_count >= limit_objects:
+                        logger.info(f"⏹️ Достигнут лимит анализа: {limit_objects} объектов")
+                        break
+
+                    obj_id = obj.get("name", "")
+                    obj_type = obj.get("type", "")
+
+                    if not obj_id:
+                        logger.warning("⚠️ Объект без ID, пропускаем")
+                        continue
+
+                    # Анализируем объект
+                    analysis = self.analyze_object(app_id, obj_id, f"{obj_type}")
+                    if "error" not in analysis:
+                        analyzed_objects.append(analysis)
+                        processed_count += 1
+                        logger.info(f"✅ Объект {processed_count}/{limit_objects} проанализирован")
+                    else:
+                        logger.error(f"❌ Ошибка анализа объекта {obj_id}: {analysis}")
+
+                if processed_count >= limit_objects:
+                    break
+
+        except Exception as e:
+            logger.error(f"💥 Ошибка в процессе анализа: {e}")
+
+        logger.info(f"📊 Анализ завершен: {len(analyzed_objects)} объектов проанализировано")
+
+        return {
+            "analyzed_objects": analyzed_objects,
+            "total_analyzed": len(analyzed_objects),
+            "total_available": total_objects,
+            "sheets": sheets
+        }
+
     def test_basic_connection(self) -> bool:
         """Тестирование базового подключения."""
         logger.info("=== ТЕСТ: Базовое подключение ===")
@@ -536,6 +719,54 @@ class QlikEngineTestClient:
         finally:
             self.disconnect()
 
+    def test_object_analysis(self, app_id: str, limit_objects: int = 3) -> bool:
+        """Тестирование детального анализа объектов."""
+        logger.info(f"=== ТЕСТ: Анализ объектов для {app_id} ===")
+
+        try:
+            # Выполняем полный анализ объектов
+            analysis_response = self.analyze_all_objects(app_id, limit_objects)
+
+            if "error" in analysis_response:
+                logger.error(f"❌ Ошибка анализа объектов: {analysis_response}")
+                return False
+
+            analyzed_objects = analysis_response.get("analyzed_objects", [])
+            total_analyzed = analysis_response.get("total_analyzed", 0)
+            total_available = analysis_response.get("total_available", 0)
+
+            if not analyzed_objects:
+                logger.warning("⚠️ Не удалось проанализировать ни одного объекта")
+                return True
+
+            logger.info(f"📊 Результат анализа: {total_analyzed}/{total_available} объектов")
+
+            # Выводим сводку по типам объектов
+            type_counts = {}
+            objects_with_measures = 0
+            objects_with_dimensions = 0
+
+            for obj in analyzed_objects:
+                obj_type = obj.get("type", "unknown")
+                type_counts[obj_type] = type_counts.get(obj_type, 0) + 1
+
+                if obj.get("measures"):
+                    objects_with_measures += 1
+                if obj.get("dimensions"):
+                    objects_with_dimensions += 1
+
+            logger.info(f"📈 Типы объектов: {dict(type_counts)}")
+            logger.info(f"📏 Объектов с мерами: {objects_with_measures}")
+            logger.info(f"📐 Объектов с измерениями: {objects_with_dimensions}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"💥 Исключение в тесте анализа объектов: {e}")
+            return False
+        finally:
+            self.disconnect()
+
 
 def main():
     """Основная функция для тестирования."""
@@ -566,6 +797,13 @@ def main():
             logger.info("✅ Тестирование листов и объектов прошло успешно")
         else:
             logger.error("❌ Тестирование листов и объектов провалилось")
+            return
+
+        # Тестируем детальный анализ объектов
+        if client.test_object_analysis(test_app_id, limit_objects=3):
+            logger.info("✅ Тестирование анализа объектов прошло успешно")
+        else:
+            logger.error("❌ Тестирование анализа объектов провалилось")
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
