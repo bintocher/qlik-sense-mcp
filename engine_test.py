@@ -490,6 +490,15 @@ class QlikEngineTestClient:
                 field = dimension.get("qDef", {}).get("qFieldDefs", [""])[0] if dimension.get("qDef", {}).get("qFieldDefs") else ""
                 logger.info(f"  {i}. {label}: {field}")
 
+        # Анализируем данные объекта
+        data_info = self._extract_object_data(layout)
+        if data_info:
+            logger.info(f"💾 Данные объекта:")
+            if data_info.get("values"):
+                logger.info(f"  📊 Значения: {data_info['values']}")
+            if data_info.get("matrix_info"):
+                logger.info(f"  📋 Матрица: {data_info['matrix_info']}")
+
         return {
             "object_id": object_id,
             "handle": object_handle,
@@ -498,6 +507,7 @@ class QlikEngineTestClient:
             "description": description,
             "measures": measures,
             "dimensions": dimensions,
+            "data_info": data_info,
             "layout": layout,
             "properties": properties
         }
@@ -540,7 +550,89 @@ class QlikEngineTestClient:
 
         return dimensions
 
-    def analyze_all_objects(self, app_id: str, limit_objects: int = 5) -> Dict[str, Any]:
+    def _extract_object_data(self, layout: Dict[str, Any]) -> Dict[str, Any]:
+        """Извлечение данных объекта из layout (qText, qNum значения)."""
+        data_info = {}
+
+        # Проверяем qHyperCube для таблиц и графиков
+        hypercube = layout.get("qHyperCube", {})
+        if hypercube and "qDataPages" in hypercube:
+            data_pages = hypercube["qDataPages"]
+            matrix_data = []
+            total_cells = 0
+
+            for page in data_pages:
+                if "qMatrix" in page:
+                    matrix = page["qMatrix"]
+                    for row in matrix:
+                        row_data = []
+                        for cell in row:
+                            if isinstance(cell, dict):
+                                qtext = cell.get("qText", "")
+                                qnum = cell.get("qNum", None)
+                                if qtext or qnum is not None:
+                                    row_data.append({
+                                        "qText": qtext,
+                                        "qNum": qnum,
+                                        "qState": cell.get("qState", ""),
+                                        "qElemNumber": cell.get("qElemNumber", "")
+                                    })
+                                    total_cells += 1
+                        if row_data:
+                            matrix_data.append(row_data)
+
+            if matrix_data:
+                data_info["matrix_data"] = matrix_data
+                data_info["matrix_info"] = f"{len(matrix_data)} строк, {total_cells} ячеек"
+
+        # Проверяем qListObject для списков
+        listobj = layout.get("qListObject", {})
+        if listobj and "qDataPages" in listobj:
+            data_pages = listobj["qDataPages"]
+            list_values = []
+
+            for page in data_pages:
+                if "qMatrix" in page:
+                    matrix = page["qMatrix"]
+                    for row in matrix:
+                        for cell in row:
+                            if isinstance(cell, dict):
+                                qtext = cell.get("qText", "")
+                                qnum = cell.get("qNum", None)
+                                if qtext or qnum is not None:
+                                    list_values.append({
+                                        "qText": qtext,
+                                        "qNum": qnum,
+                                        "qState": cell.get("qState", ""),
+                                        "qElemNumber": cell.get("qElemNumber", "")
+                                    })
+
+            if list_values:
+                data_info["list_values"] = list_values
+                data_info["values"] = f"{len(list_values)} значений"
+
+        # Простые значения для KPI и других объектов
+        if not data_info:
+            # Ищем простые значения в корне layout
+            simple_values = []
+
+            # Проверяем различные места где могут быть значения
+            for key, value in layout.items():
+                if isinstance(value, dict):
+                    if "qText" in value or "qNum" in value:
+                        simple_values.append({
+                            "field": key,
+                            "qText": value.get("qText", ""),
+                            "qNum": value.get("qNum", None)
+                        })
+
+            if simple_values:
+                data_info["simple_values"] = simple_values
+                data_info["values"] = f"{len(simple_values)} простых значений"
+
+        return data_info
+
+    def analyze_all_objects(self, app_id: str, limit_objects: int = None) -> Dict[str, Any]:
         """Анализ всех объектов приложения с детальной информацией."""
         logger.info(f"=== ПОЛНЫЙ АНАЛИЗ ОБЪЕКТОВ ПРИЛОЖЕНИЯ {app_id} ===")
 
@@ -552,7 +644,10 @@ class QlikEngineTestClient:
         sheets = sheets_response.get("sheets", [])
         total_objects = sheets_response.get("total_objects", 0)
 
-        logger.info(f"🔍 Будет проанализировано до {limit_objects} объектов из {total_objects}")
+        if limit_objects:
+            logger.info(f"🔍 Будет проанализировано до {limit_objects} объектов из {total_objects}")
+        else:
+            logger.info(f"🔍 Будет проанализировано ВСЕ {total_objects} объектов")
 
         analyzed_objects = []
         processed_count = 0
@@ -565,7 +660,7 @@ class QlikEngineTestClient:
                 logger.info(f"--- Анализ листа: {sheet_title} ({len(objects)} объектов) ---")
 
                 for obj in objects:
-                    if processed_count >= limit_objects:
+                    if limit_objects and processed_count >= limit_objects:
                         logger.info(f"⏹️ Достигнут лимит анализа: {limit_objects} объектов")
                         break
 
@@ -581,11 +676,14 @@ class QlikEngineTestClient:
                     if "error" not in analysis:
                         analyzed_objects.append(analysis)
                         processed_count += 1
-                        logger.info(f"✅ Объект {processed_count}/{limit_objects} проанализирован")
+                        if limit_objects:
+                            logger.info(f"✅ Объект {processed_count}/{limit_objects} проанализирован")
+                        else:
+                            logger.info(f"✅ Объект {processed_count}/{total_objects} проанализирован")
                     else:
                         logger.error(f"❌ Ошибка анализа объекта {obj_id}: {analysis}")
 
-                if processed_count >= limit_objects:
+                if limit_objects and processed_count >= limit_objects:
                     break
 
         except Exception as e:
@@ -719,13 +817,13 @@ class QlikEngineTestClient:
         finally:
             self.disconnect()
 
-    def test_object_analysis(self, app_id: str, limit_objects: int = 3) -> bool:
+    def test_object_analysis(self, app_id: str) -> bool:
         """Тестирование детального анализа объектов."""
-        logger.info(f"=== ТЕСТ: Анализ объектов для {app_id} ===")
+        logger.info(f"=== ТЕСТ: Анализ ВСЕХ объектов для {app_id} ===")
 
         try:
             # Выполняем полный анализ объектов
-            analysis_response = self.analyze_all_objects(app_id, limit_objects)
+            analysis_response = self.analyze_all_objects(app_id)
 
             if "error" in analysis_response:
                 logger.error(f"❌ Ошибка анализа объектов: {analysis_response}")
@@ -741,10 +839,11 @@ class QlikEngineTestClient:
 
             logger.info(f"📊 Результат анализа: {total_analyzed}/{total_available} объектов")
 
-            # Выводим сводку по типам объектов
+                        # Выводим сводку по типам объектов
             type_counts = {}
             objects_with_measures = 0
             objects_with_dimensions = 0
+            objects_with_data = 0
 
             for obj in analyzed_objects:
                 obj_type = obj.get("type", "unknown")
@@ -754,10 +853,13 @@ class QlikEngineTestClient:
                     objects_with_measures += 1
                 if obj.get("dimensions"):
                     objects_with_dimensions += 1
+                if obj.get("data_info"):
+                    objects_with_data += 1
 
             logger.info(f"📈 Типы объектов: {dict(type_counts)}")
             logger.info(f"📏 Объектов с мерами: {objects_with_measures}")
             logger.info(f"📐 Объектов с измерениями: {objects_with_dimensions}")
+            logger.info(f"💾 Объектов с данными: {objects_with_data}")
 
             return True
 
@@ -800,7 +902,7 @@ def main():
             return
 
         # Тестируем детальный анализ объектов
-        if client.test_object_analysis(test_app_id, limit_objects=3):
+        if client.test_object_analysis(test_app_id):
             logger.info("✅ Тестирование анализа объектов прошло успешно")
         else:
             logger.error("❌ Тестирование анализа объектов провалилось")
