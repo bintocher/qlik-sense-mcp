@@ -501,6 +501,38 @@ class QlikEngineTestClient:
 
             # Показываем реальные данные
             self._log_object_data(data_info)
+        else:
+            # Если данные не найдены, проверяем есть ли qHyperCube с пустыми данными
+            hypercube = layout.get("qHyperCube", {})
+            if hypercube and "qDataPages" in hypercube:
+                data_pages = hypercube["qDataPages"]
+                if len(data_pages) == 0:
+                    logger.info(f"⚠️ qHyperCube найден но данные пустые, пробуем загрузить...")
+
+                    # Пытаемся загрузить данные HyperCube
+                    hypercube_response = self.get_hypercube_data(object_handle, max_rows=20)
+                    if "result" in hypercube_response and "qDataPages" in hypercube_response["result"]:
+                        loaded_pages = hypercube_response["result"]["qDataPages"]
+                        if loaded_pages:
+                            logger.info(f"✅ Загружены данные HyperCube: {len(loaded_pages)} страниц")
+
+                            # Обрабатываем загруженные данные
+                            loaded_data_info = self._extract_hypercube_pages(loaded_pages)
+                            if loaded_data_info:
+                                logger.info(f"💾 Загруженные данные:")
+                                if loaded_data_info.get("matrix_info"):
+                                    logger.info(f"  📋 Матрица: {loaded_data_info['matrix_info']}")
+                                self._log_object_data(loaded_data_info)
+                                data_info = loaded_data_info
+                        else:
+                            logger.info(f"⚠️ HyperCube загружен но данные все еще пустые")
+                    else:
+                        logger.info(f"❌ Не удалось загрузить данные HyperCube")
+
+            # Если все еще нет данных, показываем отладочную информацию
+            if not data_info:
+                logger.info(f"⚠️ Данные не найдены, проверяем структуру layout:")
+                self._debug_layout_structure(layout, object_type)
 
         return {
             "object_id": object_id,
@@ -514,6 +546,55 @@ class QlikEngineTestClient:
             "layout": layout,
             "properties": properties
         }
+
+    def get_hypercube_data(self, object_handle: int, max_rows: int = 100) -> Dict[str, Any]:
+        """Получение данных HyperCube для объекта."""
+        # Запрашиваем данные HyperCube
+        request_data = [{
+            "qLeft": 0,
+            "qTop": 0,
+            "qWidth": 100,  # Максимум колонок
+            "qHeight": max_rows
+        }]
+
+        response = self.send_request("GetHyperCubeData", ["/qHyperCubeDef", request_data], handle=object_handle)
+
+        if "result" not in response:
+            logger.error(f"❌ Ошибка получения данных HyperCube для handle {object_handle}: {response}")
+
+        return response
+
+    def _extract_hypercube_pages(self, data_pages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Извлечение данных из загруженных страниц HyperCube."""
+        data_info = {}
+        matrix_data = []
+        total_cells = 0
+
+        for page in data_pages:
+            if "qMatrix" in page:
+                matrix = page["qMatrix"]
+                for row in matrix:
+                    row_data = []
+                    for cell in row:
+                        if isinstance(cell, dict):
+                            qtext = cell.get("qText", "")
+                            qnum = cell.get("qNum", None)
+                            if qtext or qnum is not None:
+                                row_data.append({
+                                    "qText": qtext,
+                                    "qNum": qnum,
+                                    "qState": cell.get("qState", ""),
+                                    "qElemNumber": cell.get("qElemNumber", "")
+                                })
+                                total_cells += 1
+                    if row_data:
+                        matrix_data.append(row_data)
+
+        if matrix_data:
+            data_info["matrix_data"] = matrix_data
+            data_info["matrix_info"] = f"{len(matrix_data)} строк, {total_cells} ячеек"
+
+        return data_info
 
     def _extract_measures(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Извлечение мер из свойств объекта."""
@@ -691,6 +772,51 @@ class QlikEngineTestClient:
                     logger.info(f"    {field}: {qtext} ({qnum})")
                 else:
                     logger.info(f"    {field}: {qtext}")
+
+    def _debug_layout_structure(self, layout: Dict[str, Any], object_type: str) -> None:
+        """Отладочная информация о структуре layout."""
+        logger.info(f"  🔍 Ключи layout для {object_type}: {list(layout.keys())}")
+
+        # Ищем потенциальные места с данными
+        potential_data_keys = []
+        for key, value in layout.items():
+            if isinstance(value, dict):
+                if any(sub_key in value for sub_key in ["qDataPages", "qMatrix", "qText", "qNum"]):
+                    potential_data_keys.append(key)
+                # Также проверяем вложенные структуры
+                for sub_key, sub_value in value.items():
+                    if isinstance(sub_value, dict) and any(data_key in sub_value for data_key in ["qDataPages", "qMatrix"]):
+                        potential_data_keys.append(f"{key}.{sub_key}")
+
+        if potential_data_keys:
+            logger.info(f"  📋 Потенциальные источники данных: {potential_data_keys}")
+
+            # Показываем детали первого найденного источника
+            first_key = potential_data_keys[0]
+            if "." in first_key:
+                main_key, sub_key = first_key.split(".", 1)
+                data_source = layout.get(main_key, {}).get(sub_key, {})
+            else:
+                data_source = layout.get(first_key, {})
+
+            if "qDataPages" in data_source:
+                pages = data_source["qDataPages"]
+                logger.info(f"  📄 qDataPages: {len(pages)} страниц")
+                if pages and "qMatrix" in pages[0]:
+                    matrix = pages[0]["qMatrix"]
+                    logger.info(f"  📊 qMatrix: {len(matrix)} строк")
+                    if matrix:
+                        logger.info(f"  📝 Первая строка: {matrix[0]}")
+        else:
+            logger.info(f"  ❌ Не найдено потенциальных источников данных")
+            # Показываем несколько первых ключей для понимания структуры
+            sample_keys = list(layout.keys())[:5]
+            for key in sample_keys:
+                value = layout[key]
+                if isinstance(value, dict):
+                    logger.info(f"  📁 {key}: {list(value.keys())[:3]}...")
+                else:
+                    logger.info(f"  📝 {key}: {type(value).__name__}")
 
     def analyze_all_objects(self, app_id: str, limit_objects: int = None) -> Dict[str, Any]:
         """Анализ всех объектов приложения с детальной информацией."""
