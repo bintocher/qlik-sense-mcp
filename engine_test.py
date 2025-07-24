@@ -499,6 +499,9 @@ class QlikEngineTestClient:
             if data_info.get("matrix_info"):
                 logger.info(f"  📋 Матрица: {data_info['matrix_info']}")
 
+            # Показываем реальные данные
+            self._log_object_data(data_info)
+
         return {
             "object_id": object_id,
             "handle": object_handle,
@@ -631,6 +634,63 @@ class QlikEngineTestClient:
                 data_info["values"] = f"{len(simple_values)} простых значений"
 
         return data_info
+
+    def _log_object_data(self, data_info: Dict[str, Any]) -> None:
+        """Логирование реальных данных объекта (qText, qNum значения)."""
+
+        # Выводим данные матрицы (таблицы, графики)
+        if "matrix_data" in data_info:
+            matrix_data = data_info["matrix_data"]
+            logger.info(f"  🔢 Данные матрицы:")
+
+            for i, row in enumerate(matrix_data[:5], 1):  # Показываем первые 5 строк
+                row_values = []
+                for cell in row:
+                    qtext = cell.get("qText", "")
+                    qnum = cell.get("qNum", None)
+
+                    if qnum is not None:
+                        row_values.append(f"{qtext} ({qnum})")
+                    else:
+                        row_values.append(qtext)
+
+                logger.info(f"    {i}. {' | '.join(row_values)}")
+
+            if len(matrix_data) > 5:
+                logger.info(f"    ... и еще {len(matrix_data) - 5} строк")
+
+        # Выводим данные списка (фильтры, селекторы)
+        elif "list_values" in data_info:
+            list_values = data_info["list_values"]
+            logger.info(f"  📋 Значения списка:")
+
+            for i, value in enumerate(list_values[:10], 1):  # Показываем первые 10 значений
+                qtext = value.get("qText", "")
+                qnum = value.get("qNum", None)
+                qstate = value.get("qState", "")
+
+                if qnum is not None:
+                    logger.info(f"    {i}. {qtext} ({qnum}) [{qstate}]")
+                else:
+                    logger.info(f"    {i}. {qtext} [{qstate}]")
+
+            if len(list_values) > 10:
+                logger.info(f"    ... и еще {len(list_values) - 10} значений")
+
+        # Выводим простые значения (KPI)
+        elif "simple_values" in data_info:
+            simple_values = data_info["simple_values"]
+            logger.info(f"  💡 Простые значения:")
+
+            for value in simple_values:
+                field = value.get("field", "")
+                qtext = value.get("qText", "")
+                qnum = value.get("qNum", None)
+
+                if qnum is not None:
+                    logger.info(f"    {field}: {qtext} ({qnum})")
+                else:
+                    logger.info(f"    {field}: {qtext}")
 
     def analyze_all_objects(self, app_id: str, limit_objects: int = None) -> Dict[str, Any]:
         """Анализ всех объектов приложения с детальной информацией."""
