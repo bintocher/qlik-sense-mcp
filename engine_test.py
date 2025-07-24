@@ -18,12 +18,9 @@ load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('engine_test.log')
-    ]
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("engine_test.log")],
 )
 logger = logging.getLogger(__name__)
 
@@ -45,18 +42,14 @@ class QlikEngineTestClient:
         self.engine_port = int(os.getenv("QLIK_ENGINE_PORT", "4747"))
         self.verify_ssl = os.getenv("QLIK_VERIFY_SSL", "true").lower() == "true"
 
-        # Логируем конфигурацию (без секретных данных)
-        logger.info(f"Server URL: {self.server_url}")
-        logger.info(f"User Directory: {self.user_directory}")
-        logger.info(f"User ID: {self.user_id}")
-        logger.info(f"Engine Port: {self.engine_port}")
-        logger.info(f"Verify SSL: {self.verify_ssl}")
-        logger.info(f"Client Cert Path: {self.client_cert_path}")
-        logger.info(f"CA Cert Path: {self.ca_cert_path}")
+        # Логируем основную конфигурацию
+        logger.info(f"Подключение к: {self.server_url}:{self.engine_port} как {self.user_id}@{self.user_directory}")
 
         # Проверяем что все необходимые параметры заданы
         if not all([self.server_url, self.user_directory, self.user_id]):
-            raise ValueError("Отсутствуют обязательные переменные окружения: QLIK_SERVER_URL, QLIK_USER_DIRECTORY, QLIK_USER_ID")
+            raise ValueError(
+                "Отсутствуют обязательные переменные окружения: QLIK_SERVER_URL, QLIK_USER_DIRECTORY, QLIK_USER_ID"
+            )
 
         self.ws = None
         self.request_id = 0
@@ -72,10 +65,7 @@ class QlikEngineTestClient:
 
     def connect(self, app_id: str = None) -> bool:
         """Подключение к Engine API через WebSocket."""
-        logger.info(f"=== Подключение к Engine API {'для приложения ' + app_id if app_id else 'общее'} ===")
-
         server_host = self.server_url.replace("https://", "").replace("http://", "")
-        logger.info(f"Server host: {server_host}")
 
         # Если передан app_id - подключаемся к конкретному приложению
         if app_id:
@@ -97,24 +87,19 @@ class QlikEngineTestClient:
         # Настройка SSL контекста
         ssl_context = ssl.create_default_context()
         if not self.verify_ssl:
-            logger.warning("SSL верификация отключена")
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
         if self.client_cert_path and self.client_key_path:
-            logger.info(f"Загружаем клиентские сертификаты: {self.client_cert_path}")
             try:
                 ssl_context.load_cert_chain(self.client_cert_path, self.client_key_path)
-                logger.info("Клиентские сертификаты загружены успешно")
             except Exception as e:
                 logger.error(f"Ошибка загрузки клиентских сертификатов: {e}")
                 return False
 
         if self.ca_cert_path:
-            logger.info(f"Загружаем CA сертификат: {self.ca_cert_path}")
             try:
                 ssl_context.load_verify_locations(self.ca_cert_path)
-                logger.info("CA сертификат загружен успешно")
             except Exception as e:
                 logger.error(f"Ошибка загрузки CA сертификата: {e}")
                 return False
@@ -123,62 +108,50 @@ class QlikEngineTestClient:
         headers = [
             f"X-Qlik-User: UserDirectory={self.user_directory}; UserId={self.user_id}"
         ]
-        logger.info(f"Заголовки аутентификации: {headers}")
 
         # Пробуем подключиться к каждому эндпоинту
         last_error = None
         for i, url in enumerate(endpoints_to_try, 1):
-            logger.info(f"Попытка {i}/{len(endpoints_to_try)}: {url}")
             try:
                 if url.startswith("wss://"):
-                    logger.debug("Создаем WSS соединение")
                     self.ws = websocket.create_connection(
-                        url,
-                        sslopt={"context": ssl_context},
-                        header=headers,
-                        timeout=10
+                        url, sslopt={"context": ssl_context}, header=headers, timeout=10
                     )
                 else:
-                    logger.debug("Создаем WS соединение")
                     self.ws = websocket.create_connection(
-                        url,
-                        header=headers,
-                        timeout=10
+                        url, header=headers, timeout=10
                     )
 
                 # Получаем первое сообщение от сервера
-                logger.debug("Получаем первое сообщение от сервера")
                 initial_message = self.ws.recv()
-                logger.info(f"Первое сообщение от сервера: {initial_message}")
-
-                logger.info(f"✅ Успешно подключились к: {url}")
                 return True
 
             except Exception as e:
                 last_error = e
-                logger.warning(f"❌ Ошибка подключения к {url}: {e}")
                 if self.ws:
                     self.ws.close()
                     self.ws = None
                 continue
 
-        logger.error(f"Не удалось подключиться ни к одному эндпоинту. Последняя ошибка: {last_error}")
+        logger.error(
+            f"Не удалось подключиться ни к одному эндпоинту. Последняя ошибка: {last_error}"
+        )
         return False
 
     def disconnect(self) -> None:
         """Отключение от Engine API."""
-        logger.info("=== Отключение от Engine API ===")
         if self.ws:
             try:
                 self.ws.close()
-                logger.info("WebSocket соединение закрыто")
             except Exception as e:
                 logger.warning(f"Ошибка при закрытии WebSocket: {e}")
             self.ws = None
         self.app_handle = -1
         self.current_app_id = None
 
-    def send_request(self, method: str, params: List[Any] = None, handle: int = -1) -> Dict[str, Any]:
+    def send_request(
+        self, method: str, params: List[Any] = None, handle: int = -1
+    ) -> Dict[str, Any]:
         """Отправка JSON-RPC запроса к Engine API."""
         if not self.ws:
             logger.error("WebSocket соединение не установлено")
@@ -194,16 +167,12 @@ class QlikEngineTestClient:
             "id": request_id,
             "method": method,
             "handle": handle,
-            "params": params
+            "params": params,
         }
-
-        logger.debug(f">>> Отправляем запрос: {json.dumps(request, indent=2)}")
 
         try:
             self.ws.send(json.dumps(request))
             response_text = self.ws.recv()
-            logger.debug(f"<<< Получен ответ: {response_text}")
-
             response = json.loads(response_text)
 
             if "error" in response:
@@ -217,11 +186,8 @@ class QlikEngineTestClient:
 
     def open_app(self, app_id: str) -> Dict[str, Any]:
         """Открытие приложения (в контексте соединения с конкретным app_id)."""
-        logger.info(f"=== Открытие приложения {app_id} ===")
-
         # Если уже подключены к другому приложению - отключаемся
         if self.current_app_id and self.current_app_id != app_id:
-            logger.info(f"Отключаемся от текущего приложения {self.current_app_id}")
             self.disconnect()
 
         # Подключаемся к конкретному приложению
@@ -234,7 +200,6 @@ class QlikEngineTestClient:
 
         if "result" in response and "qReturn" in response["result"]:
             self.app_handle = response["result"]["qReturn"]["qHandle"]
-            logger.info(f"✅ Приложение открыто, handle: {self.app_handle}")
         else:
             logger.error(f"❌ Ошибка открытия приложения: {response}")
 
@@ -254,6 +219,169 @@ class QlikEngineTestClient:
 
         return self.send_request("GetDocList", [], handle=-1)
 
+    def create_sheet_list_object(self, doc_handle: int) -> Dict[str, Any]:
+        """Создание SessionObject для получения списка листов."""
+        logger.info(f"=== Создание объекта SheetList для документа handle: {doc_handle} ===")
+
+        sheet_list_def = {
+            "qInfo": {
+                "qType": "SheetList"
+            },
+            "qAppObjectListDef": {
+                "qType": "sheet",
+                "qData": {
+                    "title": "/qMetaDef/title",
+                    "description": "/qMetaDef/description",
+                    "thumbnail": "/thumbnail",
+                    "cells": "/cells",
+                    "rank": "/rank",
+                    "columns": "/columns",
+                    "rows": "/rows"
+                }
+            }
+        }
+
+        response = self.send_request("CreateSessionObject", [sheet_list_def], handle=doc_handle)
+
+        if "result" in response and "qReturn" in response["result"]:
+            sheet_list_handle = response["result"]["qReturn"]["qHandle"]
+            logger.info(f"✅ SheetList объект создан, handle: {sheet_list_handle}")
+        else:
+            logger.error(f"❌ Ошибка создания SheetList объекта: {response}")
+
+        return response
+
+    def get_layout(self, object_handle: int) -> Dict[str, Any]:
+        """Получение layout объекта по handle."""
+        logger.info(f"=== Получение layout для объекта handle: {object_handle} ===")
+
+        response = self.send_request("GetLayout", [], handle=object_handle)
+
+        if "result" in response and "qLayout" in response["result"]:
+            logger.info(f"✅ Layout получен для handle: {object_handle}")
+        else:
+            logger.error(f"❌ Ошибка получения layout: {response}")
+
+        return response
+
+    def get_sheets(self, app_id: str) -> Dict[str, Any]:
+        """Получение всех листов приложения."""
+        logger.info(f"=== Получение листов приложения {app_id} ===")
+
+        # Открываем приложение если не открыто
+        if not self.ws or self.current_app_id != app_id:
+            open_response = self.open_app(app_id)
+            if "error" in open_response:
+                return open_response
+
+        # Создаем объект SheetList
+        sheet_list_response = self.create_sheet_list_object(self.app_handle)
+        if "error" in sheet_list_response:
+            return sheet_list_response
+
+        sheet_list_handle = sheet_list_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с данными о листах
+        layout_response = self.get_layout(sheet_list_handle)
+        if "error" in layout_response:
+            return layout_response
+
+        # Извлекаем информацию о листах
+        if "result" in layout_response and "qLayout" in layout_response["result"]:
+            layout = layout_response["result"]["qLayout"]
+            if "qAppObjectList" in layout and "qItems" in layout["qAppObjectList"]:
+                sheets = layout["qAppObjectList"]["qItems"]
+                logger.info(f"✅ Найдено {len(sheets)} листов")
+
+                # Логируем краткую информацию о каждом листе
+                for i, sheet in enumerate(sheets, 1):
+                    title = sheet.get("qMeta", {}).get("title", "Без названия")
+                    sheet_id = sheet.get("qInfo", {}).get("qId", "Неизвестно")
+                    logger.info(f"  {i}. {title} (ID: {sheet_id})")
+
+                return {"sheets": sheets, "total_count": len(sheets)}
+            else:
+                logger.warning("❌ В ответе нет данных о листах")
+                return {"error": "No sheets data in response"}
+        else:
+            logger.error("❌ Некорректный ответ layout")
+            return {"error": "Invalid layout response"}
+
+    def create_sheet_object_list(self, doc_handle: int, sheet_id: str) -> Dict[str, Any]:
+        """Создание SessionObject для получения объектов конкретного листа."""
+        logger.info(f"=== Создание объекта для получения объектов листа {sheet_id} ===")
+
+        object_list_def = {
+            "qInfo": {
+                "qType": "SheetObjectList"
+            },
+            "qAppObjectListDef": {
+                "qType": "visualization",
+                "qFilter": f"qParent eq '{sheet_id}'",
+                "qData": {
+                    "title": "/qMetaDef/title",
+                    "description": "/qMetaDef/description",
+                    "objectType": "/qInfo/qType",
+                    "visualization": "/visualization",
+                    "showTitles": "/showTitles"
+                }
+            }
+        }
+
+        response = self.send_request("CreateSessionObject", [object_list_def], handle=doc_handle)
+
+        if "result" in response and "qReturn" in response["result"]:
+            object_list_handle = response["result"]["qReturn"]["qHandle"]
+            logger.info(f"✅ SheetObjectList создан, handle: {object_list_handle}")
+        else:
+            logger.error(f"❌ Ошибка создания SheetObjectList: {response}")
+
+        return response
+
+    def get_sheet_objects(self, app_id: str, sheet_id: str) -> Dict[str, Any]:
+        """Получение всех объектов конкретного листа."""
+        logger.info(f"=== Получение объектов листа {sheet_id} в приложении {app_id} ===")
+
+        # Открываем приложение если не открыто
+        if not self.ws or self.current_app_id != app_id:
+            open_response = self.open_app(app_id)
+            if "error" in open_response:
+                return open_response
+
+        # Создаем объект SheetObjectList
+        object_list_response = self.create_sheet_object_list(self.app_handle, sheet_id)
+        if "error" in object_list_response:
+            return object_list_response
+
+        object_list_handle = object_list_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с данными об объектах
+        layout_response = self.get_layout(object_list_handle)
+        if "error" in layout_response:
+            return layout_response
+
+        # Извлекаем информацию об объектах
+        if "result" in layout_response and "qLayout" in layout_response["result"]:
+            layout = layout_response["result"]["qLayout"]
+            if "qAppObjectList" in layout and "qItems" in layout["qAppObjectList"]:
+                objects = layout["qAppObjectList"]["qItems"]
+                logger.info(f"✅ Найдено {len(objects)} объектов на листе")
+
+                # Логируем краткую информацию о каждом объекте
+                for i, obj in enumerate(objects, 1):
+                    title = obj.get("qMeta", {}).get("title", "Без названия")
+                    obj_type = obj.get("qData", {}).get("objectType", "Неизвестно")
+                    obj_id = obj.get("qInfo", {}).get("qId", "Неизвестно")
+                    logger.info(f"  {i}. {title} ({obj_type}, ID: {obj_id})")
+
+                return {"objects": objects, "total_count": len(objects)}
+            else:
+                logger.warning("❌ В ответе нет данных об объектах")
+                return {"error": "No objects data in response"}
+        else:
+            logger.error("❌ Некорректный ответ layout")
+            return {"error": "Invalid layout response"}
+
     def test_basic_connection(self) -> bool:
         """Тестирование базового подключения."""
         logger.info("=== ТЕСТ: Базовое подключение ===")
@@ -261,7 +389,7 @@ class QlikEngineTestClient:
         try:
             # Получаем список документов
             doc_list = self.get_doc_list()
-            logger.info(f"Список документов: {json.dumps(doc_list, indent=2)}")
+            #logger.info(f"Список документов: {json.dumps(doc_list, indent=2)}")
 
             return "result" in doc_list and "qDocList" in doc_list["result"]
 
@@ -307,7 +435,7 @@ class QlikEngineTestClient:
         # Тестовые ID документов
         test_apps = [
             "e2958865-2aed-4f8a-b3c7-20e6f21d275c",  # dashboard
-            "f43e5489-4fd6-4903-83d4-a2d999f983b2"   # dashboard(1)
+            "f43e5489-4fd6-4903-83d4-a2d999f983b2",  # dashboard(1)
         ]
 
         success_count = 0
@@ -340,8 +468,57 @@ class QlikEngineTestClient:
                 logger.error(f"💥 Исключение при открытии документа {i}: {e}")
                 self.disconnect()
 
-        logger.info(f"Результат: {success_count}/{len(test_apps)} документов обработано успешно")
+        logger.info(
+            f"Результат: {success_count}/{len(test_apps)} документов обработано успешно"
+        )
         return success_count == len(test_apps)
+
+    def test_sheets_and_objects(self, app_id: str) -> bool:
+        """Тестирование получения листов и объектов приложения."""
+        logger.info(f"=== ТЕСТ: Получение листов и объектов для {app_id} ===")
+
+        try:
+            # Получаем листы
+            sheets_response = self.get_sheets(app_id)
+
+            if "error" in sheets_response:
+                logger.error(f"❌ Ошибка получения листов: {sheets_response}")
+                return False
+
+            sheets = sheets_response.get("sheets", [])
+            if not sheets:
+                logger.warning("⚠️ В приложении нет листов")
+                return True
+
+            logger.info(f"📋 Обработка {len(sheets)} листов:")
+
+            # Получаем объекты для каждого листа (только для первых 2 листов)
+            for i, sheet in enumerate(sheets[:2], 1):
+                sheet_id = sheet.get("qInfo", {}).get("qId")
+                sheet_title = sheet.get("qMeta", {}).get("title", "Без названия")
+
+                if not sheet_id:
+                    logger.warning(f"⚠️ Лист {i} не имеет ID, пропускаем")
+                    continue
+
+                logger.info(f"--- Анализ листа {i}: {sheet_title} ---")
+
+                objects_response = self.get_sheet_objects(app_id, sheet_id)
+
+                if "error" in objects_response:
+                    logger.error(f"❌ Ошибка получения объектов листа {sheet_title}: {objects_response}")
+                    continue
+
+                objects = objects_response.get("objects", [])
+                logger.info(f"📊 На листе '{sheet_title}' найдено {len(objects)} объектов")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"💥 Исключение в тесте листов и объектов: {e}")
+            return False
+        finally:
+            self.disconnect()
 
 
 def main():
@@ -365,10 +542,19 @@ def main():
             logger.info("✅ Тестирование открытия документов прошло успешно")
         else:
             logger.error("❌ Тестирование открытия документов провалилось")
+            return
+
+        # Тестируем получение листов и объектов
+        test_app_id = "e2958865-2aed-4f8a-b3c7-20e6f21d275c"  # dashboard
+        if client.test_sheets_and_objects(test_app_id):
+            logger.info("✅ Тестирование листов и объектов прошло успешно")
+        else:
+            logger.error("❌ Тестирование листов и объектов провалилось")
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
         import traceback
+
         logger.error(f"Трассировка: {traceback.format_exc()}")
 
     logger.info("🏁 Завершение тестирования")
