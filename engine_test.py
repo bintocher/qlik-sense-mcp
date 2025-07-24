@@ -452,6 +452,181 @@ class QlikEngineTestClient:
 
         return result
 
+    def create_variable_list_object(self, doc_handle: int) -> Dict[str, Any]:
+        """Создание объекта VariableList для получения переменных."""
+        request_data = {
+            "qInfo": {
+                "qType": "VariableList"
+            },
+            "qVariableListDef": {
+                "qType": "variable",
+                "qShowReserved": True,
+                "qShowConfig": True,
+                "qData": {
+                    "tags": "/tags"
+                }
+            }
+        }
+
+        response = self.send_request("CreateSessionObject", [request_data], handle=doc_handle)
+
+        if "result" not in response or "qReturn" not in response["result"]:
+            logger.error(f"❌ Ошибка создания VariableList: {response}")
+
+        return response
+
+    def get_variables(self, app_id: str) -> Dict[str, Any]:
+        """Получение всех переменных приложения."""
+        logger.info(f"=== Получение переменных приложения {app_id} ===")
+
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Создаем объект VariableList
+        variable_list_response = self.create_variable_list_object(self.app_handle)
+        if "error" in variable_list_response:
+            return {"error": f"Failed to create VariableList: {variable_list_response}"}
+
+        variable_list_handle = variable_list_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с данными
+        layout_response = self.get_layout(variable_list_handle)
+        if "error" in layout_response:
+            return {"error": f"Failed to get VariableList layout: {layout_response}"}
+
+        layout = layout_response.get("result", {}).get("qLayout", {})
+        variable_list = layout.get("qVariableList", {})
+        variables = variable_list.get("qItems", [])
+
+        logger.info(f"✅ Найдено {len(variables)} переменных")
+
+        result = {
+            "variables": variables,
+            "count": len(variables)
+        }
+
+        return result
+
+    def get_variable_by_id(self, app_id: str, variable_id: str) -> Dict[str, Any]:
+        """Получение конкретной переменной по ID."""
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Получаем переменную
+        response = self.send_request("GetVariableById", {"qId": variable_id}, handle=self.app_handle)
+
+        if "result" not in response or "qReturn" not in response["result"]:
+            logger.error(f"❌ Ошибка получения переменной {variable_id}: {response}")
+            return {"error": f"Failed to get variable: {response}"}
+
+        return response
+
+    def get_variable_value(self, app_id: str, variable_id: str) -> Dict[str, Any]:
+        """Получение значения переменной."""
+        # Получаем переменную
+        variable_response = self.get_variable_by_id(app_id, variable_id)
+        if "error" in variable_response:
+            return variable_response
+
+        variable_handle = variable_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с текущим значением
+        layout_response = self.get_layout(variable_handle)
+        if "error" in layout_response:
+            return {"error": f"Failed to get variable value layout: {layout_response}"}
+
+        layout = layout_response.get("result", {}).get("qLayout", {})
+
+        result = {
+            "qText": layout.get("qText", ""),
+            "qNum": layout.get("qNum", None),
+            "qIsScriptCreated": layout.get("qIsScriptCreated", False),
+            "info": layout.get("qInfo", {}),
+            "meta": layout.get("qMeta", {})
+        }
+
+        return result
+
+    def analyze_variables(self, app_id: str) -> Dict[str, Any]:
+        """Полный анализ всех переменных приложения."""
+        logger.info(f"=== АНАЛИЗ ПЕРЕМЕННЫХ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        result = {
+            "variables": [],
+            "user_variables": [],
+            "system_variables": [],
+            "script_variables": [],
+            "summary": {}
+        }
+
+        # Получаем все переменные
+        variables_result = self.get_variables(app_id)
+        if "error" in variables_result:
+            logger.error(f"❌ Ошибка получения переменных: {variables_result}")
+            return variables_result
+
+        variables = variables_result.get("variables", [])
+        result["variables"] = variables
+
+        if not variables:
+            logger.info("📝 Переменные в приложении не найдены")
+            return result
+
+        logger.info(f"📝 Анализ переменных ({len(variables)}):")
+
+        for i, variable in enumerate(variables, 1):
+            var_name = variable.get("qName", "")
+            var_definition = variable.get("qDefinition", "")
+            var_id = variable.get("qInfo", {}).get("qId", "")
+            is_reserved = variable.get("qIsReserved", False)
+            is_script_created = variable.get("qIsScriptCreated", False)
+
+            logger.info(f"  {i}. {var_name}")
+            if var_definition:
+                logger.info(f"     🧮 Определение: {var_definition}")
+
+            # Получаем текущее значение переменной
+            if var_id:
+                value_result = self.get_variable_value(app_id, var_id)
+                if "error" not in value_result:
+                    qtext = value_result.get("qText", "")
+                    qnum = value_result.get("qNum", None)
+
+                    if qtext:
+                        logger.info(f"     💾 Значение (текст): {qtext}")
+                    if qnum is not None:
+                        logger.info(f"     🔢 Значение (число): {qnum}")
+
+            # Дополнительная информация
+            if is_reserved:
+                logger.info(f"     🔒 Системная переменная")
+                result["system_variables"].append(variable)
+            else:
+                result["user_variables"].append(variable)
+
+            if is_script_created:
+                logger.info(f"     📜 Создана в скрипте")
+                result["script_variables"].append(variable)
+
+        # Сводка
+        result["summary"] = {
+            "total_variables": len(variables),
+            "user_variables": len(result["user_variables"]),
+            "system_variables": len(result["system_variables"]),
+            "script_variables": len(result["script_variables"])
+        }
+
+        summary = result["summary"]
+        logger.info(f"📊 Сводка переменных:")
+        logger.info(f"  📝 Всего переменных: {summary['total_variables']}")
+        logger.info(f"  👤 Пользовательские: {summary['user_variables']}")
+        logger.info(f"  🔒 Системные: {summary['system_variables']}")
+        logger.info(f"  📜 Из скрипта: {summary['script_variables']}")
+
+        return result
+
     def get_layout(self, object_handle: int) -> Dict[str, Any]:
         """Получение layout объекта по handle."""
         response = self.send_request("GetLayout", [], handle=object_handle)
@@ -1228,6 +1403,10 @@ def main():
         # Тест 4: Анализ мастер-элементов
         logger.info(f"=== ТЕСТ: Анализ мастер-элементов для {test_app_id} ===")
         client.analyze_master_items(test_app_id)
+
+        # Тест 5: Анализ переменных
+        logger.info(f"=== ТЕСТ: Анализ переменных для {test_app_id} ===")
+        client.analyze_variables(test_app_id)
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
