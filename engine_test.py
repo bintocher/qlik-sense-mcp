@@ -1704,6 +1704,309 @@ class QlikEngineTestClient:
         finally:
             self.disconnect()
 
+    def analyze_field_usage(self, app_id: str) -> Dict[str, Any]:
+        """Анализ использования каждого поля модели данных в приложении."""
+        logger.info(f"=== АНАЛИЗ ИСПОЛЬЗОВАНИЯ ПОЛЕЙ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        result = {
+            "fields": {},
+            "summary": {
+                "total_fields": 0,
+                "used_fields": 0,
+                "unused_fields": 0
+            }
+        }
+
+        # Получаем модель данных
+        logger.info("🔍 Получение модели данных...")
+        data_model = self.analyze_data_model(app_id, include_samples=False)
+        if "error" in data_model:
+            return data_model
+
+        # Получаем все объекты
+        logger.info("🔍 Получение объектов приложения...")
+        objects_data = self.analyze_all_objects(app_id)
+        if "error" in objects_data:
+            return objects_data
+
+        # Получаем все переменные
+        logger.info("🔍 Получение переменных...")
+        variables_data = self.analyze_variables(app_id)
+        if "error" in variables_data:
+            return variables_data
+
+        # Получаем мастер-элементы
+        logger.info("🔍 Получение мастер-элементов...")
+        master_items = self.analyze_master_items(app_id)
+        if "error" in master_items:
+            return master_items
+
+        # Получаем листы для контекста
+        logger.info("🔍 Получение листов...")
+        sheets_data = self.get_sheets_with_objects(app_id)
+        if "error" in sheets_data:
+            return sheets_data
+
+        # Создаем маппинг sheet_id -> sheet_name и object_id -> sheet_info
+        sheets_info = {}
+        object_to_sheet = {}
+
+        if "sheets" in sheets_data:
+            for sheet in sheets_data["sheets"]:
+                sheet_id = sheet.get("sheet_id", "")
+                sheet_name = sheet.get("title", sheet.get("sheet_name", ""))
+
+                if sheet_id:
+                    sheets_info[sheet_id] = sheet_name
+
+                    # Создаем маппинг для каждого объекта на листе
+                    for obj in sheet.get("objects", []):
+                        obj_id = obj.get("name", "")
+                        if obj_id:
+                            object_to_sheet[obj_id] = {
+                                "sheet_id": sheet_id,
+                                "sheet_name": sheet_name
+                            }
+
+                # Анализируем каждое поле
+        logger.info("📊 Анализ использования полей:")
+
+        for table in data_model.get("tables", []):
+            table_name = table.get("name", "")
+
+            for field in table.get("fields", []):
+                field_name = field.get("name", "")
+                if not field_name:
+                    continue
+
+                logger.info(f"🔍 Проверяем поле: {field_name} из таблицы {table_name}")
+
+                field_key = f"{table_name}.{field_name}"
+                result["fields"][field_key] = {
+                    "table": table_name,
+                    "field": field_name,
+                    "data_type": field.get("data_type", "unknown"),
+                    "total_rows": field.get("total_rows", 0),
+                    "distinct_values": field.get("distinct_values", 0),
+                    "usage": {
+                        "objects": [],
+                        "variables": [],
+                        "master_measures": [],
+                        "master_dimensions": [],
+                        "is_used": False
+                    }
+                }
+
+                field_usage = result["fields"][field_key]["usage"]
+
+                # Проверяем использование в объектах
+                for obj_data in objects_data.get("analyzed_objects", []):
+                    obj_id = obj_data.get("object_id", "")
+                    obj_name = obj_data.get("title", "")  # analyze_object возвращает "title", а не "object_name"
+                    obj_type = obj_data.get("type", "")   # analyze_object возвращает "type", а не "object_type"
+
+                    # Получаем информацию о листе для этого объекта
+                    sheet_info = object_to_sheet.get(obj_id, {})
+                    sheet_id = sheet_info.get("sheet_id", "")
+                    sheet_name = sheet_info.get("sheet_name", "Неизвестный лист")
+
+                    measures = obj_data.get("measures", [])
+                    dimensions = obj_data.get("dimensions", [])
+
+                    logger.info(f"  🔍 Объект {obj_id} ({obj_type}) на листе '{sheet_name}': {len(measures)} мер, {len(dimensions)} измерений")
+
+                    # Проверяем в мерах
+                    for measure in measures:
+                        # Извлекаем формулу и название из структуры Qlik
+                        measure_formula = measure.get("qDef", {}).get("qDef", "")
+                        measure_name = measure.get("qDef", {}).get("qLabel", "")
+
+                        logger.info(f"    🔍 Мера: '{measure_name}', формула: '{measure_formula}'")
+
+                        # Проверяем по имени поля (без таблицы) и в квадратных скобках
+                        # Также проверяем если формула пустая, но название меры совпадает с полем
+                        if (field_name in measure_formula or
+                            f"[{field_name}]" in measure_formula or
+                            f" {field_name}" in measure_formula or
+                            f"({field_name}" in measure_formula or
+                            f"({field_name})" in measure_formula or
+                            measure_formula == field_name or
+                            measure_name == field_name or
+                            measure_formula == f"[{field_name}]"):
+
+                            logger.info(f"    ✅ Найдено совпадение для поля '{field_name}'!")
+                            field_usage["objects"].append({
+                                "object_id": obj_id,
+                                "object_name": obj_name,
+                                "object_type": obj_type,
+                                "sheet_id": sheet_id,
+                                "sheet_name": sheet_name,
+                                "usage_type": "measure",
+                                "formula": measure_formula or measure_name
+                            })
+                            field_usage["is_used"] = True
+
+                    # Проверяем в измерениях
+                    for dimension in dimensions:
+                        # Извлекаем формулу и название из структуры Qlik
+                        dimension_formula = dimension.get("qDef", {}).get("qFieldDefs", [""])[0] if dimension.get("qDef", {}).get("qFieldDefs") else ""
+                        dimension_name = dimension.get("qDef", {}).get("qLabel", "")
+
+                        logger.info(f"    🔍 Измерение: '{dimension_name}', формула: '{dimension_formula}'")
+
+                        # Проверяем по имени поля (без таблицы) и в квадратных скобках
+                        # Также проверяем если формула пустая, но название измерения совпадает с полем
+                        if (field_name in dimension_formula or
+                            f"[{field_name}]" in dimension_formula or
+                            f" {field_name}" in dimension_formula or
+                            f"({field_name}" in dimension_formula or
+                            f"({field_name})" in dimension_formula or
+                            dimension_formula == field_name or
+                            dimension_name == field_name or
+                            dimension_formula == f"[{field_name}]"):
+
+                            logger.info(f"    ✅ Найдено совпадение для поля '{field_name}'!")
+                            field_usage["objects"].append({
+                                "object_id": obj_id,
+                                "object_name": obj_name,
+                                "object_type": obj_type,
+                                "sheet_id": sheet_id,
+                                "sheet_name": sheet_name,
+                                "usage_type": "dimension",
+                                "formula": dimension_formula or dimension_name
+                            })
+                            field_usage["is_used"] = True
+
+                                # Проверяем использование в переменных
+                for variable in variables_data.get("variables", []):
+                    var_name = variable.get("qName", "")
+                    var_definition = variable.get("qDefinition", "")
+
+                    # Проверяем по имени поля (без таблицы) и в квадратных скобках
+                    if (field_name in var_definition or
+                        f"[{field_name}]" in var_definition or
+                        f" {field_name}" in var_definition or
+                        f"({field_name}" in var_definition or
+                        f"({field_name})" in var_definition):
+                        field_usage["variables"].append({
+                            "variable_name": var_name,
+                            "definition": var_definition
+                        })
+                        field_usage["is_used"] = True
+
+                                # Проверяем использование в мастер-мерах
+                for measure in master_items.get("measures", []):
+                    measure_name = measure.get("qMeta", {}).get("title", "")
+                    measure_def = measure.get("qMeasure", {}).get("qDef", "")
+
+                    # Проверяем по имени поля (без таблицы) и в квадратных скобках
+                    if (field_name in measure_def or
+                        f"[{field_name}]" in measure_def or
+                        f" {field_name}" in measure_def or
+                        f"({field_name}" in measure_def or
+                        f"({field_name})" in measure_def):
+                        field_usage["master_measures"].append({
+                            "measure_name": measure_name,
+                            "definition": measure_def
+                        })
+                        field_usage["is_used"] = True
+
+                                # Проверяем использование в мастер-измерениях
+                for dimension in master_items.get("dimensions", []):
+                    dimension_name = dimension.get("qMeta", {}).get("title", "")
+                    field_defs = dimension.get("qDim", {}).get("qFieldDefs", [])
+
+                    for field_def in field_defs:
+                        # Проверяем по имени поля (без таблицы) и в квадратных скобках
+                        if (field_name in field_def or
+                            f"[{field_name}]" in field_def or
+                            f" {field_name}" in field_def or
+                            f"({field_name}" in field_def or
+                            f"({field_name})" in field_def):
+                            field_usage["master_dimensions"].append({
+                                "dimension_name": dimension_name,
+                                "field_definition": field_def
+                            })
+                            field_usage["is_used"] = True
+
+                # Обновляем счетчики
+                result["summary"]["total_fields"] += 1
+                if field_usage["is_used"]:
+                    result["summary"]["used_fields"] += 1
+                else:
+                    result["summary"]["unused_fields"] += 1
+
+        # Выводим результаты
+        logger.info(f"\n📊 Результаты анализа использования полей:")
+
+        used_fields = {k: v for k, v in result["fields"].items() if v["usage"]["is_used"]}
+        unused_fields = {k: v for k, v in result["fields"].items() if not v["usage"]["is_used"]}
+
+        # Показываем используемые поля
+        if used_fields:
+            logger.info(f"\n✅ ИСПОЛЬЗУЕМЫЕ ПОЛЯ ({len(used_fields)}):")
+            for field_key, field_data in used_fields.items():
+                table_name = field_data["table"]
+                field_name = field_data["field"]
+                data_type = field_data["data_type"]
+                usage = field_data["usage"]
+
+                logger.info(f"\n  📊 {table_name}.{field_name} ({data_type})")
+
+                # Объекты
+                if usage["objects"]:
+                    logger.info(f"    🎯 Используется в {len(usage['objects'])} объектах:")
+                    for obj in usage["objects"]:
+                        sheet_info = f" на листе '{obj['sheet_name']}'" if obj["sheet_name"] and obj["sheet_name"] != "Неизвестный лист" else ""
+                        logger.info(f"      - {obj['object_type']} '{obj['object_name']}' (ID: {obj['object_id']}){sheet_info}")
+                        if obj.get('formula'):
+                            logger.info(f"        📝 Формула: {obj['formula']}")
+
+                # Переменные
+                if usage["variables"]:
+                    logger.info(f"    📝 Используется в {len(usage['variables'])} переменных:")
+                    for var in usage["variables"]:
+                        logger.info(f"      - {var['variable_name']}")
+                        if var.get('definition'):
+                            logger.info(f"        📝 Определение: {var['definition']}")
+
+                # Мастер-меры
+                if usage["master_measures"]:
+                    logger.info(f"    📏 Используется в {len(usage['master_measures'])} мастер-мерах:")
+                    for measure in usage["master_measures"]:
+                        logger.info(f"      - {measure['measure_name']}")
+                        if measure.get('definition'):
+                            logger.info(f"        📝 Определение: {measure['definition']}")
+
+                # Мастер-измерения
+                if usage["master_dimensions"]:
+                    logger.info(f"    📐 Используется в {len(usage['master_dimensions'])} мастер-измерениях:")
+                    for dim in usage["master_dimensions"]:
+                        logger.info(f"      - {dim['dimension_name']}")
+                        if dim.get('field_definition'):
+                            logger.info(f"        📝 Определение: {dim['field_definition']}")
+
+        # Показываем неиспользуемые поля
+        if unused_fields:
+            logger.info(f"\n❌ НЕИСПОЛЬЗУЕМЫЕ ПОЛЯ ({len(unused_fields)}):")
+            for field_key, field_data in unused_fields.items():
+                table_name = field_data["table"]
+                field_name = field_data["field"]
+                data_type = field_data["data_type"]
+                distinct_values = field_data["distinct_values"]
+
+                logger.info(f"  🚫 {table_name}.{field_name} ({data_type}) - {distinct_values:,} уникальных значений")
+                logger.info(f"      💡 Поле не используется ни в объектах, ни в переменных, ни в мастер-элементах")
+
+        # Сводка
+        summary = result["summary"]
+        logger.info(f"\n📈 Сводка использования полей:")
+        logger.info(f"  📊 Всего полей: {summary['total_fields']}")
+        logger.info(f"  ✅ Используемых: {summary['used_fields']} ({summary['used_fields']/summary['total_fields']*100:.1f}%)")
+        logger.info(f"  ❌ Неиспользуемых: {summary['unused_fields']} ({summary['unused_fields']/summary['total_fields']*100:.1f}%)")
+
+        return result
+
 
 def main():
     """Основная функция для тестирования."""
@@ -1757,6 +2060,10 @@ def main():
         # Тест 7: Анализ модели данных
         logger.info(f"=== ТЕСТ: Анализ модели данных для {test_app_id} ===")
         client.analyze_data_model(test_app_id)
+
+        # Тест 8: Анализ использования полей
+        logger.info(f"=== ТЕСТ: Анализ использования полей для {test_app_id} ===")
+        client.analyze_field_usage(test_app_id)
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
