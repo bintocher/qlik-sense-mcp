@@ -248,6 +248,210 @@ class QlikEngineTestClient:
 
         return response
 
+    def create_measure_list_object(self, doc_handle: int) -> Dict[str, Any]:
+        """Создание объекта MeasureList для получения мастер-мер."""
+        request_data = {
+            "qInfo": {
+                "qType": "MeasureList"
+            },
+            "qMeasureListDef": {
+                "qType": "measure",
+                "qData": {
+                    "title": "/title",
+                    "tags": "/tags",
+                    "description": "/qMeta/description",
+                    "expression": "/qMeasure/qDef"
+                }
+            }
+        }
+
+        response = self.send_request("CreateSessionObject", [request_data], handle=doc_handle)
+
+        if "result" not in response or "qReturn" not in response["result"]:
+            logger.error(f"❌ Ошибка создания MeasureList: {response}")
+
+        return response
+
+    def create_dimension_list_object(self, doc_handle: int) -> Dict[str, Any]:
+        """Создание объекта DimensionList для получения мастер-измерений."""
+        request_data = {
+            "qInfo": {
+                "qType": "DimensionList"
+            },
+            "qDimensionListDef": {
+                "qType": "dimension",
+                "qData": {
+                    "title": "/title",
+                    "tags": "/tags",
+                    "grouping": "/qDim/qGrouping",
+                    "info": "/qDimInfos",
+                    "description": "/qMeta/description",
+                    "expression": "/qDim/qFieldDefs"
+                }
+            }
+        }
+
+        response = self.send_request("CreateSessionObject", [request_data], handle=doc_handle)
+
+        if "result" not in response or "qReturn" not in response["result"]:
+            logger.error(f"❌ Ошибка создания DimensionList: {response}")
+
+        return response
+
+    def get_master_measures(self, app_id: str) -> Dict[str, Any]:
+        """Получение всех мастер-мер приложения."""
+        logger.info(f"=== Получение мастер-мер приложения {app_id} ===")
+
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Создаем объект MeasureList
+        measure_list_response = self.create_measure_list_object(self.app_handle)
+        if "error" in measure_list_response:
+            return {"error": f"Failed to create MeasureList: {measure_list_response}"}
+
+        measure_list_handle = measure_list_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с данными
+        layout_response = self.get_layout(measure_list_handle)
+        if "error" in layout_response:
+            return {"error": f"Failed to get MeasureList layout: {layout_response}"}
+
+        layout = layout_response.get("result", {}).get("qLayout", {})
+        measure_list = layout.get("qMeasureList", {})
+        measures = measure_list.get("qItems", [])
+
+        logger.info(f"✅ Найдено {len(measures)} мастер-мер")
+
+        result = {
+            "measures": measures,
+            "count": len(measures)
+        }
+
+        return result
+
+    def get_master_dimensions(self, app_id: str) -> Dict[str, Any]:
+        """Получение всех мастер-измерений приложения."""
+        logger.info(f"=== Получение мастер-измерений приложения {app_id} ===")
+
+        # Открываем приложение
+        if self.current_app_id != app_id:
+            self.open_app(app_id)
+
+        # Создаем объект DimensionList
+        dimension_list_response = self.create_dimension_list_object(self.app_handle)
+        if "error" in dimension_list_response:
+            return {"error": f"Failed to create DimensionList: {dimension_list_response}"}
+
+        dimension_list_handle = dimension_list_response["result"]["qReturn"]["qHandle"]
+
+        # Получаем layout с данными
+        layout_response = self.get_layout(dimension_list_handle)
+        if "error" in layout_response:
+            return {"error": f"Failed to get DimensionList layout: {layout_response}"}
+
+        layout = layout_response.get("result", {}).get("qLayout", {})
+        dimension_list = layout.get("qDimensionList", {})
+        dimensions = dimension_list.get("qItems", [])
+
+        logger.info(f"✅ Найдено {len(dimensions)} мастер-измерений")
+
+        result = {
+            "dimensions": dimensions,
+            "count": len(dimensions)
+        }
+
+        return result
+
+    def analyze_master_items(self, app_id: str) -> Dict[str, Any]:
+        """Полный анализ мастер-мер и мастер-измерений приложения."""
+        logger.info(f"=== АНАЛИЗ МАСТЕР-ЭЛЕМЕНТОВ ПРИЛОЖЕНИЯ {app_id} ===")
+
+        result = {
+            "measures": [],
+            "dimensions": [],
+            "summary": {}
+        }
+
+        # Получаем мастер-меры
+        measures_result = self.get_master_measures(app_id)
+        if "error" not in measures_result:
+            measures = measures_result.get("measures", [])
+            result["measures"] = measures
+
+            logger.info(f"📏 Анализ мастер-мер ({len(measures)}):")
+            for i, measure in enumerate(measures, 1):
+                info = measure.get("qInfo", {})
+                meta = measure.get("qMeta", {})
+                data = measure.get("qData", {})
+
+                title = meta.get("title", "Без названия")
+                description = meta.get("description", "")
+                measure_def = measure.get("qMeasure", {}).get("qDef", "")
+
+                logger.info(f"  {i}. {title}")
+                if description:
+                    logger.info(f"     📝 Описание: {description}")
+                if measure_def:
+                    logger.info(f"     🧮 Формула: {measure_def}")
+
+                # Дополнительная информация
+                created = meta.get("createdDate", "")
+                modified = meta.get("modifiedDate", "")
+                published = meta.get("published", False)
+                if created:
+                    logger.info(f"     📅 Создана: {created}")
+                if published:
+                    logger.info(f"     ✅ Опубликована")
+
+        # Получаем мастер-измерения
+        dimensions_result = self.get_master_dimensions(app_id)
+        if "error" not in dimensions_result:
+            dimensions = dimensions_result.get("dimensions", [])
+            result["dimensions"] = dimensions
+
+            logger.info(f"📐 Анализ мастер-измерений ({len(dimensions)}):")
+            for i, dimension in enumerate(dimensions, 1):
+                info = dimension.get("qInfo", {})
+                meta = dimension.get("qMeta", {})
+                data = dimension.get("qData", {})
+
+                title = meta.get("title", "Без названия")
+                description = meta.get("description", "")
+                dim_def = dimension.get("qDim", {})
+                field_defs = dim_def.get("qFieldDefs", [])
+
+                logger.info(f"  {i}. {title}")
+                if description:
+                    logger.info(f"     📝 Описание: {description}")
+                if field_defs:
+                    logger.info(f"     🏷️ Поля: {', '.join(field_defs)}")
+
+                # Дополнительная информация
+                created = meta.get("createdDate", "")
+                modified = meta.get("modifiedDate", "")
+                published = meta.get("published", False)
+                if created:
+                    logger.info(f"     📅 Создано: {created}")
+                if published:
+                    logger.info(f"     ✅ Опубликовано")
+
+        # Сводка
+        result["summary"] = {
+            "total_measures": len(result["measures"]),
+            "total_dimensions": len(result["dimensions"]),
+            "published_measures": sum(1 for m in result["measures"] if m.get("qMeta", {}).get("published", False)),
+            "published_dimensions": sum(1 for d in result["dimensions"] if d.get("qMeta", {}).get("published", False))
+        }
+
+        summary = result["summary"]
+        logger.info(f"📊 Сводка мастер-элементов:")
+        logger.info(f"  📏 Мастер-меры: {summary['total_measures']} (опубликовано: {summary['published_measures']})")
+        logger.info(f"  📐 Мастер-измерения: {summary['total_dimensions']} (опубликовано: {summary['published_dimensions']})")
+
+        return result
+
     def get_layout(self, object_handle: int) -> Dict[str, Any]:
         """Получение layout объекта по handle."""
         response = self.send_request("GetLayout", [], handle=object_handle)
@@ -1020,6 +1224,10 @@ def main():
             logger.info("✅ Тестирование анализа объектов прошло успешно")
         else:
             logger.error("❌ Тестирование анализа объектов провалилось")
+
+        # Тест 4: Анализ мастер-элементов
+        logger.info(f"=== ТЕСТ: Анализ мастер-элементов для {test_app_id} ===")
+        client.analyze_master_items(test_app_id)
 
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}")
