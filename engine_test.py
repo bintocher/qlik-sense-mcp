@@ -502,37 +502,9 @@ class QlikEngineTestClient:
             # Показываем реальные данные
             self._log_object_data(data_info)
         else:
-            # Если данные не найдены, проверяем есть ли qHyperCube с пустыми данными
-            hypercube = layout.get("qHyperCube", {})
-            if hypercube and "qDataPages" in hypercube:
-                data_pages = hypercube["qDataPages"]
-                if len(data_pages) == 0:
-                    logger.info(f"⚠️ qHyperCube найден но данные пустые, пробуем загрузить...")
-
-                    # Пытаемся загрузить данные HyperCube
-                    hypercube_response = self.get_hypercube_data(object_handle, max_rows=20)
-                    if "result" in hypercube_response and "qDataPages" in hypercube_response["result"]:
-                        loaded_pages = hypercube_response["result"]["qDataPages"]
-                        if loaded_pages:
-                            logger.info(f"✅ Загружены данные HyperCube: {len(loaded_pages)} страниц")
-
-                            # Обрабатываем загруженные данные
-                            loaded_data_info = self._extract_hypercube_pages(loaded_pages)
-                            if loaded_data_info:
-                                logger.info(f"💾 Загруженные данные:")
-                                if loaded_data_info.get("matrix_info"):
-                                    logger.info(f"  📋 Матрица: {loaded_data_info['matrix_info']}")
-                                self._log_object_data(loaded_data_info)
-                                data_info = loaded_data_info
-                        else:
-                            logger.info(f"⚠️ HyperCube загружен но данные все еще пустые")
-                    else:
-                        logger.info(f"❌ Не удалось загрузить данные HyperCube")
-
-            # Если все еще нет данных, показываем отладочную информацию
-            if not data_info:
-                logger.info(f"⚠️ Данные не найдены, проверяем структуру layout:")
-                self._debug_layout_structure(layout, object_type)
+            # Если данные не найдены, показываем отладочную информацию
+            logger.info(f"⚠️ Данные не найдены, проверяем структуру layout:")
+            self._debug_layout_structure(layout, object_type)
 
         return {
             "object_id": object_id,
@@ -546,55 +518,6 @@ class QlikEngineTestClient:
             "layout": layout,
             "properties": properties
         }
-
-    def get_hypercube_data(self, object_handle: int, max_rows: int = 100) -> Dict[str, Any]:
-        """Получение данных HyperCube для объекта."""
-        # Запрашиваем данные HyperCube
-        request_data = [{
-            "qLeft": 0,
-            "qTop": 0,
-            "qWidth": 100,  # Максимум колонок
-            "qHeight": max_rows
-        }]
-
-        response = self.send_request("GetHyperCubeData", ["/qHyperCubeDef", request_data], handle=object_handle)
-
-        if "result" not in response:
-            logger.error(f"❌ Ошибка получения данных HyperCube для handle {object_handle}: {response}")
-
-        return response
-
-    def _extract_hypercube_pages(self, data_pages: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Извлечение данных из загруженных страниц HyperCube."""
-        data_info = {}
-        matrix_data = []
-        total_cells = 0
-
-        for page in data_pages:
-            if "qMatrix" in page:
-                matrix = page["qMatrix"]
-                for row in matrix:
-                    row_data = []
-                    for cell in row:
-                        if isinstance(cell, dict):
-                            qtext = cell.get("qText", "")
-                            qnum = cell.get("qNum", None)
-                            if qtext or qnum is not None:
-                                row_data.append({
-                                    "qText": qtext,
-                                    "qNum": qnum,
-                                    "qState": cell.get("qState", ""),
-                                    "qElemNumber": cell.get("qElemNumber", "")
-                                })
-                                total_cells += 1
-                    if row_data:
-                        matrix_data.append(row_data)
-
-        if matrix_data:
-            data_info["matrix_data"] = matrix_data
-            data_info["matrix_info"] = f"{len(matrix_data)} строк, {total_cells} ячеек"
-
-        return data_info
 
     def _extract_measures(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Извлечение мер из свойств объекта."""
@@ -638,83 +561,88 @@ class QlikEngineTestClient:
         """Извлечение данных объекта из layout (qText, qNum значения)."""
         data_info = {}
 
-        # Проверяем qHyperCube для таблиц и графиков
-        hypercube = layout.get("qHyperCube", {})
-        if hypercube and "qDataPages" in hypercube:
-            data_pages = hypercube["qDataPages"]
-            matrix_data = []
-            total_cells = 0
+        # Универсальный поиск данных во всем layout
+        matrix_data = []
+        list_values = []
+        simple_values = []
 
-            for page in data_pages:
-                if "qMatrix" in page:
-                    matrix = page["qMatrix"]
-                    for row in matrix:
-                        row_data = []
-                        for cell in row:
-                            if isinstance(cell, dict):
-                                qtext = cell.get("qText", "")
-                                qnum = cell.get("qNum", None)
-                                if qtext or qnum is not None:
-                                    row_data.append({
-                                        "qText": qtext,
-                                        "qNum": qnum,
-                                        "qState": cell.get("qState", ""),
-                                        "qElemNumber": cell.get("qElemNumber", "")
-                                    })
-                                    total_cells += 1
-                        if row_data:
-                            matrix_data.append(row_data)
+        self._find_data_recursive(layout, matrix_data, list_values, simple_values)
 
-            if matrix_data:
-                data_info["matrix_data"] = matrix_data
-                data_info["matrix_info"] = f"{len(matrix_data)} строк, {total_cells} ячеек"
+        # Формируем результат
+        if matrix_data:
+            total_cells = sum(len(row) for row in matrix_data)
+            data_info["matrix_data"] = matrix_data
+            data_info["matrix_info"] = f"{len(matrix_data)} строк, {total_cells} ячеек"
 
-        # Проверяем qListObject для списков
-        listobj = layout.get("qListObject", {})
-        if listobj and "qDataPages" in listobj:
-            data_pages = listobj["qDataPages"]
-            list_values = []
+        if list_values:
+            data_info["list_values"] = list_values
+            data_info["values"] = f"{len(list_values)} значений"
 
-            for page in data_pages:
-                if "qMatrix" in page:
-                    matrix = page["qMatrix"]
-                    for row in matrix:
-                        for cell in row:
-                            if isinstance(cell, dict):
-                                qtext = cell.get("qText", "")
-                                qnum = cell.get("qNum", None)
-                                if qtext or qnum is not None:
-                                    list_values.append({
-                                        "qText": qtext,
-                                        "qNum": qnum,
-                                        "qState": cell.get("qState", ""),
-                                        "qElemNumber": cell.get("qElemNumber", "")
-                                    })
-
-            if list_values:
-                data_info["list_values"] = list_values
-                data_info["values"] = f"{len(list_values)} значений"
-
-        # Простые значения для KPI и других объектов
-        if not data_info:
-            # Ищем простые значения в корне layout
-            simple_values = []
-
-            # Проверяем различные места где могут быть значения
-            for key, value in layout.items():
-                if isinstance(value, dict):
-                    if "qText" in value or "qNum" in value:
-                        simple_values.append({
-                            "field": key,
-                            "qText": value.get("qText", ""),
-                            "qNum": value.get("qNum", None)
-                        })
-
-            if simple_values:
-                data_info["simple_values"] = simple_values
-                data_info["values"] = f"{len(simple_values)} простых значений"
+        if simple_values:
+            data_info["simple_values"] = simple_values
 
         return data_info
+
+    def _find_data_recursive(self, obj: any, matrix_data: list, list_values: list, simple_values: list, path: str = "") -> None:
+        """Рекурсивный поиск qText/qNum данных в любом объекте."""
+        if isinstance(obj, dict):
+            # Если это ячейка с данными
+            if "qText" in obj or "qNum" in obj:
+                qtext = obj.get("qText", "")
+                qnum = obj.get("qNum", None)
+                if qtext or qnum is not None:
+                    data_item = {
+                        "qText": qtext,
+                        "qNum": qnum,
+                        "qState": obj.get("qState", ""),
+                        "qElemNumber": obj.get("qElemNumber", ""),
+                        "field": path
+                    }
+                    simple_values.append(data_item)
+
+            # Если это матрица данных
+            if "qMatrix" in obj:
+                matrix = obj["qMatrix"]
+                if isinstance(matrix, list):
+                    for row in matrix:
+                        if isinstance(row, list):
+                            row_data = []
+                            for cell in row:
+                                if isinstance(cell, dict) and ("qText" in cell or "qNum" in cell):
+                                    qtext = cell.get("qText", "")
+                                    qnum = cell.get("qNum", None)
+                                    if qtext or qnum is not None:
+                                        row_data.append({
+                                            "qText": qtext,
+                                            "qNum": qnum,
+                                            "qState": cell.get("qState", ""),
+                                            "qElemNumber": cell.get("qElemNumber", "")
+                                        })
+                            if row_data:
+                                matrix_data.append(row_data)
+                        elif isinstance(row, dict) and ("qText" in row or "qNum" in row):
+                            # Одиночные значения в матрице
+                            qtext = row.get("qText", "")
+                            qnum = row.get("qNum", None)
+                            if qtext or qnum is not None:
+                                list_values.append({
+                                    "qText": qtext,
+                                    "qNum": qnum,
+                                    "qState": row.get("qState", ""),
+                                    "qElemNumber": row.get("qElemNumber", ""),
+                                    "field": path
+                                })
+
+            # Рекурсивно обходим все ключи
+            for key, value in obj.items():
+                if key not in ["qInfo", "qMeta", "qSelectionInfo"]:  # Пропускаем служебные поля
+                    new_path = f"{path}.{key}" if path else key
+                    self._find_data_recursive(value, matrix_data, list_values, simple_values, new_path)
+
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                new_path = f"{path}[{i}]" if path else f"[{i}]"
+                self._find_data_recursive(item, matrix_data, list_values, simple_values, new_path)
 
     def _log_object_data(self, data_info: Dict[str, Any]) -> None:
         """Логирование реальных данных объекта (qText, qNum значения)."""
