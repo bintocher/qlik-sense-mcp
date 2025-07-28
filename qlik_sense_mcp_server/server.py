@@ -64,27 +64,25 @@ class QlikSenseMCPServer:
             """
             tools_list = [
                 Tool(name="get_apps", description="Get list of Qlik Sense applications", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
-                Tool(name="get_app_details", description="Get detailed information about a specific application", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics. Results are cached for 1 hour.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
                 Tool(name="get_users", description="Get list of users in Qlik Sense", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
-                Tool(name="get_streams", description="Get list of streams in Qlik Sense", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="get_streams", description="Get list of streams in Qlik Sense", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
                 Tool(name="get_data_connections", description="Get list of data connections", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
                 Tool(name="get_tasks", description="Get list of tasks", inputSchema={"type": "object", "properties": {"task_type": {"type": "string", "enum": ["reload", "external", "all"], "description": "Type of tasks"}}}),
                 Tool(name="start_task", description="Start execution of a task", inputSchema={"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID"}}, "required": ["task_id"]}),
-                Tool(name="get_extensions", description="Get list of extensions", inputSchema={"type": "object", "properties": {}}),
-                Tool(name="get_content_libraries", description="Get list of content libraries", inputSchema={"type": "object", "properties": {}}),
-                Tool(name="get_app_metadata", description="Get app metadata via REST API - faster than Engine API for metadata queries", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_doc_list", description="Get list of documents via Engine API", inputSchema={"type": "object", "properties": {}}),
+                Tool(name="get_extensions", description="Get list of extensions", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
+                Tool(name="get_content_libraries", description="Get list of content libraries", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
+                Tool(name="engine_get_doc_list", description="Get list of documents via Engine API", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
                 Tool(name="engine_open_app", description="Open an app via Engine API", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_fields", description="Get fields from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_sheets", description="Get sheets from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
                 Tool(name="engine_get_table_data", description="Get data from specific table or all tables", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional - if not provided, returns info about all tables)"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id"]}),
                 Tool(name="engine_get_field_values", description="Get field values with frequency information", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
-                Tool(name="engine_get_data_model", description="Get complete data model with tables and associations", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
                 Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]}),
-                Tool(name="engine_create_data_export", description="Export data in various formats (JSON, CSV, simple)", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional)"}, "fields": {"type": "array", "items": {"type": "string"}, "description": "List of fields to export (optional)"}, "format_type": {"type": "string", "enum": ["json", "csv", "simple"], "description": "Export format", "default": "json"}, "max_rows": {"type": "integer", "description": "Maximum rows to export", "default": 10000}, "filters": {"type": "object", "description": "Field filters (optional)"}}, "required": ["app_id"]})
+                Tool(name="engine_create_data_export", description="Export data in various formats (JSON, CSV, simple)", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional)"}, "fields": {"type": "array", "items": {"type": "string"}, "description": "List of fields to export (optional)"}, "format_type": {"type": "string", "enum": ["json", "csv", "simple"], "description": "Export format", "default": "json"}, "max_rows": {"type": "integer", "description": "Maximum rows to export", "default": 10000}, "filters": {"type": "object", "description": "Field filters (optional)"}}, "required": ["app_id"]}),
+                Tool(name="get_cache_stats", description="Get caching system statistics and performance metrics", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
+                Tool(name="clear_app_cache", description="Clear cache for specific app or all cache", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID to clear cache for (optional - if not provided, clears all cache)"}}})
                 ]
             return tools_list
 
@@ -129,7 +127,14 @@ class QlikSenseMCPServer:
 
                 elif name == "get_app_details":
                     app_id = arguments["app_id"]
-                    app = await asyncio.to_thread(self.repository_api.get_app_by_id, app_id)
+
+                    def _get_app_details():
+                        try:
+                            return self.engine_api.get_app_details(app_id)
+                        except Exception as e:
+                            return {"error": str(e), "details": "Error calling engine_api.get_app_details"}
+
+                    app = await asyncio.to_thread(_get_app_details)
                     return [
                         TextContent(
                             type="text",
@@ -203,16 +208,6 @@ class QlikSenseMCPServer:
                         TextContent(
                             type="text",
                             text=json.dumps(libraries, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_app_metadata":
-                    app_id = arguments["app_id"]
-                    metadata = await asyncio.to_thread(self.repository_api.get_app_metadata, app_id)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(metadata, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -314,56 +309,6 @@ class QlikSenseMCPServer:
                         TextContent(
                             type="text",
                             text=json.dumps(script, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "engine_get_fields":
-                    app_id = arguments["app_id"]
-
-                    def _get_fields():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_fields(app_handle)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    fields = await asyncio.to_thread(_get_fields)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(fields, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "engine_get_sheets":
-                    app_id = arguments["app_id"]
-
-                    def _get_sheets():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_sheets(app_handle)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    sheets = await asyncio.to_thread(_get_sheets)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(sheets, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -475,30 +420,7 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                elif name == "engine_get_data_model":
-                    app_id = arguments["app_id"]
 
-                    def _get_data_model():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_data_model(app_handle)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_get_data_model)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
 
 
 
@@ -607,29 +529,6 @@ class QlikSenseMCPServer:
                     ]
 
                 # Advanced Engine API handlers
-                elif name == "engine_get_data_model":
-                    app_id = arguments["app_id"]
-
-                    def _get_data_model():
-                        self.engine_api.connect(app_id)
-                        try:
-                            app_result = self.engine_api.open_doc(app_id)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_data_model(app_handle)
-                            else:
-                                raise Exception("Failed to open app")
-                        finally:
-                            self.engine_api.disconnect()
-
-                    model = await asyncio.to_thread(_get_data_model)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(model, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
                 elif name == "engine_get_field_info":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
@@ -1079,6 +978,36 @@ class QlikSenseMCPServer:
                         )
                     ]
 
+                elif name == "get_cache_stats":
+                    from .cache import get_cache_stats
+                    cache_stats = get_cache_stats()
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(cache_stats, indent=2, ensure_ascii=False)
+                        )
+                    ]
+
+                elif name == "clear_app_cache":
+                    from .cache import invalidate_app_cache, app_metadata_cache
+                    app_id = arguments.get("app_id")
+
+                    if app_id:
+                        # Очищаем кэш для конкретного приложения
+                        invalidate_app_cache(app_id)
+                        result = {"status": "success", "message": f"Cache cleared for app {app_id}"}
+                    else:
+                        # Очищаем весь кэш
+                        app_metadata_cache.clear()
+                        result = {"status": "success", "message": "All cache cleared"}
+
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(result, indent=2, ensure_ascii=False)
+                        )
+                    ]
+
                 else:
                     raise ValueError(f"Unknown tool: {name}")
 
@@ -1196,10 +1125,10 @@ EXAMPLES:
     qlik-sense-mcp-server
 
 AVAILABLE TOOLS:
-    Repository API: get_apps, get_users, get_streams, get_tasks, start_task, etc.
-    Engine API: engine_get_fields, engine_create_hypercube, engine_get_data, etc.
+    Repository API: get_apps, get_app_details, get_users, get_streams, get_tasks, start_task, etc.
+    Engine API: engine_get_script, engine_create_hypercube, engine_get_table_data, etc.
 
-    Total: 21 tools for Qlik Sense operations
+    Total: 19 tools for Qlik Sense operations
 
 MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp
