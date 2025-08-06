@@ -134,33 +134,12 @@ class QlikRepositoryAPI:
                     }
                 }
 
-                # Обогащаем информацией о stream
+                # Обогащаем информацию о потоке (стриме)
                 stream_id = enriched_app["stream_info"]["stream_id"]
                 if stream_id and stream_id in streams_dict:
                     stream_info = streams_dict[stream_id]
                     enriched_app["stream_info"]["stream_name"] = stream_info.get("name", "")
                     enriched_app["stream_info"]["stream_owner"] = stream_info.get("owner", {})
-
-                # Получаем метаданные приложения (если нужно детальную информацию)
-                if app_id:
-                    app_metadata = self.get_app_metadata(app_id)
-                    if isinstance(app_metadata, dict) and "error" not in app_metadata:
-                        enriched_app["metadata"] = {
-                            "reload_meta": app_metadata.get("reload_meta", {}),
-                            "tables_count": len(app_metadata.get("tables", [])),
-                            "fields_count": len(app_metadata.get("fields", [])),
-                            "has_section_access": app_metadata.get("has_section_access", False),
-                            "is_direct_query_mode": app_metadata.get("is_direct_query_mode", False)
-                        }
-                    else:
-                        enriched_app["metadata"] = {
-                            "reload_meta": {},
-                            "tables_count": 0,
-                            "fields_count": 0,
-                            "has_section_access": False,
-                            "is_direct_query_mode": False,
-                            "metadata_error": app_metadata.get("error", "Unable to fetch metadata")
-                        }
 
                 enriched_apps.append(enriched_app)
 
@@ -205,8 +184,29 @@ class QlikRepositoryAPI:
         return self._make_request("POST", f"task/{task_id}/start")
 
     def get_app_metadata(self, app_id: str) -> Dict[str, Any]:
-        """Get detailed app metadata including data model information."""
-        return self._make_request("GET", f"app/{app_id}/data/metadata")
+        """Get detailed app metadata using Engine REST API."""
+        try:
+            # Используем Engine REST API вместо QRS
+            base_url = f"{self.config.server_url}"
+            url = f"{base_url}/api/v1/apps/{app_id}/data/metadata"
+
+            # Add xrfkey parameter
+            params = {'xrfkey': self.xrfkey}
+
+            response = self.client.request("GET", url, params=params)
+            response.raise_for_status()
+
+            if response.headers.get("content-type", "").startswith("application/json"):
+                return response.json()
+            else:
+                return {"raw_response": response.text}
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
+            return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
+        except Exception as e:
+            logger.error(f"Request error: {str(e)}")
+            return {"error": str(e)}
 
     def get_app_reload_tasks(self, app_id: str) -> List[Dict[str, Any]]:
         """Get reload tasks for specific app."""
