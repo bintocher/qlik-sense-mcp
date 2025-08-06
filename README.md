@@ -528,6 +528,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 6/6 Tools Working | v1.0.0
+**Project Status**: Production Ready | 6/6 Tools Working | v1.1.0
 
 **Installation**: `uvx qlik-sense-mcp-server`

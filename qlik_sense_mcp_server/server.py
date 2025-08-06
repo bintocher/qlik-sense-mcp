@@ -830,7 +830,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.0.3")
+            print("qlik-sense-mcp-server 1.1.0")
             return
 
     asyncio.run(async_main())
