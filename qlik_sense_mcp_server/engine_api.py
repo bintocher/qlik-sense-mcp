@@ -4,6 +4,7 @@ import json
 import websocket
 import ssl
 from typing import Dict, List, Any, Optional, Union
+from datetime import datetime
 from .config import QlikSenseConfig
 
 
@@ -270,45 +271,82 @@ class QlikEngineAPI:
         self, app_handle: int, object_type: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Get app objects."""
-        params = {
-            "qOptions": {
-                "qTypes": [object_type] if object_type else [],
-                "qIncludeSessionObjects": True,
-                "qData": {},
+        # Build parameters based on whether specific object_type is requested
+        if object_type:
+            # Get specific object type
+            params = {
+                "qOptions": {
+                    "qTypes": [object_type],
+                    "qIncludeSessionObjects": True,
+                    "qData": {},
+                }
             }
-        }
+        else:
+            # Get ALL objects - don't specify qTypes to get everything including extensions
+            params = {
+                "qOptions": {
+                    "qIncludeSessionObjects": True,
+                    "qData": {},
+                }
+            }
+
+        # Debug logging
+        print(f"DEBUG: get_objects params: {params}")
+
         result = self.send_request("GetObjects", params, handle=app_handle)
+
+        # Debug result
+        if "error" in str(result) or "Missing Types" in str(result):
+            print(f"DEBUG: get_objects error result: {result}")
+
         return result.get("qList", {}).get("qItems", [])
 
     def get_sheets(self, app_handle: int) -> List[Dict[str, Any]]:
         """Get app sheets."""
         try:
-            # Use correct method to get sheets
-            params = {
-                "qOptions": {
-                    "qTypes": ["sheet"],
-                    "qIncludeSessionObjects": False,
-                    "qData": {},
+            # Шаг 1: Создаем SheetList объект
+            sheet_list_def = {
+                "qInfo": {
+                    "qType": "SheetList"
+                },
+                "qAppObjectListDef": {
+                    "qType": "sheet",
+                    "qData": {
+                        "title": "/qMetaDef/title",
+                        "description": "/qMetaDef/description",
+                        "thumbnail": "/thumbnail",
+                        "cells": "/cells",
+                        "rank": "/rank",
+                        "columns": "/columns",
+                        "rows": "/rows"
+                    }
                 }
             }
-            result = self.send_request("GetObjects", params, handle=app_handle)
 
-            if isinstance(result, dict):
-                if "qList" in result:
-                    q_list = result["qList"]
-                    if isinstance(q_list, dict) and "qItems" in q_list:
-                        return q_list["qItems"]
-                    elif isinstance(q_list, list):
-                        return q_list
-                    else:
-                        return {"error": "qList has unexpected format", "qList": q_list}
-                else:
-                    return {"error": "No qList in response", "response": result}
-            else:
-                return {"error": "Response is not a dict", "response": result}
+            # Создаем session object для списка листов
+            create_result = self.send_request("CreateSessionObject", [sheet_list_def], handle=app_handle)
+
+            if "qReturn" not in create_result or "qHandle" not in create_result["qReturn"]:
+                print(f"WARNING: Failed to create SheetList object: {create_result}")
+                return []
+
+            sheet_list_handle = create_result["qReturn"]["qHandle"]
+
+            # Шаг 2: Получаем layout со списком листов
+            layout_result = self.send_request("GetLayout", [], handle=sheet_list_handle)
+
+            if "qLayout" not in layout_result or "qAppObjectList" not in layout_result["qLayout"]:
+                print(f"WARNING: No sheet list in layout: {layout_result}")
+                return []
+
+            sheets = layout_result["qLayout"]["qAppObjectList"]["qItems"]
+            print(f"INFO: Found {len(sheets)} sheets")
+
+            return sheets
 
         except Exception as e:
-            return {"error": str(e), "details": "Error in get_sheets method"}
+            print(f"ERROR: get_sheets exception: {str(e)}")
+            return []
 
     def get_sheet_objects(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
         """Get objects on a specific sheet."""
@@ -351,7 +389,7 @@ class QlikEngineAPI:
             }
 
     def get_sheets_with_objects(self, app_id: str) -> Dict[str, Any]:
-        """Get sheets and their objects for an app."""
+        """Get sheets and their objects with detailed field usage analysis."""
         try:
             self.connect()
 
@@ -362,43 +400,235 @@ class QlikEngineAPI:
 
             app_handle = app_result["qReturn"]["qHandle"]
 
-            # Get sheets
+            # Get sheets using correct API sequence
             sheets = self.get_sheets(app_handle)
+            print(f"DEBUG: get_sheets returned {len(sheets)} sheets")
 
-            if isinstance(sheets, dict) and "error" in sheets:
-                return sheets
-
-            # Get objects for each sheet
-            detailed_sheets = []
-            for sheet in sheets:
-                if isinstance(sheet, dict) and "qInfo" in sheet:
-                    sheet_id = sheet["qInfo"]["qId"]
-                    sheet_objects = self.get_sheet_objects(app_handle, sheet_id)
-
-                    sheet_info = {
-                        "sheet_info": sheet,
-                        "objects": (
-                            sheet_objects
-                            if not isinstance(sheet_objects, dict)
-                            or "error" not in sheet_objects
-                            else []
-                        ),
-                        "objects_error": (
-                            sheet_objects.get("error")
-                            if isinstance(sheet_objects, dict)
-                            and "error" in sheet_objects
-                            else None
-                        ),
+            if not sheets:
+                return {
+                    "sheets": [],
+                    "total_sheets": 0,
+                    "field_usage": {},
+                    "debug_info": {
+                        "sheets_from_api": 0,
+                        "error_reason": "get_sheets returned empty list"
                     }
-                    detailed_sheets.append(sheet_info)
+                }
 
-            return {"sheets": detailed_sheets, "total_sheets": len(detailed_sheets)}
+            # Get detailed info for each sheet and its objects
+            detailed_sheets = []
+            field_usage_map = {}  # {field_name: {objects: [], sheets: []}}
+
+            for sheet in sheets:
+                if not isinstance(sheet, dict) or "qInfo" not in sheet:
+                    continue
+
+                sheet_id = sheet["qInfo"]["qId"]
+                sheet_title = sheet.get("qMeta", {}).get("title", "")
+
+                print(f"INFO: Processing sheet {sheet_id}: {sheet_title}")
+
+                # Получаем объекты листа правильным способом
+                sheet_objects = self._get_sheet_objects_detailed(app_handle, sheet_id)
+
+                # Анализируем поля в объектах
+                for obj in sheet_objects:
+                    if isinstance(obj, dict) and "fields_used" in obj:
+                        for field_name in obj["fields_used"]:
+                            if field_name not in field_usage_map:
+                                field_usage_map[field_name] = {"objects": [], "sheets": []}
+
+                            # Добавляем объект
+                            field_usage_map[field_name]["objects"].append({
+                                "object_id": obj.get("object_id", ""),
+                                "object_type": obj.get("object_type", ""),
+                                "object_title": obj.get("object_title", ""),
+                                "sheet_id": sheet_id,
+                                "sheet_title": sheet_title
+                            })
+
+                            # Добавляем лист (если еще не добавлен)
+                            sheet_already_added = any(
+                                s["sheet_id"] == sheet_id
+                                for s in field_usage_map[field_name]["sheets"]
+                            )
+                            if not sheet_already_added:
+                                field_usage_map[field_name]["sheets"].append({
+                                    "sheet_id": sheet_id,
+                                    "sheet_title": sheet_title
+                                })
+
+                sheet_info = {
+                    "sheet_info": sheet,
+                    "objects": sheet_objects,
+                    "objects_count": len(sheet_objects)
+                }
+                detailed_sheets.append(sheet_info)
+
+            return {
+                "sheets": detailed_sheets,
+                "total_sheets": len(detailed_sheets),
+                "field_usage": field_usage_map,
+                "debug_info": {
+                    "sheets_from_api": len(sheets),
+                    "processed_sheets": len(detailed_sheets),
+                    "fields_with_usage": len([k for k, v in field_usage_map.items() if v["objects"]])
+                }
+            }
 
         except Exception as e:
             return {
                 "error": str(e),
                 "details": "Error in get_sheets_with_objects method",
             }
+
+    def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
+        """Get detailed information about objects on a sheet."""
+        try:
+            # Шаг 1: Получаем handle листа
+            sheet_result = self.send_request("GetObject", {"qId": sheet_id}, handle=app_handle)
+
+            if "qReturn" not in sheet_result or "qHandle" not in sheet_result["qReturn"]:
+                print(f"WARNING: Failed to get sheet object {sheet_id}: {sheet_result}")
+                return []
+
+            sheet_handle = sheet_result["qReturn"]["qHandle"]
+
+            # Шаг 2: Получаем layout листа с объектами
+            sheet_layout = self.send_request("GetLayout", [], handle=sheet_handle)
+
+            if "qLayout" not in sheet_layout or "qChildList" not in sheet_layout["qLayout"]:
+                print(f"WARNING: No child objects in sheet {sheet_id}")
+                return []
+
+            child_objects = sheet_layout["qLayout"]["qChildList"]["qItems"]
+            detailed_objects = []
+
+            # Шаг 3: Получаем детальную информацию для каждого объекта
+            for child_obj in child_objects:
+                obj_id = child_obj.get("qInfo", {}).get("qId", "")
+                obj_type = child_obj.get("qInfo", {}).get("qType", "")
+
+                if not obj_id:
+                    continue
+
+                try:
+                    # Получаем handle объекта
+                    obj_result = self.send_request("GetObject", {"qId": obj_id}, handle=app_handle)
+
+                    if "qReturn" not in obj_result or "qHandle" not in obj_result["qReturn"]:
+                        continue
+
+                    obj_handle = obj_result["qReturn"]["qHandle"]
+
+                    # Получаем layout объекта
+                    obj_layout = self.send_request("GetLayout", [], handle=obj_handle)
+
+                    if "qLayout" not in obj_layout:
+                        continue
+
+                    # Анализируем поля в объекте
+                    fields_used = self._extract_fields_from_object(obj_layout["qLayout"])
+
+                    detailed_obj = {
+                        "object_id": obj_id,
+                        "object_type": obj_type,
+                        "object_title": obj_layout["qLayout"].get("title", ""),
+                        "object_subtitle": obj_layout["qLayout"].get("subtitle", ""),
+                        "fields_used": fields_used,
+                        "basic_info": child_obj,
+                        "detailed_layout": obj_layout["qLayout"]
+                    }
+
+                    detailed_objects.append(detailed_obj)
+                    print(f"INFO: Processed object {obj_id} ({obj_type}) with {len(fields_used)} fields")
+
+                except Exception as obj_error:
+                    print(f"WARNING: Error processing object {obj_id}: {obj_error}")
+                    continue
+
+            return detailed_objects
+
+        except Exception as e:
+            print(f"ERROR: _get_sheet_objects_detailed error: {str(e)}")
+            return []
+
+    def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
+        """Extract field names used in an object layout."""
+        fields = set()
+
+        try:
+            # Анализируем HyperCube
+            if "qHyperCube" in obj_layout:
+                hypercube = obj_layout["qHyperCube"]
+
+                # Dimensions
+                for dim_info in hypercube.get("qDimensionInfo", []):
+                    field_defs = dim_info.get("qGroupFieldDefs", [])
+                    for field_def in field_defs:
+                        field_name = self._extract_field_name_from_expression(field_def)
+                        if field_name:
+                            fields.add(field_name)
+
+                # Measures
+                for measure_info in hypercube.get("qMeasureInfo", []):
+                    measure_def = measure_info.get("qDef", "")
+                    extracted_fields = self._extract_fields_from_expression(measure_def)
+                    fields.update(extracted_fields)
+
+            # Анализируем ListObject
+            if "qListObject" in obj_layout:
+                list_obj = obj_layout["qListObject"]
+
+                for dim_info in list_obj.get("qDimensionInfo", []):
+                    field_defs = dim_info.get("qGroupFieldDefs", [])
+                    for field_def in field_defs:
+                        field_name = self._extract_field_name_from_expression(field_def)
+                        if field_name:
+                            fields.add(field_name)
+
+            # Анализируем другие типы объектов
+            # Для filterpane, kpi и других специальных объектов
+            if "qChildList" in obj_layout:
+                for child in obj_layout["qChildList"].get("qItems", []):
+                    # Рекурсивно анализируем дочерние объекты
+                    pass
+
+        except Exception as e:
+            print(f"WARNING: Error extracting fields from object: {e}")
+
+        return list(fields)
+
+    def _extract_field_name_from_expression(self, expression: str) -> Optional[str]:
+        """Extract field name from a simple field expression."""
+        if not expression:
+            return None
+
+        expression = expression.strip()
+
+        # Убираем квадратные скобки для простых полей [FieldName]
+        if expression.startswith('[') and expression.endswith(']') and expression.count('[') == 1:
+            return expression[1:-1]
+
+        # Если это простое имя поля без скобок и функций
+        if ' ' not in expression and '(' not in expression and not any(op in expression for op in ['=', '+', '-', '*', '/']):
+            return expression
+
+        return None
+
+    def _extract_fields_from_expression(self, expression: str) -> List[str]:
+        """Extract field names from a complex expression."""
+        import re
+        fields = []
+
+        if not expression:
+            return fields
+
+        # Ищем поля в квадратных скобках [FieldName]
+        bracket_fields = re.findall(r'\[([^\]]+)\]', expression)
+        fields.extend(bracket_fields)
+
+        return list(set(fields))  # Убираем дубликаты
 
     def get_fields(self, app_handle: int) -> List[Dict[str, Any]]:
         """Get app fields using GetTablesAndKeys method."""
@@ -1762,3 +1992,364 @@ class QlikEngineAPI:
             return {"error": str(e), "details": "Error in get_detailed_app_metadata"}
         finally:
             self.disconnect()
+
+    def get_app_details(self, app_id: str) -> Dict[str, Any]:
+        """
+        Get comprehensive information about application for initial analysis.
+
+        Fast overview including:
+        - App metadata (size, dates, reload status)
+        - Data model structure (tables, fields, types, cardinality)
+        - Master items (only user-created measures and dimensions)
+        - Variables (only user-created)
+        - Object counts by type
+        - Table relationships (key fields)
+
+        Returns optimized JSON report for quick app understanding.
+        """
+        try:
+            self.connect()
+
+            # Open app once and reuse connection
+            app_result = self.open_doc(app_id, no_data=False)
+            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
+                return {"error": "Failed to open app", "response": app_result}
+
+            app_handle = app_result["qReturn"]["qHandle"]
+
+            # Get app metadata and layout
+            app_metadata = self._get_app_metadata_fast(app_handle)
+
+            # Get data model structure
+            data_model = self._get_data_model_structure(app_handle)
+
+            # Get master items (only user-created)
+            master_items = self._get_user_master_items(app_handle)
+
+            # Get user variables (exclude system)
+            user_variables = self._get_user_variables(app_handle)
+
+            # Get object counts by type
+            object_counts = self._get_object_counts(app_handle)
+
+            # Get table relationships
+            table_relationships = self._get_table_relationships(app_handle)
+
+            # Build optimized response
+            report = {
+                "app_metadata": {
+                    "app_id": app_id,
+                    "name": app_metadata.get("title", ""),
+                    "description": app_metadata.get("description", ""),
+                    "filename": app_metadata.get("filename", ""),
+                    "size_bytes": app_metadata.get("size", 0),
+                    "size_mb": round(app_metadata.get("size", 0) / (1024 * 1024), 2),
+                    "created_date": app_metadata.get("created_date", ""),
+                    "modified_date": app_metadata.get("modified_date", ""),
+                    "last_reload_time": app_metadata.get("last_reload_time", ""),
+                    "has_script": app_metadata.get("has_script", False),
+                    "has_data": app_metadata.get("has_data", False),
+                    "is_published": app_metadata.get("published", False)
+                },
+                "data_model": {
+                    "tables": data_model.get("tables", []),
+                    "total_tables": len(data_model.get("tables", [])),
+                    "total_fields": sum(len(table.get("fields", [])) for table in data_model.get("tables", [])),
+                    "table_relationships": table_relationships
+                },
+                "master_items": {
+                    "measures": master_items.get("measures", []),
+                    "dimensions": master_items.get("dimensions", []),
+                    "total_measures": len(master_items.get("measures", [])),
+                    "total_dimensions": len(master_items.get("dimensions", []))
+                },
+                "variables": {
+                    "user_variables": user_variables,
+                    "total_variables": len(user_variables)
+                },
+                "object_counts": object_counts,
+                "reload_info": app_metadata.get("reload_info", {}),
+                "summary": {
+                    "analysis_type": "quick_overview",
+                    "analysis_timestamp": datetime.now().isoformat()
+                }
+            }
+
+            return report
+
+        except Exception as e:
+            return {"error": str(e), "details": "Error in get_app_details method"}
+        finally:
+            self.disconnect()
+
+    def _get_app_metadata_fast(self, app_handle: int) -> Dict[str, Any]:
+        """Get basic app metadata without heavy analysis."""
+        try:
+            # Get app layout
+            layout_response = self.send_request("GetAppLayout", [], handle=app_handle)
+            layout = layout_response.get("qLayout", {})
+
+            # Get app properties
+            properties_response = self.send_request("GetAppProperties", [], handle=app_handle)
+            properties = properties_response.get("qProperties", {})
+
+            return {
+                "title": layout.get("qTitle", ""),
+                "filename": layout.get("qFileName", ""),
+                "description": properties.get("qMetaDef", {}).get("description", ""),
+                "size": layout.get("qStaticByteSize", 0),
+                "created_date": layout.get("createdDate", ""),
+                "modified_date": layout.get("modifiedDate", ""),
+                "last_reload_time": layout.get("qLastReloadTime", ""),
+                "has_script": layout.get("qHasScript", False),
+                "has_data": layout.get("qHasData", False),
+                "published": layout.get("published", False),
+                "reload_info": {
+                    "last_execution_time": layout.get("qLastReloadTime", ""),
+                    "is_partial_reload": layout.get("qIsPartialReload", False),
+                    "has_data": layout.get("qHasData", False)
+                }
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _get_data_model_structure(self, app_handle: int) -> Dict[str, Any]:
+        """Get tables and fields structure without usage analysis."""
+        try:
+            # Get tables structure using GetTablesAndKeys
+            tables_result = self.send_request(
+                "GetTablesAndKeys",
+                [
+                    {"qcx": 1000, "qcy": 1000},  # Max dimensions
+                    {"qcx": 0, "qcy": 0},  # Min dimensions
+                    50,  # Max tables
+                    False,  # Include system tables
+                    False,  # Include hidden fields
+                ],
+                handle=app_handle,
+            )
+
+            tables = []
+            for table in tables_result.get("qtr", []):
+                table_name = table.get("qName", "")
+                table_fields = []
+
+                for field in table.get("qFields", []):
+                    field_info = {
+                        "name": field.get("qName", ""),
+                        "data_type": self._determine_data_type(field.get("qTags", [])),
+                        "total_rows": field.get("qnRows", 0),
+                        "distinct_values": field.get("qnTotalDistinctValues", 0),
+                        "present_distinct_values": field.get("qnPresentDistinctValues", 0),
+                        "completeness_pct": round(
+                            (field.get("qnNonNulls", 0) / max(field.get("qnRows", 1), 1)) * 100, 1
+                        ),
+                        "is_key": field.get("qIsKey", False),
+                        "key_type": field.get("qKeyType", "")
+                    }
+                    table_fields.append(field_info)
+
+                table_info = {
+                    "name": table_name,
+                    "total_rows": table.get("qNoOfRows", 0),
+                    "field_count": len(table_fields),
+                    "fields": table_fields,
+                    "is_system": table.get("qIsSystem", False),
+                    "is_semantic": table.get("qIsSemantic", False)
+                }
+                tables.append(table_info)
+
+            return {"tables": tables}
+
+        except Exception as e:
+            return {"error": str(e), "tables": []}
+
+    def _determine_data_type(self, tags: List[str]) -> str:
+        """Determine data type from field tags."""
+        if "$numeric" in tags:
+            if "$integer" in tags:
+                return "integer"
+            else:
+                return "numeric"
+        elif "$text" in tags:
+            return "text"
+        elif "$date" in tags:
+            return "date"
+        elif "$timestamp" in tags:
+            return "timestamp"
+        else:
+            return "unknown"
+
+    def _get_user_master_items(self, app_handle: int) -> Dict[str, Any]:
+        """Get only user-created master items (exclude system)."""
+        try:
+            # Get master measures
+            measures = self._get_master_measures(app_handle)
+            user_measures = []
+            for measure in measures:
+                # Filter out system measures
+                if not measure.get("qMeta", {}).get("qIsHidden", False):
+                    user_measures.append({
+                        "name": measure.get("qMeta", {}).get("title", ""),
+                        "description": measure.get("qMeta", {}).get("description", ""),
+                        "definition": measure.get("qMeasure", {}).get("qDef", ""),
+                        "created_date": measure.get("qMeta", {}).get("createdDate", ""),
+                        "modified_date": measure.get("qMeta", {}).get("modifiedDate", ""),
+                        "owner": measure.get("qMeta", {}).get("owner", {}).get("name", "")
+                    })
+
+            # Get master dimensions
+            dimensions = self._get_master_dimensions(app_handle)
+            user_dimensions = []
+            for dimension in dimensions:
+                # Filter out system dimensions
+                if not dimension.get("qMeta", {}).get("qIsHidden", False):
+                    user_dimensions.append({
+                        "name": dimension.get("qMeta", {}).get("title", ""),
+                        "description": dimension.get("qMeta", {}).get("description", ""),
+                        "field_definitions": dimension.get("qDim", {}).get("qFieldDefs", []),
+                        "created_date": dimension.get("qMeta", {}).get("createdDate", ""),
+                        "modified_date": dimension.get("qMeta", {}).get("modifiedDate", ""),
+                        "owner": dimension.get("qMeta", {}).get("owner", {}).get("name", "")
+                    })
+
+            return {
+                "measures": user_measures,
+                "dimensions": user_dimensions
+            }
+
+        except Exception as e:
+            return {"error": str(e), "measures": [], "dimensions": []}
+
+    def _get_user_variables(self, app_handle: int) -> List[Dict[str, Any]]:
+        """Get only user-created variables (exclude system)."""
+        try:
+            # Create VariableList object
+            variable_list_def = {
+                "qInfo": {"qType": "VariableList"},
+                "qVariableListDef": {
+                    "qType": "variable",
+                    "qShowReserved": False,  # Exclude system variables
+                    "qShowConfig": False,
+                    "qData": {"tags": "/tags"}
+                }
+            }
+
+            variable_list_response = self.send_request("CreateSessionObject", [variable_list_def], handle=app_handle)
+            if "qReturn" not in variable_list_response:
+                return []
+
+            variable_list_handle = variable_list_response["qReturn"]["qHandle"]
+            layout_response = self.send_request("GetLayout", [], handle=variable_list_handle)
+
+            variables = layout_response.get("qLayout", {}).get("qVariableList", {}).get("qItems", [])
+
+            user_variables = []
+            for variable in variables:
+                # Additional filter for user variables only
+                if not variable.get("qIsReserved", False) and not variable.get("qIsConfig", False):
+                    user_variables.append({
+                        "name": variable.get("qName", ""),
+                        "definition": variable.get("qDefinition", ""),
+                        "text_value": variable.get("qText", ""),
+                        "numeric_value": variable.get("qNum", None),
+                        "is_script_created": variable.get("qIsScriptCreated", False)
+                    })
+
+            return user_variables
+
+        except Exception as e:
+            return []
+
+    def _get_object_counts(self, app_handle: int) -> Dict[str, int]:
+        """Get count of objects by type."""
+        try:
+            # Get all app objects
+            all_infos = self.send_request("GetAllInfos", [], handle=app_handle)
+
+            object_counts = {}
+            for info in all_infos.get("qInfos", []):
+                obj_type = info.get("qType", "unknown")
+                object_counts[obj_type] = object_counts.get(obj_type, 0) + 1
+
+            # Group similar types for better readability
+            grouped_counts = {
+                "sheets": object_counts.get("sheet", 0),
+                "charts": (
+                    object_counts.get("barchart", 0) +
+                    object_counts.get("linechart", 0) +
+                    object_counts.get("piechart", 0) +
+                    object_counts.get("combochart", 0) +
+                    object_counts.get("scatterplot", 0)
+                ),
+                "tables": object_counts.get("table", 0),
+                "kpis": object_counts.get("kpi", 0),
+                "filters": (
+                    object_counts.get("listbox", 0) +
+                    object_counts.get("filterpane", 0)
+                ),
+                "text_objects": object_counts.get("text-image", 0),
+                "other": sum(v for k, v in object_counts.items()
+                           if k not in ["sheet", "barchart", "linechart", "piechart",
+                                      "combochart", "scatterplot", "table", "kpi",
+                                      "listbox", "filterpane", "text-image"])
+            }
+
+            # Add total count
+            grouped_counts["total_objects"] = sum(grouped_counts.values())
+
+            return grouped_counts
+
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _get_table_relationships(self, app_handle: int) -> List[Dict[str, Any]]:
+        """Get relationships between tables based on key fields."""
+        try:
+            # Get tables with key information
+            tables_result = self.send_request(
+                "GetTablesAndKeys",
+                [
+                    {"qcx": 1000, "qcy": 1000},
+                    {"qcx": 0, "qcy": 0},
+                    50,
+                    False,
+                    False
+                ],
+                handle=app_handle,
+            )
+
+            relationships = []
+            tables = tables_result.get("qtr", [])
+
+            # Find relationships based on field names and key types
+            for i, table1 in enumerate(tables):
+                table1_name = table1.get("qName", "")
+                table1_keys = [f for f in table1.get("qFields", []) if f.get("qIsKey", False)]
+
+                for j, table2 in enumerate(tables[i+1:], i+1):
+                    table2_name = table2.get("qName", "")
+                    table2_keys = [f for f in table2.get("qFields", []) if f.get("qIsKey", False)]
+
+                    # Find common key fields
+                    common_keys = []
+                    for key1 in table1_keys:
+                        for key2 in table2_keys:
+                            if key1.get("qName") == key2.get("qName"):
+                                common_keys.append({
+                                    "field_name": key1.get("qName"),
+                                    "key_type": key1.get("qKeyType", "")
+                                })
+
+                    if common_keys:
+                        relationships.append({
+                            "table1": table1_name,
+                            "table2": table2_name,
+                            "relationship_type": "key_match",
+                            "common_fields": common_keys
+                        })
+
+            return relationships
+
+        except Exception as e:
+            return []
