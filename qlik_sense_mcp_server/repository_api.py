@@ -35,7 +35,7 @@ class QlikRepositoryAPI:
 
         # XSRF key for Qlik Sense API
         self.xrfkey = "0123456789abcdef"
-        
+
         # Create httpx client with certificates and SSL context
         self.client = httpx.Client(
             verify=ssl_context if self.config.verify_ssl else False,
@@ -57,12 +57,12 @@ class QlikRepositoryAPI:
         """Make HTTP request to Repository API."""
         try:
             url = self._get_api_url(endpoint)
-            
+
             # Add xrfkey parameter to all requests
             params = kwargs.get('params', {})
             params['xrfkey'] = self.xrfkey
             kwargs['params'] = params
-            
+
             response = self.client.request(method, url, **kwargs)
             response.raise_for_status()
 
@@ -196,7 +196,12 @@ class QlikRepositoryAPI:
         return result if isinstance(result, list) else []
 
     def start_task(self, task_id: str) -> Dict[str, Any]:
-        """Start a task execution."""
+        """
+        Start a task execution.
+
+        Note: This method is not exported via MCP API as it's an administrative function,
+        not an analytical tool. Available for internal use only.
+        """
         return self._make_request("POST", f"task/{task_id}/start")
 
     def get_app_metadata(self, app_id: str) -> Dict[str, Any]:

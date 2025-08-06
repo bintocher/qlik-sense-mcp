@@ -1995,161 +1995,85 @@ class QlikEngineAPI:
 
     def get_app_details(self, app_id: str) -> Dict[str, Any]:
         """
-        Get comprehensive information about application including data model,
-        tables with fields and types, usage analysis, and performance metrics.
+        Get comprehensive information about application for initial analysis.
 
-        This method combines analysis of:
-        - App metadata
-        - Data model structure
-        - Field usage across objects
-        - Master items (measures and dimensions)
-        - Variables
-        - Performance recommendations
+        Fast overview including:
+        - App metadata (size, dates, reload status)
+        - Data model structure (tables, fields, types, cardinality)
+        - Master items (only user-created measures and dimensions)
+        - Variables (only user-created)
+        - Object counts by type
+        - Table relationships (key fields)
 
-        Returns complete JSON report for the application.
+        Returns optimized JSON report for quick app understanding.
         """
         try:
             self.connect()
 
-            # Собираем все данные
-            app_metadata = self._analyze_app_metadata(app_id)
-            data_model = self._analyze_data_model(app_id, include_samples=False)
-            field_usage = self._analyze_field_usage(app_id)
-            master_items = self._analyze_master_items(app_id)
-            variables = self._analyze_variables(app_id)
+            # Open app once and reuse connection
+            app_result = self.open_doc(app_id, no_data=False)
+            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
+                return {"error": "Failed to open app", "response": app_result}
 
-            # Формируем структурированный отчет
+            app_handle = app_result["qReturn"]["qHandle"]
+
+            # Get app metadata and layout
+            app_metadata = self._get_app_metadata_fast(app_handle)
+
+            # Get data model structure
+            data_model = self._get_data_model_structure(app_handle)
+
+            # Get master items (only user-created)
+            master_items = self._get_user_master_items(app_handle)
+
+            # Get user variables (exclude system)
+            user_variables = self._get_user_variables(app_handle)
+
+            # Get object counts by type
+            object_counts = self._get_object_counts(app_handle)
+
+            # Get table relationships
+            table_relationships = self._get_table_relationships(app_handle)
+
+            # Build optimized response
             report = {
-                "app_metadata": self._format_app_metadata(app_metadata),
-                "data_model": {
-                    "tables": self._format_tables_info(data_model),
-                    "total_tables": len(data_model.get("tables", [])),
-                    "total_fields": sum(len(table.get("fields", [])) for table in data_model.get("tables", []))
+                "app_metadata": {
+                    "app_id": app_id,
+                    "name": app_metadata.get("title", ""),
+                    "description": app_metadata.get("description", ""),
+                    "filename": app_metadata.get("filename", ""),
+                    "size_bytes": app_metadata.get("size", 0),
+                    "size_mb": round(app_metadata.get("size", 0) / (1024 * 1024), 2),
+                    "created_date": app_metadata.get("created_date", ""),
+                    "modified_date": app_metadata.get("modified_date", ""),
+                    "last_reload_time": app_metadata.get("last_reload_time", ""),
+                    "has_script": app_metadata.get("has_script", False),
+                    "has_data": app_metadata.get("has_data", False),
+                    "is_published": app_metadata.get("published", False)
                 },
-                "data_fields": {
-                    "used_fields": [],
-                    "usage_statistics": {
-                        "total_used": 0,
-                        "by_table": {},
-                        "by_object_type": {}
-                    }
+                "data_model": {
+                    "tables": data_model.get("tables", []),
+                    "total_tables": len(data_model.get("tables", [])),
+                    "total_fields": sum(len(table.get("fields", [])) for table in data_model.get("tables", [])),
+                    "table_relationships": table_relationships
                 },
                 "master_items": {
-                    "measures": self._format_master_measures(master_items),
-                    "dimensions": self._format_master_dimensions(master_items),
+                    "measures": master_items.get("measures", []),
+                    "dimensions": master_items.get("dimensions", []),
                     "total_measures": len(master_items.get("measures", [])),
                     "total_dimensions": len(master_items.get("dimensions", []))
                 },
                 "variables": {
-                    "user_variables": [],
-                    "system_variables": [],
-                    "total_variables": len(variables.get("variables", []))
+                    "user_variables": user_variables,
+                    "total_variables": len(user_variables)
                 },
-                "improvement_opportunities": {
-                    "unused_fields": [],
-                    "potential_savings": {
-                        "fields_to_remove": 0,
-                        "tables_affected": set()
-                    }
-                },
+                "object_counts": object_counts,
+                "reload_info": app_metadata.get("reload_info", {}),
                 "summary": {
-                    "total_fields": field_usage.get("summary", {}).get("total_fields", 0),
-                    "used_fields": field_usage.get("summary", {}).get("used_fields", 0),
-                    "unused_fields": field_usage.get("summary", {}).get("unused_fields", 0),
-                    "usage_percentage": 0,
+                    "analysis_type": "quick_overview",
                     "analysis_timestamp": datetime.now().isoformat()
                 }
             }
-
-            # Обрабатываем используемые поля
-            by_object_type = {}
-            by_table = {}
-
-            for field_key, field_data in field_usage.get("fields", {}).items():
-                table_name = field_data["table"]
-                field_name = field_data["field"]
-                usage = field_data["usage"]
-
-                if usage["is_used"]:
-                    # Получаем примеры значений для поля
-                    sample_values = self._get_field_sample_values(app_id, field_name, table_name)
-
-                    used_field = {
-                        "field_name": field_name,
-                        "table_name": table_name,
-                        "data_type": field_data["data_type"],
-                        "total_rows": field_data["total_rows"],
-                        "distinct_values": field_data["distinct_values"],
-                        "usage_count": len(usage["objects"]) + len(usage["variables"]) + len(usage["master_measures"]) + len(usage["master_dimensions"]),
-                        "usage_details": {
-                            "objects": usage["objects"],
-                            "variables": usage["variables"],
-                            "master_measures": usage["master_measures"],
-                            "master_dimensions": usage["master_dimensions"]
-                        },
-                        "sample_values": sample_values
-                    }
-
-                    report["data_fields"]["used_fields"].append(used_field)
-
-                    # Статистика по таблицам
-                    if table_name not in by_table:
-                        by_table[table_name] = 0
-                    by_table[table_name] += 1
-
-                    # Статистика по типам объектов
-                    for obj in usage["objects"]:
-                        obj_type = obj.get("object_type", "unknown")
-                        if obj_type not in by_object_type:
-                            by_object_type[obj_type] = 0
-                        by_object_type[obj_type] += 1
-
-                else:
-                    # Неиспользуемые поля
-                    sample_values = self._get_field_sample_values(app_id, field_name, table_name)
-
-                    unused_field = {
-                        "field_name": field_name,
-                        "table_name": table_name,
-                        "data_type": field_data["data_type"],
-                        "total_rows": field_data["total_rows"],
-                        "distinct_values": field_data["distinct_values"],
-                        "sample_values": sample_values,
-                        "recommendation": "Рассмотрите возможность удаления из модели данных"
-                    }
-
-                    report["improvement_opportunities"]["unused_fields"].append(unused_field)
-                    report["improvement_opportunities"]["potential_savings"]["tables_affected"].add(table_name)
-
-            # Обновляем статистику
-            report["data_fields"]["usage_statistics"]["total_used"] = len(report["data_fields"]["used_fields"])
-            report["data_fields"]["usage_statistics"]["by_table"] = by_table
-            report["data_fields"]["usage_statistics"]["by_object_type"] = by_object_type
-
-            report["improvement_opportunities"]["potential_savings"]["fields_to_remove"] = len(report["improvement_opportunities"]["unused_fields"])
-            report["improvement_opportunities"]["potential_savings"]["tables_affected"] = list(report["improvement_opportunities"]["potential_savings"]["tables_affected"])
-
-            # Обрабатываем переменные
-            for var in variables.get("variables", []):
-                var_data = {
-                    "name": var.get("qName", ""),
-                    "definition": var.get("qDefinition", ""),
-                    "text_value": var.get("qText", ""),
-                    "numeric_value": var.get("qNum", None),
-                    "is_reserved": var.get("qIsReserved", False),
-                    "is_script_created": var.get("qIsScriptCreated", False)
-                }
-
-                if var_data["is_reserved"]:
-                    report["variables"]["system_variables"].append(var_data)
-                else:
-                    report["variables"]["user_variables"].append(var_data)
-
-            # Вычисляем процент использования
-            total_fields = report["summary"]["total_fields"]
-            used_fields = report["summary"]["used_fields"]
-            if total_fields > 0:
-                report["summary"]["usage_percentage"] = round((used_fields / total_fields) * 100, 1)
 
             return report
 
@@ -2158,725 +2082,274 @@ class QlikEngineAPI:
         finally:
             self.disconnect()
 
-    def _analyze_app_metadata(self, app_id: str) -> Dict[str, Any]:
-        """Полный анализ метаданных приложения."""
+    def _get_app_metadata_fast(self, app_handle: int) -> Dict[str, Any]:
+        """Get basic app metadata without heavy analysis."""
         try:
-            # Открываем приложение
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app", "response": app_result}
-
-            app_handle = app_result["qReturn"]["qHandle"]
-
-            # Получаем layout приложения
+            # Get app layout
             layout_response = self.send_request("GetAppLayout", [], handle=app_handle)
-            if "result" not in layout_response or "qLayout" not in layout_response["result"]:
-                return {"error": f"Failed to get app layout: {layout_response}"}
+            layout = layout_response.get("qLayout", {})
 
-            layout = layout_response["result"]["qLayout"]
+            # Get app properties
+            properties_response = self.send_request("GetAppProperties", [], handle=app_handle)
+            properties = properties_response.get("qProperties", {})
 
-            # Основная информация
-            result = {
-                "app_id": app_id,
+            return {
                 "title": layout.get("qTitle", ""),
                 "filename": layout.get("qFileName", ""),
-                "description": layout.get("description", ""),
-                "usage": layout.get("qUsage", ""),
-                "has_script": layout.get("qHasScript", False),
-                "has_data": layout.get("qHasData", False),
+                "description": properties.get("qMetaDef", {}).get("description", ""),
                 "size": layout.get("qStaticByteSize", 0),
                 "created_date": layout.get("createdDate", ""),
                 "modified_date": layout.get("modifiedDate", ""),
                 "last_reload_time": layout.get("qLastReloadTime", ""),
+                "has_script": layout.get("qHasScript", False),
+                "has_data": layout.get("qHasData", False),
                 "published": layout.get("published", False),
-                "publish_time": layout.get("publishTime", ""),
-                "stream": layout.get("stream", {}),
-                "privileges": layout.get("privileges", []),
-                "localization": layout.get("qLocaleInfo", {})
+                "reload_info": {
+                    "last_execution_time": layout.get("qLastReloadTime", ""),
+                    "is_partial_reload": layout.get("qIsPartialReload", False),
+                    "has_data": layout.get("qHasData", False)
+                }
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _get_data_model_structure(self, app_handle: int) -> Dict[str, Any]:
+        """Get tables and fields structure without usage analysis."""
+        try:
+            # Get tables structure using GetTablesAndKeys
+            tables_result = self.send_request(
+                "GetTablesAndKeys",
+                [
+                    {"qcx": 1000, "qcy": 1000},  # Max dimensions
+                    {"qcx": 0, "qcy": 0},  # Min dimensions
+                    50,  # Max tables
+                    False,  # Include system tables
+                    False,  # Include hidden fields
+                ],
+                handle=app_handle,
+            )
+
+            tables = []
+            for table in tables_result.get("qtr", []):
+                table_name = table.get("qName", "")
+                table_fields = []
+
+                for field in table.get("qFields", []):
+                    field_info = {
+                        "name": field.get("qName", ""),
+                        "data_type": self._determine_data_type(field.get("qTags", [])),
+                        "total_rows": field.get("qnRows", 0),
+                        "distinct_values": field.get("qnTotalDistinctValues", 0),
+                        "present_distinct_values": field.get("qnPresentDistinctValues", 0),
+                        "completeness_pct": round(
+                            (field.get("qnNonNulls", 0) / max(field.get("qnRows", 1), 1)) * 100, 1
+                        ),
+                        "is_key": field.get("qIsKey", False),
+                        "key_type": field.get("qKeyType", "")
+                    }
+                    table_fields.append(field_info)
+
+                table_info = {
+                    "name": table_name,
+                    "total_rows": table.get("qNoOfRows", 0),
+                    "field_count": len(table_fields),
+                    "fields": table_fields,
+                    "is_system": table.get("qIsSystem", False),
+                    "is_semantic": table.get("qIsSemantic", False)
+                }
+                tables.append(table_info)
+
+            return {"tables": tables}
+
+        except Exception as e:
+            return {"error": str(e), "tables": []}
+
+    def _determine_data_type(self, tags: List[str]) -> str:
+        """Determine data type from field tags."""
+        if "$numeric" in tags:
+            if "$integer" in tags:
+                return "integer"
+            else:
+                return "numeric"
+        elif "$text" in tags:
+            return "text"
+        elif "$date" in tags:
+            return "date"
+        elif "$timestamp" in tags:
+            return "timestamp"
+        else:
+            return "unknown"
+
+    def _get_user_master_items(self, app_handle: int) -> Dict[str, Any]:
+        """Get only user-created master items (exclude system)."""
+        try:
+            # Get master measures
+            measures = self._get_master_measures(app_handle)
+            user_measures = []
+            for measure in measures:
+                # Filter out system measures
+                if not measure.get("qMeta", {}).get("qIsHidden", False):
+                    user_measures.append({
+                        "name": measure.get("qMeta", {}).get("title", ""),
+                        "description": measure.get("qMeta", {}).get("description", ""),
+                        "definition": measure.get("qMeasure", {}).get("qDef", ""),
+                        "created_date": measure.get("qMeta", {}).get("createdDate", ""),
+                        "modified_date": measure.get("qMeta", {}).get("modifiedDate", ""),
+                        "owner": measure.get("qMeta", {}).get("owner", {}).get("name", "")
+                    })
+
+            # Get master dimensions
+            dimensions = self._get_master_dimensions(app_handle)
+            user_dimensions = []
+            for dimension in dimensions:
+                # Filter out system dimensions
+                if not dimension.get("qMeta", {}).get("qIsHidden", False):
+                    user_dimensions.append({
+                        "name": dimension.get("qMeta", {}).get("title", ""),
+                        "description": dimension.get("qMeta", {}).get("description", ""),
+                        "field_definitions": dimension.get("qDim", {}).get("qFieldDefs", []),
+                        "created_date": dimension.get("qMeta", {}).get("createdDate", ""),
+                        "modified_date": dimension.get("qMeta", {}).get("modifiedDate", ""),
+                        "owner": dimension.get("qMeta", {}).get("owner", {}).get("name", "")
+                    })
+
+            return {
+                "measures": user_measures,
+                "dimensions": user_dimensions
             }
 
-            return result
+        except Exception as e:
+            return {"error": str(e), "measures": [], "dimensions": []}
+
+    def _get_user_variables(self, app_handle: int) -> List[Dict[str, Any]]:
+        """Get only user-created variables (exclude system)."""
+        try:
+            # Create VariableList object
+            variable_list_def = {
+                "qInfo": {"qType": "VariableList"},
+                "qVariableListDef": {
+                    "qType": "variable",
+                    "qShowReserved": False,  # Exclude system variables
+                    "qShowConfig": False,
+                    "qData": {"tags": "/tags"}
+                }
+            }
+
+            variable_list_response = self.send_request("CreateSessionObject", [variable_list_def], handle=app_handle)
+            if "qReturn" not in variable_list_response:
+                return []
+
+            variable_list_handle = variable_list_response["qReturn"]["qHandle"]
+            layout_response = self.send_request("GetLayout", [], handle=variable_list_handle)
+
+            variables = layout_response.get("qLayout", {}).get("qVariableList", {}).get("qItems", [])
+
+            user_variables = []
+            for variable in variables:
+                # Additional filter for user variables only
+                if not variable.get("qIsReserved", False) and not variable.get("qIsConfig", False):
+                    user_variables.append({
+                        "name": variable.get("qName", ""),
+                        "definition": variable.get("qDefinition", ""),
+                        "text_value": variable.get("qText", ""),
+                        "numeric_value": variable.get("qNum", None),
+                        "is_script_created": variable.get("qIsScriptCreated", False)
+                    })
+
+            return user_variables
+
+        except Exception as e:
+            return []
+
+    def _get_object_counts(self, app_handle: int) -> Dict[str, int]:
+        """Get count of objects by type."""
+        try:
+            # Get all app objects
+            all_infos = self.send_request("GetAllInfos", [], handle=app_handle)
+
+            object_counts = {}
+            for info in all_infos.get("qInfos", []):
+                obj_type = info.get("qType", "unknown")
+                object_counts[obj_type] = object_counts.get(obj_type, 0) + 1
+
+            # Group similar types for better readability
+            grouped_counts = {
+                "sheets": object_counts.get("sheet", 0),
+                "charts": (
+                    object_counts.get("barchart", 0) +
+                    object_counts.get("linechart", 0) +
+                    object_counts.get("piechart", 0) +
+                    object_counts.get("combochart", 0) +
+                    object_counts.get("scatterplot", 0)
+                ),
+                "tables": object_counts.get("table", 0),
+                "kpis": object_counts.get("kpi", 0),
+                "filters": (
+                    object_counts.get("listbox", 0) +
+                    object_counts.get("filterpane", 0)
+                ),
+                "text_objects": object_counts.get("text-image", 0),
+                "other": sum(v for k, v in object_counts.items()
+                           if k not in ["sheet", "barchart", "linechart", "piechart",
+                                      "combochart", "scatterplot", "table", "kpi",
+                                      "listbox", "filterpane", "text-image"])
+            }
+
+            # Add total count
+            grouped_counts["total_objects"] = sum(grouped_counts.values())
+
+            return grouped_counts
 
         except Exception as e:
             return {"error": str(e)}
 
-    def _analyze_data_model(self, app_id: str, include_samples: bool = True, max_samples: int = 5) -> Dict[str, Any]:
-        """Полный анализ модели данных приложения."""
+    def _get_table_relationships(self, app_handle: int) -> List[Dict[str, Any]]:
+        """Get relationships between tables based on key fields."""
         try:
-            # Открываем приложение
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app"}
-
-            app_handle = app_result["qReturn"]["qHandle"]
-
-            # Получаем структуру таблиц
+            # Get tables with key information
             tables_result = self.send_request(
                 "GetTablesAndKeys",
                 [
+                    {"qcx": 1000, "qcy": 1000},
                     {"qcx": 0, "qcy": 0},
-                    {"qcx": 0, "qcy": 0},
-                    0,
+                    50,
                     False,
                     False
                 ],
                 handle=app_handle,
             )
 
-            if "qtr" not in tables_result:
-                return {"tables": [], "summary": {"total_tables": 0, "total_fields": 0}}
+            relationships = []
+            tables = tables_result.get("qtr", [])
 
-            tables = tables_result["qtr"]
+            # Find relationships based on field names and key types
+            for i, table1 in enumerate(tables):
+                table1_name = table1.get("qName", "")
+                table1_keys = [f for f in table1.get("qFields", []) if f.get("qIsKey", False)]
 
-            result = {
-                "tables": [],
-                "summary": {
-                    "total_tables": len(tables),
-                    "total_fields": 0,
-                    "total_rows": 0,
-                    "field_types": {}
-                }
-            }
+                for j, table2 in enumerate(tables[i+1:], i+1):
+                    table2_name = table2.get("qName", "")
+                    table2_keys = [f for f in table2.get("qFields", []) if f.get("qIsKey", False)]
 
-            for table in tables:
-                table_name = table.get("qName", "")
-                fields = table.get("qFields", [])
-
-                table_info = {
-                    "name": table_name,
-                    "fields": [],
-                    "field_count": len(fields),
-                    "total_rows": 0
-                }
-
-                # Анализируем поля таблицы
-                for field in fields:
-                    field_name = field.get("qName", "")
-                    is_present = field.get("qPresent", False)
-                    has_duplicates = field.get("qHasDuplicates", False)
-                    non_nulls = field.get("qnNonNulls", 0)
-                    total_rows = field.get("qnRows", 0)
-                    distinct_values = field.get("qnTotalDistinctValues", 0)
-                    key_type = field.get("qKeyType", "")
-                    tags = field.get("qTags", [])
-
-                    # Определяем тип данных из тегов
-                    data_type = "unknown"
-                    if "$numeric" in tags:
-                        if "$integer" in tags:
-                            data_type = "integer"
-                        else:
-                            data_type = "numeric"
-                    elif "$text" in tags:
-                        data_type = "text"
-                    elif "$date" in tags:
-                        data_type = "date"
-                    elif "$timestamp" in tags:
-                        data_type = "timestamp"
-
-                    field_info = {
-                        "name": field_name,
-                        "data_type": data_type,
-                        "is_present": is_present,
-                        "has_duplicates": has_duplicates,
-                        "non_nulls": non_nulls,
-                        "total_rows": total_rows,
-                        "distinct_values": distinct_values,
-                        "key_type": key_type,
-                        "tags": tags
-                    }
-
-                    table_info["fields"].append(field_info)
-
-                    # Обновляем общую статистику
-                    if total_rows > table_info["total_rows"]:
-                        table_info["total_rows"] = total_rows
-
-                    # Подсчитываем типы полей
-                    if data_type in result["summary"]["field_types"]:
-                        result["summary"]["field_types"][data_type] += 1
-                    else:
-                        result["summary"]["field_types"][data_type] = 1
-
-                result["tables"].append(table_info)
-                result["summary"]["total_fields"] += len(fields)
-                result["summary"]["total_rows"] += table_info["total_rows"]
-
-            return result
-
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _analyze_field_usage(self, app_id: str) -> Dict[str, Any]:
-        """Анализ использования каждого поля модели данных в приложении."""
-        try:
-            # Получаем модель данных
-            data_model = self._analyze_data_model(app_id, include_samples=False)
-            if "error" in data_model:
-                return data_model
-
-            # Получаем все объекты
-            objects_data = self._analyze_all_objects(app_id)
-            if "error" in objects_data:
-                return objects_data
-
-            # Получаем переменные
-            variables_data = self._analyze_variables(app_id)
-            if "error" in variables_data:
-                return variables_data
-
-            # Получаем мастер-элементы
-            master_items = self._analyze_master_items(app_id)
-            if "error" in master_items:
-                return master_items
-
-            result = {
-                "fields": {},
-                "summary": {
-                    "total_fields": 0,
-                    "used_fields": 0,
-                    "unused_fields": 0
-                }
-            }
-
-            # Анализируем каждое поле
-            for table in data_model.get("tables", []):
-                table_name = table.get("name", "")
-
-                for field in table.get("fields", []):
-                    field_name = field.get("name", "")
-                    if not field_name:
-                        continue
-
-                    field_key = f"{table_name}.{field_name}"
-                    result["fields"][field_key] = {
-                        "table": table_name,
-                        "field": field_name,
-                        "data_type": field.get("data_type", "unknown"),
-                        "total_rows": field.get("total_rows", 0),
-                        "distinct_values": field.get("distinct_values", 0),
-                        "usage": {
-                            "objects": [],
-                            "variables": [],
-                            "master_measures": [],
-                            "master_dimensions": [],
-                            "is_used": False
-                        }
-                    }
-
-                    field_usage = result["fields"][field_key]["usage"]
-
-                    # Проверяем использование в объектах
-                    for obj_data in objects_data.get("analyzed_objects", []):
-                        obj_id = obj_data.get("object_id", "")
-                        obj_name = obj_data.get("title", "")
-                        obj_type = obj_data.get("type", "")
-
-                        measures = obj_data.get("measures", [])
-                        dimensions = obj_data.get("dimensions", [])
-
-                        # Проверяем в мерах
-                        for measure in measures:
-                            measure_formula = measure.get("qDef", {}).get("qDef", "")
-                            measure_name = measure.get("qDef", {}).get("qLabel", "")
-
-                            if self._field_in_expression(field_name, measure_formula, measure_name):
-                                field_usage["objects"].append({
-                                    "object_id": obj_id,
-                                    "object_name": obj_name,
-                                    "object_type": obj_type,
-                                    "usage_type": "measure",
-                                    "formula": measure_formula or measure_name
+                    # Find common key fields
+                    common_keys = []
+                    for key1 in table1_keys:
+                        for key2 in table2_keys:
+                            if key1.get("qName") == key2.get("qName"):
+                                common_keys.append({
+                                    "field_name": key1.get("qName"),
+                                    "key_type": key1.get("qKeyType", "")
                                 })
-                                field_usage["is_used"] = True
 
-                        # Проверяем в измерениях
-                        for dimension in dimensions:
-                            dimension_formula = dimension.get("qDef", {}).get("qFieldDefs", [""])[0] if dimension.get("qDef", {}).get("qFieldDefs") else ""
-                            dimension_name = dimension.get("qDef", {}).get("qLabel", "")
+                    if common_keys:
+                        relationships.append({
+                            "table1": table1_name,
+                            "table2": table2_name,
+                            "relationship_type": "key_match",
+                            "common_fields": common_keys
+                        })
 
-                            if self._field_in_expression(field_name, dimension_formula, dimension_name):
-                                field_usage["objects"].append({
-                                    "object_id": obj_id,
-                                    "object_name": obj_name,
-                                    "object_type": obj_type,
-                                    "usage_type": "dimension",
-                                    "formula": dimension_formula or dimension_name
-                                })
-                                field_usage["is_used"] = True
-
-                    # Проверяем использование в переменных
-                    for variable in variables_data.get("variables", []):
-                        var_name = variable.get("qName", "")
-                        var_definition = variable.get("qDefinition", "")
-
-                        if self._field_in_expression(field_name, var_definition):
-                            field_usage["variables"].append({
-                                "variable_name": var_name,
-                                "definition": var_definition
-                            })
-                            field_usage["is_used"] = True
-
-                    # Проверяем использование в мастер-мерах
-                    for measure in master_items.get("measures", []):
-                        measure_name = measure.get("qMeta", {}).get("title", "")
-                        measure_def = measure.get("qMeasure", {}).get("qDef", "")
-
-                        if self._field_in_expression(field_name, measure_def):
-                            field_usage["master_measures"].append({
-                                "measure_name": measure_name,
-                                "definition": measure_def
-                            })
-                            field_usage["is_used"] = True
-
-                    # Проверяем использование в мастер-измерениях
-                    for dimension in master_items.get("dimensions", []):
-                        dimension_name = dimension.get("qMeta", {}).get("title", "")
-                        field_defs = dimension.get("qDim", {}).get("qFieldDefs", [])
-
-                        for field_def in field_defs:
-                            if self._field_in_expression(field_name, field_def):
-                                field_usage["master_dimensions"].append({
-                                    "dimension_name": dimension_name,
-                                    "field_definition": field_def
-                                })
-                                field_usage["is_used"] = True
-
-                    # Обновляем счетчики
-                    result["summary"]["total_fields"] += 1
-                    if field_usage["is_used"]:
-                        result["summary"]["used_fields"] += 1
-                    else:
-                        result["summary"]["unused_fields"] += 1
-
-            return result
+            return relationships
 
         except Exception as e:
-            return {"error": str(e)}
-
-    def _field_in_expression(self, field_name: str, expression: str, name: str = "") -> bool:
-        """Проверяет, используется ли поле в выражении."""
-        if not expression and not name:
-            return False
-
-        for text in [expression, name]:
-            if text and (
-                field_name in text or
-                f"[{field_name}]" in text or
-                f" {field_name}" in text or
-                f"({field_name}" in text or
-                f"({field_name})" in text or
-                text == field_name or
-                text == f"[{field_name}]"
-            ):
-                return True
-        return False
-
-    def _analyze_master_items(self, app_id: str) -> Dict[str, Any]:
-        """Полный анализ мастер-мер и мастер-измерений приложения."""
-        try:
-            # Открываем приложение
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app"}
-
-            app_handle = app_result["qReturn"]["qHandle"]
-
-            result = {
-                "measures": [],
-                "dimensions": [],
-                "summary": {}
-            }
-
-            # Получаем мастер-меры
-            measures_result = self._get_master_measures(app_handle)
-            result["measures"] = measures_result
-
-            # Получаем мастер-измерения
-            dimensions_result = self._get_master_dimensions(app_handle)
-            result["dimensions"] = dimensions_result
-
-            # Сводка
-            result["summary"] = {
-                "total_measures": len(result["measures"]),
-                "total_dimensions": len(result["dimensions"]),
-                "published_measures": sum(1 for m in result["measures"] if m.get("qMeta", {}).get("published", False)),
-                "published_dimensions": sum(1 for d in result["dimensions"] if d.get("qMeta", {}).get("published", False))
-            }
-
-            return result
-
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _get_master_measures(self, app_handle: int) -> List[Dict[str, Any]]:
-        """Получение всех мастер-мер приложения."""
-        try:
-            # Создаем объект MeasureList
-            measure_list_def = {
-                "qInfo": {"qType": "MeasureList"},
-                "qMeasureListDef": {
-                    "qType": "measure",
-                    "qData": {
-                        "title": "/title",
-                        "tags": "/tags",
-                        "description": "/qMeta/description",
-                        "expression": "/qMeasure/qDef"
-                    }
-                }
-            }
-
-            measure_list_response = self.send_request("CreateSessionObject", [measure_list_def], handle=app_handle)
-            if "qReturn" not in measure_list_response or "qHandle" not in measure_list_response["qReturn"]:
-                return []
-
-            measure_list_handle = measure_list_response["qReturn"]["qHandle"]
-
-            # Получаем layout с данными
-            layout_response = self.send_request("GetLayout", [], handle=measure_list_handle)
-            if "qLayout" not in layout_response:
-                return []
-
-            layout = layout_response["qLayout"]
-            measure_list = layout.get("qMeasureList", {})
-            measures = measure_list.get("qItems", [])
-
-            return measures
-
-        except Exception:
-            return []
-
-    def _get_master_dimensions(self, app_handle: int) -> List[Dict[str, Any]]:
-        """Получение всех мастер-измерений приложения."""
-        try:
-            # Создаем объект DimensionList
-            dimension_list_def = {
-                "qInfo": {"qType": "DimensionList"},
-                "qDimensionListDef": {
-                    "qType": "dimension",
-                    "qData": {
-                        "title": "/title",
-                        "tags": "/tags",
-                        "grouping": "/qDim/qGrouping",
-                        "info": "/qDimInfos",
-                        "description": "/qMeta/description",
-                        "expression": "/qDim/qFieldDefs"
-                    }
-                }
-            }
-
-            dimension_list_response = self.send_request("CreateSessionObject", [dimension_list_def], handle=app_handle)
-            if "qReturn" not in dimension_list_response or "qHandle" not in dimension_list_response["qReturn"]:
-                return []
-
-            dimension_list_handle = dimension_list_response["qReturn"]["qHandle"]
-
-            # Получаем layout с данными
-            layout_response = self.send_request("GetLayout", [], handle=dimension_list_handle)
-            if "qLayout" not in layout_response:
-                return []
-
-            layout = layout_response["qLayout"]
-            dimension_list = layout.get("qDimensionList", {})
-            dimensions = dimension_list.get("qItems", [])
-
-            return dimensions
-
-        except Exception:
-            return []
-
-    def _analyze_variables(self, app_id: str) -> Dict[str, Any]:
-        """Полный анализ всех переменных приложения."""
-        try:
-            # Открываем приложение
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app"}
-
-            app_handle = app_result["qReturn"]["qHandle"]
-
-            # Создаем объект VariableList
-            variable_list_def = {
-                "qInfo": {"qType": "VariableList"},
-                "qVariableListDef": {
-                    "qType": "variable",
-                    "qShowReserved": True,
-                    "qShowConfig": True,
-                    "qData": {"tags": "/tags"}
-                }
-            }
-
-            variable_list_response = self.send_request("CreateSessionObject", [variable_list_def], handle=app_handle)
-            if "qReturn" not in variable_list_response or "qHandle" not in variable_list_response["qReturn"]:
-                return {"variables": [], "summary": {}}
-
-            variable_list_handle = variable_list_response["qReturn"]["qHandle"]
-
-            # Получаем layout с данными
-            layout_response = self.send_request("GetLayout", [], handle=variable_list_handle)
-            if "qLayout" not in layout_response:
-                return {"variables": [], "summary": {}}
-
-            layout = layout_response["qLayout"]
-            variable_list = layout.get("qVariableList", {})
-            variables = variable_list.get("qItems", [])
-
-            result = {
-                "variables": variables,
-                "user_variables": [],
-                "system_variables": [],
-                "script_variables": [],
-                "summary": {}
-            }
-
-            for variable in variables:
-                is_reserved = variable.get("qIsReserved", False)
-                is_script_created = variable.get("qIsScriptCreated", False)
-
-                if is_reserved:
-                    result["system_variables"].append(variable)
-                else:
-                    result["user_variables"].append(variable)
-
-                if is_script_created:
-                    result["script_variables"].append(variable)
-
-            # Сводка
-            result["summary"] = {
-                "total_variables": len(variables),
-                "user_variables": len(result["user_variables"]),
-                "system_variables": len(result["system_variables"]),
-                "script_variables": len(result["script_variables"])
-            }
-
-            return result
-
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _analyze_all_objects(self, app_id: str) -> Dict[str, Any]:
-        """Анализ всех объектов приложения с детальной информацией."""
-        try:
-            # Открываем приложение
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app"}
-
-            app_handle = app_result["qReturn"]["qHandle"]
-
-            # Получаем листы
-            sheets = self.get_sheets(app_handle)
-            analyzed_objects = []
-
-            for sheet in sheets:
-                sheet_id = sheet.get("qInfo", {}).get("qId", "")
-                if not sheet_id:
-                    continue
-
-                # Получаем объекты листа
-                sheet_objects = self.get_sheet_objects(app_handle, sheet_id)
-
-                for obj in sheet_objects:
-                    obj_id = obj.get("qInfo", {}).get("qId", "")
-                    if not obj_id:
-                        continue
-
-                    # Анализируем объект
-                    analysis = self._analyze_object(app_handle, obj_id)
-                    if "error" not in analysis:
-                        analyzed_objects.append(analysis)
-
-            return {
-                "analyzed_objects": analyzed_objects,
-                "total_analyzed": len(analyzed_objects)
-            }
-
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _analyze_object(self, app_handle: int, object_id: str) -> Dict[str, Any]:
-        """Комплексный анализ объекта: получение handle, layout и properties."""
-        try:
-            # Получаем объект
-            object_response = self.send_request("GetObject", {"qId": object_id}, handle=app_handle)
-            if "qReturn" not in object_response or "qHandle" not in object_response["qReturn"]:
-                return {"error": "Failed to get object"}
-
-            object_handle = object_response["qReturn"]["qHandle"]
-            object_type = object_response["qReturn"]["qGenericType"]
-
-            # Получаем layout
-            layout_response = self.send_request("GetLayout", [], handle=object_handle)
-            if "qLayout" not in layout_response:
-                return {"error": "Failed to get layout"}
-
-            # Получаем properties
-            properties_response = self.send_request("GetProperties", [], handle=object_handle)
-            if "qProp" not in properties_response:
-                return {"error": "Failed to get properties"}
-
-            # Анализируем данные
-            layout = layout_response["qLayout"]
-            properties = properties_response["qProp"]
-
-            # Извлекаем основную информацию
-            title = properties.get("qMetaDef", {}).get("title", "Без названия")
-            description = properties.get("qMetaDef", {}).get("description", "")
-
-            # Анализируем меры
-            measures = self._extract_measures(properties)
-
-            # Анализируем измерения
-            dimensions = self._extract_dimensions(properties)
-
-            return {
-                "object_id": object_id,
-                "handle": object_handle,
-                "type": object_type,
-                "title": title,
-                "description": description,
-                "measures": measures,
-                "dimensions": dimensions,
-                "layout": layout,
-                "properties": properties
-            }
-
-        except Exception as e:
-            return {"error": str(e)}
-
-    def _extract_measures(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Извлечение мер из свойств объекта."""
-        measures = []
-
-        # Ищем меры в разных местах в зависимости от типа объекта
-        # qHyperCubeDef для стандартных визуализаций
-        hypercube = properties.get("qHyperCubeDef", {})
-        if "qMeasures" in hypercube:
-            measures.extend(hypercube["qMeasures"])
-
-        # qListObjectDef для других объектов
-        listobj = properties.get("qListObjectDef", {})
-        if "qMeasures" in listobj:
-            measures.extend(listobj["qMeasures"])
-
-        # Специфичные места для KPI
-        if "qMeasure" in properties:
-            measures.append(properties["qMeasure"])
-
-        return measures
-
-    def _extract_dimensions(self, properties: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Извлечение измерений из свойств объекта."""
-        dimensions = []
-
-        # Ищем измерения в разных местах
-        # qHyperCubeDef для стандартных визуализаций
-        hypercube = properties.get("qHyperCubeDef", {})
-        if "qDimensions" in hypercube:
-            dimensions.extend(hypercube["qDimensions"])
-
-        # qListObjectDef для других объектов
-        listobj = properties.get("qListObjectDef", {})
-        if "qDimensions" in listobj:
-            dimensions.extend(listobj["qDimensions"])
-
-        return dimensions
-
-    def _format_app_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """Форматирование метаданных приложения."""
-        if "error" in metadata:
-            return {"error": metadata["error"]}
-
-        return {
-            "app_id": metadata.get("app_id", ""),
-            "name": metadata.get("title", ""),
-            "description": metadata.get("description", ""),
-            "filename": metadata.get("filename", ""),
-            "usage_type": metadata.get("usage", ""),
-            "size_bytes": metadata.get("size", 0),
-            "size_mb": round(metadata.get("size", 0) / (1024 * 1024), 2),
-            "has_script": metadata.get("has_script", False),
-            "has_data": metadata.get("has_data", False),
-            "created_date": metadata.get("created_date", ""),
-            "modified_date": metadata.get("modified_date", ""),
-            "last_reload_time": metadata.get("last_reload_time", ""),
-            "is_published": metadata.get("published", False),
-            "publish_time": metadata.get("publish_time", ""),
-            "stream": metadata.get("stream", {}),
-            "privileges": metadata.get("privileges", []),
-            "localization": metadata.get("localization", {})
-        }
-
-    def _format_tables_info(self, data_model: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Форматирование информации о таблицах."""
-        if "error" in data_model:
-            return []
-
-        tables_info = []
-        for table in data_model.get("tables", []):
-            table_info = {
-                "name": table.get("name", ""),
-                "total_fields": len(table.get("fields", [])),
-                "key_fields": [f["name"] for f in table.get("fields", []) if f.get("key_type") == "PRIMARY_KEY"],
-                "field_types": {},
-                "total_rows": table.get("total_rows", 0)
-            }
-
-            # Группируем поля по типам
-            for field in table.get("fields", []):
-                field_type = field.get("data_type", "unknown")
-                if field_type not in table_info["field_types"]:
-                    table_info["field_types"][field_type] = 0
-                table_info["field_types"][field_type] += 1
-
-            tables_info.append(table_info)
-
-        return tables_info
-
-    def _format_master_measures(self, master_items: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Форматирование мастер-мер."""
-        if "error" in master_items:
-            return []
-
-        measures = []
-        for measure in master_items.get("measures", []):
-            measure_info = {
-                "name": measure.get("qMeta", {}).get("title", ""),
-                "description": measure.get("qMeta", {}).get("description", ""),
-                "definition": measure.get("qMeasure", {}).get("qDef", ""),
-                "created_date": measure.get("qMeta", {}).get("createdDate", ""),
-                "modified_date": measure.get("qMeta", {}).get("modifiedDate", ""),
-                "is_published": measure.get("qMeta", {}).get("published", False),
-                "owner": measure.get("qMeta", {}).get("owner", {}).get("name", "")
-            }
-            measures.append(measure_info)
-
-        return measures
-
-    def _format_master_dimensions(self, master_items: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Форматирование мастер-измерений."""
-        if "error" in master_items:
-            return []
-
-        dimensions = []
-        for dimension in master_items.get("dimensions", []):
-            dimension_info = {
-                "name": dimension.get("qMeta", {}).get("title", ""),
-                "description": dimension.get("qMeta", {}).get("description", ""),
-                "field_definitions": dimension.get("qDim", {}).get("qFieldDefs", []),
-                "created_date": dimension.get("qMeta", {}).get("createdDate", ""),
-                "modified_date": dimension.get("qMeta", {}).get("modifiedDate", ""),
-                "is_published": dimension.get("qMeta", {}).get("published", False),
-                "owner": dimension.get("qMeta", {}).get("owner", {}).get("name", "")
-            }
-            dimensions.append(dimension_info)
-
-        return dimensions
-
-    def _get_field_sample_values(self, app_id: str, field_name: str, table_name: str, max_samples: int = 10) -> List[str]:
-        """Получение примеров значений для поля."""
-        try:
-            # Простое получение нескольких значений поля
-            return [f"sample_{i}" for i in range(min(3, max_samples))]  # Заглушка
-        except Exception:
             return []
