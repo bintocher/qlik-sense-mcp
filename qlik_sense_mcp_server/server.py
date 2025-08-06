@@ -64,14 +64,12 @@ class QlikSenseMCPServer:
             """
             tools_list = [
                 Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query for app_id, app_name or stream_id"}}}),
-                Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics. Results are cached for 1 hour.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
                 Tool(name="engine_get_field_values", description="Get field values with frequency information", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
-                Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]}),
-                Tool(name="get_cache_stats", description="Get caching system statistics and performance metrics", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
-                Tool(name="clear_app_cache", description="Clear cache for specific app or all cache", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID to clear cache for (optional - if not provided, clears all cache)"}}})
+                Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]})
                 ]
             return tools_list
 
@@ -769,36 +767,6 @@ class QlikSenseMCPServer:
                             self.engine_api.disconnect()
 
                     result = await asyncio.to_thread(_export_visualization)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_cache_stats":
-                    from .cache import get_cache_stats
-                    cache_stats = get_cache_stats()
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(cache_stats, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "clear_app_cache":
-                    from .cache import invalidate_app_cache, app_metadata_cache
-                    app_id = arguments.get("app_id")
-
-                    if app_id:
-                        # Очищаем кэш для конкретного приложения
-                        invalidate_app_cache(app_id)
-                        result = {"status": "success", "message": f"Cache cleared for app {app_id}"}
-                    else:
-                        # Очищаем весь кэш
-                        app_metadata_cache.clear()
-                        result = {"status": "success", "message": "All cache cleared"}
-
                     return [
                         TextContent(
                             type="text",

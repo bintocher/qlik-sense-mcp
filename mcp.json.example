@@ -17,24 +17,11 @@
       "disabled": false,
       "autoApprove": [
         "get_apps",
-        "get_app_details",
-        "get_users",
-        "get_streams",
-        "get_tasks",
-        "start_task",
-        "get_data_connections",
-        "get_extensions",
-        "get_content_libraries",
-        "engine_get_doc_list",
-        "engine_open_app",
-        "engine_get_script",
+        "engine_get_data_model",
+        "engine_get_fields",
         "engine_get_table_data",
-        "engine_get_field_values",
-        "engine_get_field_statistics",
-        "engine_create_hypercube",
-        "engine_create_data_export",
-        "get_cache_stats",
-        "clear_app_cache"
+        "get_app_details",
+        "engine_get_sheets"
       ]
     }
   }

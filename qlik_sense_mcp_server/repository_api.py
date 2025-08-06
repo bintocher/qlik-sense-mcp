@@ -7,7 +7,6 @@ from typing import Dict, List, Any, Optional
 import httpx
 import logging
 from .config import QlikSenseConfig
-from .cache import get_cached_app_metadata, set_cached_app_metadata
 
 logger = logging.getLogger(__name__)
 

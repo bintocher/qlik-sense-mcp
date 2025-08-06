@@ -17,46 +17,28 @@ Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise A
 
 ## Overview
 
-Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 21 tools for applications, data, users, and analytics operations.
+Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 6 essential tools for application metadata retrieval and data analysis operations.
 
 ### Key Features
 
-- **Unified API**: Single interface for all Qlik Sense APIs
+- **Unified API**: Single interface for Qlik Sense Repository and Engine APIs
 - **Security**: Certificate-based authentication support
-- **Performance**: Optimized queries and response handling
-- **Flexibility**: Multiple data export formats
-- **Analytics**: Advanced data analysis tools
+- **Performance**: Optimized queries and direct API access
+- **Analytics**: Advanced data analysis and hypercube creation
+- **Metadata**: Comprehensive application and field information
 
 ## Features
 
-### Repository API (Fully Working)
-| Command | Description | Status |
-|---------|-------------|--------|
-| `get_apps` | Retrieve list of applications | ✅ |
-| `get_app_details` | Get detailed application information | ✅ |
-| `get_app_metadata` | Get application metadata via REST API | ✅ |
-| `get_users` | Retrieve list of users | ✅ |
-| `get_streams` | Get list of streams | ✅ |
-| `get_tasks` | Retrieve list of tasks | ✅ |
-| `start_task` | Execute task | ✅ |
-| `get_data_connections` | Get data connections | ✅ |
-| `get_extensions` | Retrieve extensions | ✅ |
-| `get_content_libraries` | Get content libraries | ✅ |
+### Available Tools
 
-### Engine API (Fully Working)
-| Command | Description | Status |
-|---------|-------------|--------|
-| `engine_get_doc_list` | List documents via Engine API | ✅ |
-| `engine_open_app` | Open application via Engine API | ✅ |
-| `engine_get_script` | Get load script from application | ✅ |
-| `engine_get_fields` | Retrieve application fields | ✅ |
-| `engine_get_sheets` | Get application sheets | ✅ |
-| `engine_get_table_data` | Extract data from tables | ✅ |
-| `engine_get_field_values` | Get field values with frequency | ✅ |
-| `engine_get_field_statistics` | Get comprehensive field statistics | ✅ |
-| `engine_get_data_model` | Get complete data model | ✅ |
-| `engine_create_hypercube` | Create hypercube for analysis | ✅ |
-| `engine_create_data_export` | Export data in multiple formats | ✅ |
+| Tool | Description | API | Status |
+|------|-------------|-----|--------|
+| `get_apps` | Get comprehensive list of applications with metadata | Repository | ✅ |
+| `get_app_details` | Get detailed application analysis including data model | Engine | ✅ |
+| `engine_get_script` | Extract load script from application | Engine | ✅ |
+| `engine_get_field_values` | Get field values with frequency information | Engine | ✅ |
+| `engine_get_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
+| `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
 
 ## Installation
 
@@ -89,7 +71,7 @@ make dev
 - Python 3.12+
 - Qlik Sense Enterprise
 - Valid certificates for authentication
-- Network access to Qlik Sense server
+- Network access to Qlik Sense server (ports 4242, 4747)
 
 ### Setup
 
@@ -122,7 +104,6 @@ QLIK_CA_CERT_PATH=/path/to/certs/root.pem
 
 # API ports (standard Qlik Sense ports)
 QLIK_REPOSITORY_PORT=4242
-QLIK_PROXY_PORT=4243
 QLIK_ENGINE_PORT=4747
 
 # SSL settings
@@ -154,24 +135,10 @@ Create `mcp.json` file for MCP client integration:
       "autoApprove": [
         "get_apps",
         "get_app_details",
-        "get_app_metadata",
-        "get_users",
-        "get_streams",
-        "get_tasks",
-        "get_data_connections",
-        "get_extensions",
-        "get_content_libraries",
-        "engine_get_doc_list",
-        "engine_open_app",
         "engine_get_script",
-        "engine_get_fields",
-        "engine_get_sheets",
-        "engine_get_table_data",
         "engine_get_field_values",
         "engine_get_field_statistics",
-        "engine_get_data_model",
-        "engine_create_hypercube",
-        "engine_create_data_export"
+        "engine_create_hypercube"
       ]
     }
   }
@@ -199,7 +166,16 @@ python -m qlik_sense_mcp_server.server
 ```python
 # Via MCP client
 result = mcp_client.call_tool("get_apps")
-print(f"Found {len(result)} applications")
+print(f"Found {len(result['apps'])} applications")
+```
+
+#### Analyze Application
+```python
+# Get comprehensive app analysis
+result = mcp_client.call_tool("get_app_details", {
+    "app_id": "your-app-id"
+})
+print(f"App has {len(result['data_model']['tables'])} tables")
 ```
 
 #### Create Data Analysis Hypercube
@@ -213,116 +189,61 @@ result = mcp_client.call_tool("engine_create_hypercube", {
 })
 ```
 
-#### Export Data
+#### Get Field Statistics
 ```python
-# Export data in CSV format
-result = mcp_client.call_tool("engine_create_data_export", {
+# Get detailed field statistics
+result = mcp_client.call_tool("engine_get_field_statistics", {
     "app_id": "your-app-id",
-    "table_name": "Sales",
-    "format_type": "csv",
-    "max_rows": 10000
+    "field_name": "Sales"
 })
+print(f"Average: {result['avg_value']['numeric']}")
 ```
 
 ## API Reference
 
-### Repository API Functions
-
-#### get_apps
-Retrieves list of all Qlik Sense applications.
+### get_apps
+Retrieves comprehensive list of all Qlik Sense applications with metadata.
 
 **Parameters:**
 - `filter` (optional): Filter query for application search
 
-**Returns:** Array of application objects with metadata
+**Returns:** Object containing apps array, streams array, and summary statistics
 
-#### get_app_details
-Gets detailed information about specific application.
+**Example:**
+```json
+{
+  "apps": [...],
+  "streams": [...],
+  "summary": {
+    "total_apps": 15,
+    "published_apps": 3,
+    "private_apps": 12
+  }
+}
+```
 
-**Parameters:**
-- `app_id` (required): Application identifier
-
-**Returns:** Application object with complete metadata
-
-#### get_app_metadata
-Retrieves comprehensive application metadata including data model.
-
-**Parameters:**
-- `app_id` (required): Application identifier
-
-**Returns:** Object containing app overview, data model summary, sheets information
-
-#### get_users
-Retrieves list of Qlik Sense users.
-
-**Parameters:**
-- `filter` (optional): Filter query for user search
-
-**Returns:** Array of user objects
-
-#### get_streams
-Gets list of application streams.
-
-**Parameters:** None
-
-**Returns:** Array of stream objects
-
-#### get_tasks
-Retrieves list of tasks (reload, external program).
-
-**Parameters:**
-- `task_type` (optional): Type filter ("reload", "external", "all")
-
-**Returns:** Array of task objects with execution history
-
-#### start_task
-Executes specified task.
-
-**Parameters:**
-- `task_id` (required): Task identifier
-
-**Returns:** Execution result object
-
-#### get_data_connections
-Gets list of data connections.
-
-**Parameters:**
-- `filter` (optional): Filter query for connection search
-
-**Returns:** Array of data connection objects
-
-#### get_extensions
-Retrieves list of Qlik Sense extensions.
-
-**Parameters:** None
-
-**Returns:** Array of extension objects
-
-#### get_content_libraries
-Gets list of content libraries.
-
-**Parameters:** None
-
-**Returns:** Array of content library objects
-
-### Engine API Functions
-
-#### engine_get_doc_list
-Lists available documents via Engine API.
-
-**Parameters:** None
-
-**Returns:** Array of document objects with metadata
-
-#### engine_open_app
-Opens application via Engine API for further operations.
+### get_app_details
+Gets comprehensive application analysis including data model, object counts, and metadata.
 
 **Parameters:**
 - `app_id` (required): Application identifier
 
-**Returns:** Application handle object for subsequent operations
+**Returns:** Detailed application object with data model structure
 
-#### engine_get_script
+**Example:**
+```json
+{
+  "app_metadata": {...},
+  "data_model": {
+    "tables": [...],
+    "total_tables": 2,
+    "total_fields": 45
+  },
+  "object_counts": {...}
+}
+```
+
+### engine_get_script
 Retrieves load script from application.
 
 **Parameters:**
@@ -330,33 +251,16 @@ Retrieves load script from application.
 
 **Returns:** Object containing script text and metadata
 
-#### engine_get_fields
-Gets list of fields from application.
+**Example:**
+```json
+{
+  "qScript": "SET DateFormat='DD.MM.YYYY';\n...",
+  "app_id": "app-id",
+  "script_length": 2830
+}
+```
 
-**Parameters:**
-- `app_id` (required): Application identifier
-
-**Returns:** Array of field objects with metadata and statistics
-
-#### engine_get_sheets
-Retrieves application sheets.
-
-**Parameters:**
-- `app_id` (required): Application identifier
-
-**Returns:** Array of sheet objects with metadata
-
-#### engine_get_table_data
-Extracts data from application tables.
-
-**Parameters:**
-- `app_id` (required): Application identifier
-- `table_name` (optional): Specific table name
-- `max_rows` (optional): Maximum rows to return (default: 1000)
-
-**Returns:** Table data with headers and row information
-
-#### engine_get_field_values
+### engine_get_field_values
 Gets field values with frequency information.
 
 **Parameters:**
@@ -365,9 +269,21 @@ Gets field values with frequency information.
 - `max_values` (optional): Maximum values to return (default: 100)
 - `include_frequency` (optional): Include frequency data (default: true)
 
-**Returns:** Field values with frequency and metadata
+**Returns:** Field values with statistics and dimension information
 
-#### engine_get_field_statistics
+**Example:**
+```json
+{
+  "field_name": "state_name",
+  "values": [
+    {"value": "Найден, жив", "state": "O"},
+    {"value": "Найден, погиб", "state": "O"}
+  ],
+  "total_values": 10
+}
+```
+
+### engine_get_field_statistics
 Retrieves comprehensive field statistics.
 
 **Parameters:**
@@ -376,15 +292,19 @@ Retrieves comprehensive field statistics.
 
 **Returns:** Statistical analysis including min, max, average, median, mode, standard deviation
 
-#### engine_get_data_model
-Gets complete data model with tables and associations.
+**Example:**
+```json
+{
+  "field_name": "age",
+  "min_value": {"numeric": 0},
+  "max_value": {"numeric": 2023},
+  "avg_value": {"numeric": 40.98},
+  "median_value": {"numeric": 38},
+  "std_deviation": {"numeric": 24.88}
+}
+```
 
-**Parameters:**
-- `app_id` (required): Application identifier
-
-**Returns:** Data model structure with relationships
-
-#### engine_create_hypercube
+### engine_create_hypercube
 Creates hypercube for data analysis.
 
 **Parameters:**
@@ -393,20 +313,20 @@ Creates hypercube for data analysis.
 - `measures` (required): Array of measure expressions
 - `max_rows` (optional): Maximum rows to return (default: 1000)
 
-**Returns:** Hypercube data with dimensions and measures
+**Returns:** Hypercube data with dimensions, measures, and total statistics
 
-#### engine_create_data_export
-Exports data in various formats.
-
-**Parameters:**
-- `app_id` (required): Application identifier
-- `table_name` (optional): Table name for export
-- `fields` (optional): Specific fields to export
-- `format_type` (optional): Export format ("json", "csv", "simple")
-- `max_rows` (optional): Maximum rows to export (default: 10000)
-- `filters` (optional): Field filters for data selection
-
-**Returns:** Exported data in specified format
+**Example:**
+```json
+{
+  "hypercube_data": {
+    "qDimensionInfo": [...],
+    "qMeasureInfo": [...],
+    "qDataPages": [...]
+  },
+  "total_rows": 30,
+  "total_columns": 4
+}
+```
 
 ## Architecture
 
@@ -417,14 +337,14 @@ qlik-sense-mcp/
 │   ├── __init__.py
 │   ├── server.py          # Main MCP server
 │   ├── config.py          # Configuration management
-│   ├── repository_api.py  # Repository API client
-│   └── engine_api.py      # Engine API client (WebSocket)
+│   ├── repository_api.py  # Repository API client (HTTP)
+│   ├── engine_api.py      # Engine API client (WebSocket)
+│   └── utils.py           # Utility functions
 ├── certs/                 # Certificates (git ignored)
 │   ├── client.pem
 │   ├── client_key.pem
 │   └── root.pem
 ├── .env.example          # Configuration template
-├── .env                  # Your configuration
 ├── mcp.json.example      # MCP configuration template
 ├── pyproject.toml        # Project dependencies
 └── README.md
@@ -436,7 +356,7 @@ qlik-sense-mcp/
 Main server class handling MCP protocol operations, tool registration, and request routing.
 
 #### QlikRepositoryAPI
-HTTP client for Repository API operations including applications, users, tasks, and metadata management.
+HTTP client for Repository API operations including application metadata and administrative functions.
 
 #### QlikEngineAPI
 WebSocket client for Engine API operations including data extraction, analytics, and hypercube creation.
@@ -447,8 +367,6 @@ Configuration management class handling environment variables, certificate paths
 ## Development
 
 ### Development Environment Setup
-
-The project includes a Makefile with common development tasks:
 
 ```bash
 # Setup development environment
@@ -461,9 +379,7 @@ make help
 make build
 ```
 
-### Version Management and Releases
-
-Use Makefile commands for version management:
+### Version Management
 
 ```bash
 # Bump patch version and create PR
@@ -476,38 +392,12 @@ make version-minor
 make version-major
 ```
 
-This will automatically:
-1. Bump the version in `pyproject.toml`
-2. Create a new branch
-3. Commit changes
-4. Push branch and create PR
-
-### Publishing Process
-
-1. **Merge PR** with version bump
-2. **Create and push tag** to trigger automatic PyPI publication:
-   ```bash
-   git tag v1.0.1
-   git push origin v1.0.1
-   ```
-3. **GitHub Actions** will automatically build and publish to PyPI
-
-### Clean Git History
-
-If you need to start with a clean git history:
-
-```bash
-make git-clean
-```
-
-**Warning**: This completely removes git history!
-
-### Adding New Functions
+### Adding New Tools
 
 1. **Add tool definition in server.py**
 ```python
-# In handle_list_tools()
-{"name": "new_tool", "description": "Tool description", "inputSchema": {...}}
+# In tools_list
+Tool(name="new_tool", description="Tool description", inputSchema={...})
 ```
 
 2. **Add handler in server.py**
@@ -523,16 +413,7 @@ elif name == "new_tool":
 # In repository_api.py or engine_api.py
 def new_method(self, param: str) -> Dict[str, Any]:
     """Method implementation."""
-    # Implementation code
     return result
-```
-
-### Code Standards
-
-The project uses standard Python conventions. Build and test the package:
-
-```bash
-make build   # Build package
 ```
 
 ## Troubleshooting
@@ -568,27 +449,22 @@ ConnectionError: Failed to connect to Engine API
 
 ### Diagnostics
 
-#### Test Repository API
+#### Test Configuration
 ```bash
 python -c "
 from qlik_sense_mcp_server.config import QlikSenseConfig
-from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI
 config = QlikSenseConfig.from_env()
-api = QlikRepositoryAPI(config)
-print('Apps:', len(api.get_apps()))
+print('Config valid:', config and hasattr(config, 'server_url'))
+print('Server URL:', getattr(config, 'server_url', 'Not set'))
 "
 ```
 
-#### Test Engine API
+#### Test Repository API
 ```bash
 python -c "
-from qlik_sense_mcp_server.config import QlikSenseConfig
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
-config = QlikSenseConfig.from_env()
-api = QlikEngineAPI(config)
-api.connect()
-print('Docs:', len(api.get_doc_list()))
-api.disconnect()
+from qlik_sense_mcp_server.server import QlikSenseMCPServer
+server = QlikSenseMCPServer()
+print('Server initialized:', server.config_valid)
 "
 ```
 
@@ -597,18 +473,17 @@ api.disconnect()
 ### Optimization Recommendations
 
 1. **Use filters** to limit data volume
-2. **Cache results** for frequently used queries
-3. **Limit result size** with `max_rows` parameter
-4. **Use Repository API** for metadata (faster than Engine API)
+2. **Limit result size** with `max_rows` parameter
+3. **Use Repository API** for metadata (faster than Engine API)
 
 ### Benchmarks
 
 | Operation | Average Time | Recommendations |
 |-----------|--------------|-----------------|
 | get_apps | 0.5s | Use filters |
-| get_app_metadata | 2-5s | Cache results |
-| engine_create_hypercube | 1-10s | Limit size |
-| engine_create_data_export | 5-30s | Use pagination |
+| get_app_details | 2-5s | Analyze specific apps |
+| engine_create_hypercube | 1-10s | Limit dimensions and measures |
+| engine_get_field_statistics | 0.5-2s | Use for numeric fields |
 
 ## Security
 
@@ -624,8 +499,8 @@ api.disconnect()
 
 Create user in QMC with minimal required permissions:
 - Read applications
-- Execute tasks (if needed)
 - Access Engine API
+- View data (if needed for analysis)
 
 ## License
 
@@ -653,6 +528,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 21/21 Commands Working | v1.0.0
+**Project Status**: Production Ready | 6/6 Tools Working | v1.0.0
 
 **Installation**: `uvx qlik-sense-mcp-server`
