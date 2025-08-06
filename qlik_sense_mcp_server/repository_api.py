@@ -77,11 +77,39 @@ class QlikRepositoryAPI:
             logger.error(f"Request error: {str(e)}")
             return {"error": str(e)}
 
-    def get_comprehensive_apps(self, filter_query: Optional[str] = None) -> Dict[str, Any]:
-        """Get comprehensive list of apps with streams, metadata and ownership information."""
-        # 1. Получаем список приложений
+    def get_comprehensive_apps(self, 
+                                   limit: int = 50, 
+                                   offset: int = 0,
+                                   name_filter: Optional[str] = None,
+                                   app_id_filter: Optional[str] = None,
+                                   include_unpublished: bool = True) -> Dict[str, Any]:
+        """
+        Get comprehensive list of apps with streams, metadata and ownership information.
+        
+        Args:
+            limit: Maximum number of apps to return (default: 50, max: 1000)
+            offset: Number of apps to skip for pagination (default: 0)
+            name_filter: Filter apps by name (case-insensitive partial match)
+            app_id_filter: Filter by specific app ID/GUID
+            include_unpublished: Include unpublished apps (default: True)
+        """
+        # 1. Build filter query
+        filters = []
+        
+        if app_id_filter:
+            filters.append(f"id eq {app_id_filter}")
+        
+        if name_filter:
+            # Use contains for partial name matching
+            filters.append(f"name so '{name_filter}'")
+            
+        if not include_unpublished:
+            filters.append("stream ne null")
+        
+        # 2. Get applications list
         endpoint = "app/full"
-        if filter_query:
+        if filters:
+            filter_query = " and ".join(filters)
             endpoint += f"?filter={filter_query}"
 
         apps_result = self._make_request("GET", endpoint)
@@ -152,15 +180,45 @@ class QlikRepositoryAPI:
                     }
                 })
 
-        # 4. Формируем финальный ответ
+        # 4. Apply additional client-side filtering if needed
+        if name_filter:
+            # Additional case-insensitive filtering on client side for better matching
+            enriched_apps = [
+                app for app in enriched_apps 
+                if name_filter.lower() in app.get("basic_info", {}).get("name", "").lower()
+            ]
+        
+        # 5. Calculate totals before pagination
+        total_found = len(enriched_apps)
+        total_published = len([app for app in enriched_apps if app.get("stream_info", {}).get("published", False)])
+        total_private = total_found - total_published
+        
+        # 6. Apply pagination
+        paginated_apps = enriched_apps[offset:offset + limit]
+        
+        # 7. Build final response with pagination metadata
         return {
-            "apps": enriched_apps,
+            "apps": paginated_apps,
             "streams": streams,
+            "pagination": {
+                "limit": limit,
+                "offset": offset,
+                "returned": len(paginated_apps),
+                "total_found": total_found,
+                "has_more": offset + limit < total_found,
+                "next_offset": offset + limit if offset + limit < total_found else None
+            },
+            "filters": {
+                "name_filter": name_filter,
+                "app_id_filter": app_id_filter,
+                "include_unpublished": include_unpublished
+            },
             "summary": {
-                "total_apps": len(enriched_apps),
-                "published_apps": len([app for app in enriched_apps if app.get("stream_info", {}).get("published", False)]),
-                "private_apps": len([app for app in enriched_apps if not app.get("stream_info", {}).get("published", False)]),
-                "total_streams": len(streams)
+                "total_apps": total_found,
+                "published_apps": total_published,
+                "private_apps": total_private,
+                "total_streams": len(streams),
+                "showing": f"{offset + 1}-{min(offset + limit, total_found)} of {total_found}"
             }
         }
 

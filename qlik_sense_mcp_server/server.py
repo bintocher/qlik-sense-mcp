@@ -63,7 +63,7 @@ class QlikSenseMCPServer:
             including applications, analytics tools, and data export.
             """
             tools_list = [
-                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query for app_id, app_name or stream_id"}}}),
+                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information. Supports pagination and filtering.", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "description": "Maximum number of apps to return (default: 50, max: 1000)", "default": 50}, "offset": {"type": "integer", "description": "Number of apps to skip for pagination (default: 0)", "default": 0}, "name_filter": {"type": "string", "description": "Filter apps by name (case-insensitive partial match)"}, "app_id_filter": {"type": "string", "description": "Filter by specific app ID/GUID"}, "include_unpublished": {"type": "boolean", "description": "Include unpublished apps (default: true)", "default": True}}}),
                 Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
@@ -103,8 +103,27 @@ class QlikSenseMCPServer:
             """
             try:
                 if name == "get_apps":
-                    filter_query = arguments.get("filter")
-                    comprehensive_apps = await asyncio.to_thread(self.repository_api.get_comprehensive_apps, filter_query)
+                    # Extract pagination and filter parameters
+                    limit = arguments.get("limit", 50)
+                    offset = arguments.get("offset", 0)
+                    name_filter = arguments.get("name_filter")
+                    app_id_filter = arguments.get("app_id_filter")
+                    include_unpublished = arguments.get("include_unpublished", True)
+
+                    # Validate limit
+                    if limit > 1000:
+                        limit = 1000
+                    if limit < 1:
+                        limit = 1
+
+                    comprehensive_apps = await asyncio.to_thread(
+                        self.repository_api.get_comprehensive_apps,
+                        limit=limit,
+                        offset=offset,
+                        name_filter=name_filter,
+                        app_id_filter=app_id_filter,
+                        include_unpublished=include_unpublished
+                    )
                     return [
                         TextContent(
                             type="text",
@@ -830,7 +849,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.1.0")
+            print("qlik-sense-mcp-server 1.1.1")
             return
 
     asyncio.run(async_main())

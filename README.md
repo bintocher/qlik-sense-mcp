@@ -164,9 +164,21 @@ python -m qlik_sense_mcp_server.server
 
 #### Get Applications List
 ```python
-# Via MCP client
+# Via MCP client - get first 50 apps (default)
 result = mcp_client.call_tool("get_apps")
-print(f"Found {len(result['apps'])} applications")
+print(f"Showing {result['pagination']['returned']} of {result['pagination']['total_found']} apps")
+
+# Search for specific apps
+result = mcp_client.call_tool("get_apps", {
+    "name_filter": "Sales",
+    "limit": 10
+})
+
+# Get more apps (pagination)
+result = mcp_client.call_tool("get_apps", {
+    "offset": 50,
+    "limit": 50
+})
 ```
 
 #### Analyze Application
@@ -202,24 +214,63 @@ print(f"Average: {result['avg_value']['numeric']}")
 ## API Reference
 
 ### get_apps
-Retrieves comprehensive list of all Qlik Sense applications with metadata.
+Retrieves comprehensive list of Qlik Sense applications with metadata, pagination and filtering support.
 
 **Parameters:**
-- `filter` (optional): Filter query for application search
+- `limit` (optional): Maximum number of apps to return (default: 50, max: 1000)
+- `offset` (optional): Number of apps to skip for pagination (default: 0)
+- `name_filter` (optional): Filter apps by name (case-insensitive partial match)
+- `app_id_filter` (optional): Filter by specific app ID/GUID
+- `include_unpublished` (optional): Include unpublished apps (default: true)
 
-**Returns:** Object containing apps array, streams array, and summary statistics
+**Returns:** Object containing paginated apps, streams, and pagination metadata
 
-**Example:**
+**Example (default - first 50 apps):**
 ```json
 {
   "apps": [...],
   "streams": [...],
+  "pagination": {
+    "limit": 50,
+    "offset": 0,
+    "returned": 50,
+    "total_found": 1598,
+    "has_more": true,
+    "next_offset": 50
+  },
+  "filters": {
+    "name_filter": null,
+    "app_id_filter": null,
+    "include_unpublished": true
+  },
   "summary": {
-    "total_apps": 15,
-    "published_apps": 3,
-    "private_apps": 12
+    "total_apps": 1598,
+    "published_apps": 857,
+    "private_apps": 741,
+    "total_streams": 40,
+    "showing": "1-50 of 1598"
   }
 }
+```
+
+**Example (with name filter):**
+```python
+# Search for apps containing "dashboard"
+result = mcp_client.call_tool("get_apps", {
+    "name_filter": "dashboard",
+    "limit": 10
+})
+
+# Get specific app by ID
+result = mcp_client.call_tool("get_apps", {
+    "app_id_filter": "e2958865-2aed-4f8a-b3c7-20e6f21d275c"
+})
+
+# Get next page of results
+result = mcp_client.call_tool("get_apps", {
+    "limit": 50,
+    "offset": 50
+})
 ```
 
 ### get_app_details
@@ -528,6 +579,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 6/6 Tools Working | v1.1.0
+**Project Status**: Production Ready | 6/6 Tools Working | v1.1.1
 
 **Installation**: `uvx qlik-sense-mcp-server`
