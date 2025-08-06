@@ -60,27 +60,16 @@ class QlikSenseMCPServer:
             List all available MCP tools for Qlik Sense operations.
 
             Returns tool definitions with schemas for Repository API and Engine API operations
-            including applications, users, data connections, analytics tools, and data export.
+            including applications, analytics tools, and data export.
             """
             tools_list = [
-                Tool(name="get_apps", description="Get list of Qlik Sense applications", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
+                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query for app_id, app_name or stream_id"}}}),
                 Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics. Results are cached for 1 hour.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="get_users", description="Get list of users in Qlik Sense", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
-                Tool(name="get_streams", description="Get list of streams in Qlik Sense", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
-                Tool(name="get_data_connections", description="Get list of data connections", inputSchema={"type": "object", "properties": {"filter": {"type": "string", "description": "Optional filter query"}}}),
-                Tool(name="get_tasks", description="Get list of tasks", inputSchema={"type": "object", "properties": {"task_type": {"type": "string", "enum": ["reload", "external", "all"], "description": "Type of tasks"}}}),
-                Tool(name="start_task", description="Start execution of a task", inputSchema={"type": "object", "properties": {"task_id": {"type": "string", "description": "Task ID"}}, "required": ["task_id"]}),
-                Tool(name="get_extensions", description="Get list of extensions", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
-                Tool(name="get_content_libraries", description="Get list of content libraries", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
-                Tool(name="engine_get_doc_list", description="Get list of documents via Engine API", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
-                Tool(name="engine_open_app", description="Open an app via Engine API", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_table_data", description="Get data from specific table or all tables", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional - if not provided, returns info about all tables)"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id"]}),
                 Tool(name="engine_get_field_values", description="Get field values with frequency information", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]}),
-                Tool(name="engine_create_data_export", description="Export data in various formats (JSON, CSV, simple)", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "table_name": {"type": "string", "description": "Table name (optional)"}, "fields": {"type": "array", "items": {"type": "string"}, "description": "List of fields to export (optional)"}, "format_type": {"type": "string", "enum": ["json", "csv", "simple"], "description": "Export format", "default": "json"}, "max_rows": {"type": "integer", "description": "Maximum rows to export", "default": 10000}, "filters": {"type": "object", "description": "Field filters (optional)"}}, "required": ["app_id"]}),
                 Tool(name="get_cache_stats", description="Get caching system statistics and performance metrics", inputSchema={"type": "object", "properties": {"random_string": {"type": "string", "description": "Dummy parameter for no-parameter tools"}}}),
                 Tool(name="clear_app_cache", description="Clear cache for specific app or all cache", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID to clear cache for (optional - if not provided, clears all cache)"}}})
                 ]
@@ -117,11 +106,11 @@ class QlikSenseMCPServer:
             try:
                 if name == "get_apps":
                     filter_query = arguments.get("filter")
-                    apps = await asyncio.to_thread(self.repository_api.get_apps, filter_query)
+                    comprehensive_apps = await asyncio.to_thread(self.repository_api.get_comprehensive_apps, filter_query)
                     return [
                         TextContent(
                             type="text",
-                            text=json.dumps(apps, indent=2, ensure_ascii=False)
+                            text=json.dumps(comprehensive_apps, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -142,113 +131,9 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                elif name == "get_users":
-                    filter_query = arguments.get("filter")
-                    users = await asyncio.to_thread(self.repository_api.get_users, filter_query)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(users, indent=2, ensure_ascii=False)
-                        )
-                    ]
 
-                elif name == "get_streams":
-                    streams = await asyncio.to_thread(self.repository_api.get_streams)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(streams, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_data_connections":
-                    filter_query = arguments.get("filter")
-                    connections = await asyncio.to_thread(self.repository_api.get_data_connections, filter_query)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(connections, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_tasks":
-                    task_type = arguments.get("task_type", "all")
-                    if task_type == "all":
-                        task_type = None
-                    tasks = await asyncio.to_thread(self.repository_api.get_tasks, task_type)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(tasks, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "start_task":
-                    task_id = arguments["task_id"]
-                    result = await asyncio.to_thread(self.repository_api.start_task, task_id)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_extensions":
-                    extensions = await asyncio.to_thread(self.repository_api.get_extensions)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(extensions, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "get_content_libraries":
-                    libraries = await asyncio.to_thread(self.repository_api.get_content_libraries)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(libraries, indent=2, ensure_ascii=False)
-                        )
-                    ]
 
                 # Engine API handlers
-                elif name == "engine_get_doc_list":
-                    def _get_doc_list():
-                        try:
-                            self.engine_api.connect()
-                            return self.engine_api.get_doc_list()
-                        except Exception as e:
-                            return {"error": str(e), "docs": []}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    docs = await asyncio.to_thread(_get_doc_list)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(docs, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "engine_open_app":
-                    app_id = arguments["app_id"]
-
-                    def _open_app():
-                        try:
-                            self.engine_api.connect()
-                            return self.engine_api.open_doc(app_id)
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_open_app)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
 
                 elif name == "engine_get_script":
                     app_id = arguments["app_id"]
@@ -313,33 +198,6 @@ class QlikSenseMCPServer:
                     ]
 
                 # New Analytics Tools - Этап 1
-                elif name == "engine_get_table_data":
-                    app_id = arguments["app_id"]
-                    table_name = arguments.get("table_name")
-                    max_rows = arguments.get("max_rows", 1000)
-
-                    def _get_table_data():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_table_data(app_handle, table_name, max_rows)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_get_table_data)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
                 elif name == "engine_get_field_values":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
@@ -451,39 +309,6 @@ class QlikSenseMCPServer:
                             text=json.dumps(result, indent=2, ensure_ascii=False)
                         )
                     ]
-
-                elif name == "engine_create_data_export":
-                    app_id = arguments["app_id"]
-                    table_name = arguments.get("table_name")
-                    fields = arguments.get("fields")
-                    format_type = arguments.get("format_type", "json")
-                    max_rows = arguments.get("max_rows", 10000)
-                    filters = arguments.get("filters")
-
-                    def _create_data_export():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.create_data_export(
-                                    app_handle, table_name, fields, format_type, max_rows, filters
-                                )
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_create_data_export)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
 
                 # Advanced Repository API handlers
                 elif name == "get_app_reload_chain":
@@ -813,33 +638,6 @@ class QlikSenseMCPServer:
                     ]
 
                 # New table and visualization methods
-                elif name == "engine_get_table_data":
-                    app_id = arguments["app_id"]
-                    table_name = arguments.get("table_name")
-                    max_rows = arguments.get("max_rows", 1000)
-
-                    def _get_table_data():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_table_data(app_handle, table_name, max_rows)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_get_table_data)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
                 elif name == "engine_get_visualization_data":
                     app_id = arguments["app_id"]
                     object_id = arguments["object_id"]
@@ -1125,10 +923,10 @@ EXAMPLES:
     qlik-sense-mcp-server
 
 AVAILABLE TOOLS:
-    Repository API: get_apps, get_app_details, get_users, get_streams, get_tasks, start_task, etc.
-    Engine API: engine_get_script, engine_create_hypercube, engine_get_table_data, etc.
+    Repository API: get_apps (comprehensive), get_app_details
+    Engine API: engine_get_script, engine_create_hypercube, engine_get_field_values, engine_get_field_statistics
 
-    Total: 19 tools for Qlik Sense operations
+    Total: 8 tools for Qlik Sense analytics operations
 
 MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp
