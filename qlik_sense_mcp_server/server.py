@@ -63,7 +63,7 @@ class QlikSenseMCPServer:
             including applications, analytics tools, and data export.
             """
             tools_list = [
-                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information. Supports pagination and filtering.", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "description": "Maximum number of apps to return (default: 50, max: 1000)", "default": 50}, "offset": {"type": "integer", "description": "Number of apps to skip for pagination (default: 0)", "default": 0}, "name_filter": {"type": "string", "description": "Filter apps by name (case-insensitive partial match)"}, "app_id_filter": {"type": "string", "description": "Filter by specific app ID/GUID"}, "include_unpublished": {"type": "boolean", "description": "Include unpublished apps (default: true)", "default": True}}}),
+                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information. Supports pagination and filtering.", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "description": "Maximum number of apps to return (default: 50, max: 100)", "default": 50}, "offset": {"type": "integer", "description": "Number of apps to skip for pagination (default: 0)", "default": 0}, "name_filter": {"type": "string", "description": "Filter apps by name (case-insensitive partial match)"}, "app_id_filter": {"type": "string", "description": "Filter by specific app ID/GUID"}, "include_unpublished": {"type": "boolean", "description": "Include unpublished apps (default: false)", "default": False}}}),
                 Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
@@ -108,11 +108,11 @@ class QlikSenseMCPServer:
                     offset = arguments.get("offset", 0)
                     name_filter = arguments.get("name_filter")
                     app_id_filter = arguments.get("app_id_filter")
-                    include_unpublished = arguments.get("include_unpublished", True)
+                    include_unpublished = arguments.get("include_unpublished", False)
 
                     # Validate limit
-                    if limit > 1000:
-                        limit = 1000
+                    if limit > 100:
+                        limit = 100
                     if limit < 1:
                         limit = 1
 

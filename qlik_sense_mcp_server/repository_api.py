@@ -77,35 +77,38 @@ class QlikRepositoryAPI:
             logger.error(f"Request error: {str(e)}")
             return {"error": str(e)}
 
-    def get_comprehensive_apps(self, 
-                                   limit: int = 50, 
+    def get_comprehensive_apps(self,
+                                   limit: int = 50,
                                    offset: int = 0,
                                    name_filter: Optional[str] = None,
                                    app_id_filter: Optional[str] = None,
-                                   include_unpublished: bool = True) -> Dict[str, Any]:
+                                   include_unpublished: bool = False) -> Dict[str, Any]:
         """
         Get comprehensive list of apps with streams, metadata and ownership information.
-        
+
         Args:
-            limit: Maximum number of apps to return (default: 50, max: 1000)
+            limit: Maximum number of apps to return (default: 50, max: 100)
             offset: Number of apps to skip for pagination (default: 0)
             name_filter: Filter apps by name (case-insensitive partial match)
             app_id_filter: Filter by specific app ID/GUID
-            include_unpublished: Include unpublished apps (default: True)
+            include_unpublished: Include unpublished apps (default: False)
         """
+        # Enforce strict limit - maximum 100 apps per request
+        if limit > 100:
+            limit = 100
         # 1. Build filter query
         filters = []
-        
+
         if app_id_filter:
             filters.append(f"id eq {app_id_filter}")
-        
+
         if name_filter:
             # Use contains for partial name matching
             filters.append(f"name so '{name_filter}'")
-            
+
         if not include_unpublished:
             filters.append("stream ne null")
-        
+
         # 2. Get applications list
         endpoint = "app/full"
         if filters:
@@ -184,18 +187,18 @@ class QlikRepositoryAPI:
         if name_filter:
             # Additional case-insensitive filtering on client side for better matching
             enriched_apps = [
-                app for app in enriched_apps 
+                app for app in enriched_apps
                 if name_filter.lower() in app.get("basic_info", {}).get("name", "").lower()
             ]
-        
+
         # 5. Calculate totals before pagination
         total_found = len(enriched_apps)
         total_published = len([app for app in enriched_apps if app.get("stream_info", {}).get("published", False)])
         total_private = total_found - total_published
-        
+
         # 6. Apply pagination
         paginated_apps = enriched_apps[offset:offset + limit]
-        
+
         # 7. Build final response with pagination metadata
         return {
             "apps": paginated_apps,
