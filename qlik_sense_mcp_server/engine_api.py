@@ -304,11 +304,8 @@ class QlikEngineAPI:
     def get_sheets(self, app_handle: int) -> List[Dict[str, Any]]:
         """Get app sheets."""
         try:
-            # Шаг 1: Создаем SheetList объект
             sheet_list_def = {
-                "qInfo": {
-                    "qType": "SheetList"
-                },
+                "qInfo": {"qType": "SheetList"},
                 "qAppObjectListDef": {
                     "qType": "sheet",
                     "qData": {
@@ -323,7 +320,6 @@ class QlikEngineAPI:
                 }
             }
 
-            # Создаем session object для списка листов
             create_result = self.send_request("CreateSessionObject", [sheet_list_def], handle=app_handle)
 
             if "qReturn" not in create_result or "qHandle" not in create_result["qReturn"]:
@@ -331,17 +327,13 @@ class QlikEngineAPI:
                 return []
 
             sheet_list_handle = create_result["qReturn"]["qHandle"]
-
-            # Шаг 2: Получаем layout со списком листов
             layout_result = self.send_request("GetLayout", [], handle=sheet_list_handle)
-
             if "qLayout" not in layout_result or "qAppObjectList" not in layout_result["qLayout"]:
                 print(f"WARNING: No sheet list in layout: {layout_result}")
                 return []
 
             sheets = layout_result["qLayout"]["qAppObjectList"]["qItems"]
             print(f"INFO: Found {len(sheets)} sheets")
-
             return sheets
 
         except Exception as e:
@@ -415,9 +407,8 @@ class QlikEngineAPI:
                     }
                 }
 
-            # Get detailed info for each sheet and its objects
             detailed_sheets = []
-            field_usage_map = {}  # {field_name: {objects: [], sheets: []}}
+            field_usage_map = {}
 
             for sheet in sheets:
                 if not isinstance(sheet, dict) or "qInfo" not in sheet:
@@ -428,17 +419,14 @@ class QlikEngineAPI:
 
                 print(f"INFO: Processing sheet {sheet_id}: {sheet_title}")
 
-                # Получаем объекты листа правильным способом
                 sheet_objects = self._get_sheet_objects_detailed(app_handle, sheet_id)
 
-                # Анализируем поля в объектах
                 for obj in sheet_objects:
                     if isinstance(obj, dict) and "fields_used" in obj:
                         for field_name in obj["fields_used"]:
                             if field_name not in field_usage_map:
                                 field_usage_map[field_name] = {"objects": [], "sheets": []}
 
-                            # Добавляем объект
                             field_usage_map[field_name]["objects"].append({
                                 "object_id": obj.get("object_id", ""),
                                 "object_type": obj.get("object_type", ""),
@@ -447,7 +435,6 @@ class QlikEngineAPI:
                                 "sheet_title": sheet_title
                             })
 
-                            # Добавляем лист (если еще не добавлен)
                             sheet_already_added = any(
                                 s["sheet_id"] == sheet_id
                                 for s in field_usage_map[field_name]["sheets"]
@@ -485,18 +472,13 @@ class QlikEngineAPI:
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
         """Get detailed information about objects on a sheet."""
         try:
-            # Шаг 1: Получаем handle листа
             sheet_result = self.send_request("GetObject", {"qId": sheet_id}, handle=app_handle)
-
             if "qReturn" not in sheet_result or "qHandle" not in sheet_result["qReturn"]:
                 print(f"WARNING: Failed to get sheet object {sheet_id}: {sheet_result}")
                 return []
 
             sheet_handle = sheet_result["qReturn"]["qHandle"]
-
-            # Шаг 2: Получаем layout листа с объектами
             sheet_layout = self.send_request("GetLayout", [], handle=sheet_handle)
-
             if "qLayout" not in sheet_layout or "qChildList" not in sheet_layout["qLayout"]:
                 print(f"WARNING: No child objects in sheet {sheet_id}")
                 return []
@@ -504,32 +486,20 @@ class QlikEngineAPI:
             child_objects = sheet_layout["qLayout"]["qChildList"]["qItems"]
             detailed_objects = []
 
-            # Шаг 3: Получаем детальную информацию для каждого объекта
             for child_obj in child_objects:
                 obj_id = child_obj.get("qInfo", {}).get("qId", "")
                 obj_type = child_obj.get("qInfo", {}).get("qType", "")
-
                 if not obj_id:
                     continue
-
                 try:
-                    # Получаем handle объекта
                     obj_result = self.send_request("GetObject", {"qId": obj_id}, handle=app_handle)
-
                     if "qReturn" not in obj_result or "qHandle" not in obj_result["qReturn"]:
                         continue
-
                     obj_handle = obj_result["qReturn"]["qHandle"]
-
-                    # Получаем layout объекта
                     obj_layout = self.send_request("GetLayout", [], handle=obj_handle)
-
                     if "qLayout" not in obj_layout:
                         continue
-
-                    # Анализируем поля в объекте
                     fields_used = self._extract_fields_from_object(obj_layout["qLayout"])
-
                     detailed_obj = {
                         "object_id": obj_id,
                         "object_type": obj_type,
@@ -539,10 +509,8 @@ class QlikEngineAPI:
                         "basic_info": child_obj,
                         "detailed_layout": obj_layout["qLayout"]
                     }
-
                     detailed_objects.append(detailed_obj)
                     print(f"INFO: Processed object {obj_id} ({obj_type}) with {len(fields_used)} fields")
-
                 except Exception as obj_error:
                     print(f"WARNING: Error processing object {obj_id}: {obj_error}")
                     continue
@@ -556,30 +524,22 @@ class QlikEngineAPI:
     def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
         """Extract field names used in an object layout."""
         fields = set()
-
         try:
-            # Анализируем HyperCube
             if "qHyperCube" in obj_layout:
                 hypercube = obj_layout["qHyperCube"]
-
-                # Dimensions
                 for dim_info in hypercube.get("qDimensionInfo", []):
                     field_defs = dim_info.get("qGroupFieldDefs", [])
                     for field_def in field_defs:
                         field_name = self._extract_field_name_from_expression(field_def)
                         if field_name:
                             fields.add(field_name)
-
-                # Measures
                 for measure_info in hypercube.get("qMeasureInfo", []):
                     measure_def = measure_info.get("qDef", "")
                     extracted_fields = self._extract_fields_from_expression(measure_def)
                     fields.update(extracted_fields)
 
-            # Анализируем ListObject
             if "qListObject" in obj_layout:
                 list_obj = obj_layout["qListObject"]
-
                 for dim_info in list_obj.get("qDimensionInfo", []):
                     field_defs = dim_info.get("qGroupFieldDefs", [])
                     for field_def in field_defs:
@@ -587,11 +547,8 @@ class QlikEngineAPI:
                         if field_name:
                             fields.add(field_name)
 
-            # Анализируем другие типы объектов
-            # Для filterpane, kpi и других специальных объектов
             if "qChildList" in obj_layout:
                 for child in obj_layout["qChildList"].get("qItems", []):
-                    # Рекурсивно анализируем дочерние объекты
                     pass
 
         except Exception as e:
@@ -603,32 +560,22 @@ class QlikEngineAPI:
         """Extract field name from a simple field expression."""
         if not expression:
             return None
-
         expression = expression.strip()
-
-        # Убираем квадратные скобки для простых полей [FieldName]
         if expression.startswith('[') and expression.endswith(']') and expression.count('[') == 1:
             return expression[1:-1]
-
-        # Если это простое имя поля без скобок и функций
         if ' ' not in expression and '(' not in expression and not any(op in expression for op in ['=', '+', '-', '*', '/']):
             return expression
-
         return None
 
     def _extract_fields_from_expression(self, expression: str) -> List[str]:
         """Extract field names from a complex expression."""
         import re
         fields = []
-
         if not expression:
             return fields
-
-        # Ищем поля в квадратных скобках [FieldName]
         bracket_fields = re.findall(r'\[([^\]]+)\]', expression)
         fields.extend(bracket_fields)
-
-        return list(set(fields))  # Убираем дубликаты
+        return list(set(fields))
 
     def get_fields(self, app_handle: int) -> List[Dict[str, Any]]:
         """Get app fields using GetTablesAndKeys method."""
@@ -991,7 +938,6 @@ class QlikEngineAPI:
                 "qHyperCubeDef": hypercube_def,
             }
 
-            # Создаем session object
             result = self.send_request(
                 "CreateSessionObject", [obj_def], handle=app_handle
             )
@@ -1004,7 +950,6 @@ class QlikEngineAPI:
 
             cube_handle = result["qReturn"]["qHandle"]
 
-            # Получаем layout с данными
             layout = self.send_request("GetLayout", [], handle=cube_handle)
 
             if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
@@ -1113,7 +1058,6 @@ class QlikEngineAPI:
 
             list_handle = result["qReturn"]["qHandle"]
 
-            # Получаем layout с данными
             layout = self.send_request("GetLayout", [], handle=list_handle)
 
             # Correct path to qListObject - it's in qLayout
@@ -1166,7 +1110,6 @@ class QlikEngineAPI:
                 },
             }
 
-            # Очищаем созданный объект
             try:
                 self.send_request(
                     "DestroySessionObject",
@@ -1718,20 +1661,12 @@ class QlikEngineAPI:
     def get_visualization_data(self, app_handle: int, object_id: str) -> Dict[str, Any]:
         """Get data from existing visualization object (chart, table, etc.)."""
         try:
-            # Получаем объект по ID
             obj_result = self.send_request("GetObject", [object_id], handle=app_handle)
-
             if "qReturn" not in obj_result or "qHandle" not in obj_result["qReturn"]:
-                return {
-                    "error": f"Failed to get object with ID: {object_id}",
-                    "response": obj_result,
-                }
+                return {"error": f"Failed to get object with ID: {object_id}", "response": obj_result}
 
             obj_handle = obj_result["qReturn"]["qHandle"]
-
-            # Получаем layout объекта
             layout = self.send_request("GetLayout", [], handle=obj_handle)
-
             if "qLayout" not in layout:
                 return {"error": "No layout found for object", "layout": layout}
 
@@ -1747,72 +1682,40 @@ class QlikEngineAPI:
                 "structure": None,
             }
 
-            # Обрабатываем разные типы объектов
             if "qHyperCube" in obj_layout:
-                # Объект с hypercube (большинство графиков и таблиц)
                 hypercube = obj_layout["qHyperCube"]
-
-                # Извлекаем данные
                 table_data = []
                 dimensions = []
                 measures = []
-
-                # Получаем информацию о dimensions
                 for dim_info in hypercube.get("qDimensionInfo", []):
-                    dimensions.append(
-                        {
-                            "title": dim_info.get("qFallbackTitle", ""),
-                            "field": (
-                                dim_info.get("qGroupFieldDefs", [""])[0]
-                                if dim_info.get("qGroupFieldDefs")
-                                else ""
-                            ),
-                            "cardinal": dim_info.get("qCardinal", 0),
-                        }
-                    )
-
-                # Получаем информацию о measures
+                    dimensions.append({
+                        "title": dim_info.get("qFallbackTitle", ""),
+                        "field": (dim_info.get("qGroupFieldDefs", [""])[0] if dim_info.get("qGroupFieldDefs") else ""),
+                        "cardinal": dim_info.get("qCardinal", 0),
+                    })
                 for measure_info in hypercube.get("qMeasureInfo", []):
-                    measures.append(
-                        {
-                            "title": measure_info.get("qFallbackTitle", ""),
-                            "expression": measure_info.get("qDef", ""),
-                            "format": measure_info.get("qNumFormat", {}),
-                        }
-                    )
-
-                # Извлекаем данные из страниц
+                    measures.append({
+                        "title": measure_info.get("qFallbackTitle", ""),
+                        "expression": measure_info.get("qDef", ""),
+                        "format": measure_info.get("qNumFormat", {}),
+                    })
                 for page in hypercube.get("qDataPages", []):
                     for row in page.get("qMatrix", []):
                         row_data = {}
-
-                        # Dimensions
                         for i, cell in enumerate(row[: len(dimensions)]):
                             if i < len(dimensions):
                                 row_data[f"dim_{i}_{dimensions[i]['title']}"] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (
-                                        cell.get("qNum", None)
-                                        if cell.get("qNum") != "NaN"
-                                        else None
-                                    ),
+                                    "numeric": (cell.get("qNum", None) if cell.get("qNum") != "NaN" else None),
                                     "state": cell.get("qState", "O"),
                                 }
-
-                        # Measures
                         for i, cell in enumerate(row[len(dimensions) :]):
                             if i < len(measures):
                                 row_data[f"measure_{i}_{measures[i]['title']}"] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (
-                                        cell.get("qNum", None)
-                                        if cell.get("qNum") != "NaN"
-                                        else None
-                                    ),
+                                    "numeric": (cell.get("qNum", None) if cell.get("qNum") != "NaN" else None),
                                 }
-
                         table_data.append(row_data)
-
                 result["data"] = table_data
                 result["structure"] = {
                     "dimensions": dimensions,
@@ -1821,54 +1724,36 @@ class QlikEngineAPI:
                     "total_columns": hypercube.get("qSize", {}).get("qcx", 0),
                     "returned_rows": len(table_data),
                 }
-
             elif "qListObject" in obj_layout:
-                # ListBox объект
                 list_object = obj_layout["qListObject"]
-
                 values_data = []
                 for page in list_object.get("qDataPages", []):
                     for row in page.get("qMatrix", []):
                         if row and len(row) > 0:
                             cell = row[0]
-                            values_data.append(
-                                {
-                                    "value": cell.get("qText", ""),
-                                    "state": cell.get("qState", "O"),
-                                    "frequency": cell.get("qFrequency", 0),
-                                }
-                            )
-
+                            values_data.append({
+                                "value": cell.get("qText", ""),
+                                "state": cell.get("qState", "O"),
+                                "frequency": cell.get("qFrequency", 0),
+                            })
                 result["data"] = values_data
                 result["structure"] = {
-                    "field_name": list_object.get("qDimensionInfo", {}).get(
-                        "qFallbackTitle", ""
-                    ),
+                    "field_name": list_object.get("qDimensionInfo", {}).get("qFallbackTitle", ""),
                     "total_values": list_object.get("qSize", {}).get("qcy", 0),
                     "returned_values": len(values_data),
                 }
-
             elif "qPivotTable" in obj_layout:
-                # Pivot Table объект
                 pivot_table = obj_layout["qPivotTable"]
                 result["data"] = pivot_table.get("qDataPages", [])
-                result["structure"] = {
-                    "type": "pivot_table",
-                    "size": pivot_table.get("qSize", {}),
-                }
-
+                result["structure"] = {"type": "pivot_table", "size": pivot_table.get("qSize", {})}
             else:
-                # Неизвестный тип объекта - возвращаем raw layout
                 result["data"] = obj_layout
                 result["structure"] = {"type": "unknown", "raw_layout": True}
 
             return result
 
         except Exception as e:
-            return {
-                "error": str(e),
-                "details": "Error in get_visualization_data method",
-            }
+            return {"error": str(e), "details": "Error in get_visualization_data method"}
 
     def get_detailed_app_metadata(self, app_id: str) -> Dict[str, Any]:
         """Get detailed app metadata similar to /api/v1/apps/{app_id}/data/metadata endpoint."""

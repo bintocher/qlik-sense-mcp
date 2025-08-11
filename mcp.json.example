@@ -17,11 +17,12 @@
       "disabled": false,
       "autoApprove": [
         "get_apps",
-        "engine_get_data_model",
-        "engine_get_fields",
-        "engine_get_table_data",
         "get_app_details",
-        "engine_get_sheets"
+        "engine_get_script",
+        "engine_get_field_statistics",
+        "engine_create_hypercube",
+        "get_app_field",
+        "get_app_variables"
       ]
     }
   }
