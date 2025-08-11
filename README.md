@@ -120,8 +120,8 @@ Create `mcp.json` file for MCP client integration:
 {
   "mcpServers": {
     "qlik-sense": {
-      "command": "python3",
-      "args": ["-m", "qlik_sense_mcp_server.server"],
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
       "env": {
         "QLIK_SERVER_URL": "https://your-qlik-server.company.com",
         "QLIK_USER_DIRECTORY": "COMPANY",
