@@ -36,7 +36,7 @@ Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Mode
 | `get_apps` | Get comprehensive list of applications with metadata | Repository | ✅ |
 | `get_app_details` | Get detailed application analysis including data model | Engine | ✅ |
 | `engine_get_script` | Extract load script from application | Engine | ✅ |
-| `engine_get_field_values` | Get field values with frequency information | Engine | ✅ |
+| `get_app_field` | Return values of a field with pagination and wildcard search | Engine | ✅ |
 | `engine_get_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
 | `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
 
@@ -136,7 +136,7 @@ Create `mcp.json` file for MCP client integration:
         "get_apps",
         "get_app_details",
         "engine_get_script",
-        "engine_get_field_values",
+        "get_app_field",
         "engine_get_field_statistics",
         "engine_create_hypercube"
       ]
@@ -311,26 +311,28 @@ Retrieves load script from application.
 }
 ```
 
-### engine_get_field_values
-Gets field values with frequency information.
+### get_app_field
+Returns values of a single field with pagination and optional wildcard search.
 
 **Parameters:**
-- `app_id` (required): Application identifier
+- `app_id` (required): Application GUID
 - `field_name` (required): Field name
-- `max_values` (optional): Maximum values to return (default: 100)
-- `include_frequency` (optional): Include frequency data (default: true)
+- `limit` (optional): Number of values to return (default: 10, max: 100)
+- `offset` (optional): Offset for pagination (default: 0)
+- `search_string` (optional): Wildcard text mask with `*` and `%` support
+- `search_number` (optional): Wildcard numeric mask with `*` and `%` support
+- `case_sensitive` (optional): Case sensitivity for `search_string` (default: false)
 
-**Returns:** Field values with statistics and dimension information
+**Returns:** Object containing field values
 
 **Example:**
 ```json
 {
-  "field_name": "state_name",
-  "values": [
-    {"value": "Найден, жив", "state": "O"},
-    {"value": "Найден, погиб", "state": "O"}
-  ],
-  "total_values": 10
+  "field_values": [
+    "Russia",
+    "USA",
+    "China"
+  ]
 }
 ```
 

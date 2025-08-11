@@ -95,12 +95,60 @@ class QlikSenseMCPServer:
                         }
                     }
                 ),
-                Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(
+                    name="get_app_details",
+                    description="Get compact application info with filters by guid or name (case-insensitive). Returns metainfo, tables/fields list, master items, sheets and objects with used fields.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID (preferred if known)"},
+                            "name": {"type": "string", "description": "Case-insensitive fuzzy search by app name"}
+                        },
+                        "oneOf": [
+                            {"required": ["app_id"]},
+                            {"required": ["name"]}
+                        ]
+                    }
+                ),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_field_values", description="Get field values with frequency information", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}, "max_values": {"type": "integer", "description": "Maximum values to return", "default": 100}, "include_frequency": {"type": "boolean", "description": "Include frequency information", "default": True}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]})
+                ,
+                Tool(
+                    name="get_app_field",
+                    description="Return values of a single field from app with pagination and wildcard search (supports * and %).",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "field_name": {"type": "string", "description": "Field name"},
+                            "limit": {"type": "integer", "description": "Max values to return (default: 10, max: 100)", "default": 10},
+                            "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
+                            "search_string": {"type": "string", "description": "Wildcard text search mask (* and % supported), case-insensitive by default"},
+                            "search_number": {"type": "string", "description": "Wildcard numeric search mask (* and % supported)"},
+                            "case_sensitive": {"type": "boolean", "description": "Case sensitive matching for search_string", "default": False}
+                        },
+                        "required": ["app_id", "field_name"],
+                    }
+                ),
+                Tool(
+                    name="get_app_variables",
+                    description="Return variables split by source (script/ui) with pagination and wildcard search.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "limit": {"type": "integer", "description": "Max variables to return (default: 10, max: 100)", "default": 10},
+                            "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
+                            "created_in_script": {"type": ["boolean", "integer", "string"], "description": "Return only variables created in script (true/false). If omitted, return both"},
+                            "search_string": {"type": "string", "description": "Wildcard search by variable name or text value (* and % supported), case-insensitive by default"},
+                            "search_number": {"type": "string", "description": "Wildcard search among numeric variable values (* and % supported)"},
+                            "case_sensitive": {"type": "boolean", "description": "Case sensitive matching for search_string", "default": False}
+                        },
+                        "required": ["app_id"],
+                    }
+                )
                 ]
             return tools_list
 
@@ -174,20 +222,134 @@ class QlikSenseMCPServer:
                     ]
 
                 elif name == "get_app_details":
-                    app_id = arguments["app_id"]
+                    req_app_id = arguments.get("app_id")
+                    req_name = arguments.get("name")
 
-                    def _get_app_details():
+                    def _resolve_app() -> Dict[str, Any]:
                         try:
-                            return self.engine_api.get_app_details(app_id)
+                            if req_app_id:
+                                app_meta = self.repository_api.get_app_by_id(req_app_id)
+                                if isinstance(app_meta, dict) and app_meta.get("id"):
+                                    return {
+                                        "app_id": app_meta.get("id"),
+                                        "name": app_meta.get("name", ""),
+                                        "description": app_meta.get("description") or "",
+                                        "stream": (app_meta.get("stream", {}) or {}).get("name", "") if app_meta.get("published") else "",
+                                        "modified_dttm": app_meta.get("modifiedDate", "") or "",
+                                        "reload_dttm": app_meta.get("lastReloadTime", "") or ""
+                                    }
+                                return {"error": "App not found by provided app_id"}
+                            if req_name:
+                                apps_payload = self.repository_api.get_comprehensive_apps(limit=50, offset=0, name=req_name, stream=None, published=None)
+                                apps = apps_payload.get("apps", []) if isinstance(apps_payload, dict) else []
+                                if not apps:
+                                    return {"error": "No apps found by name"}
+                                lowered = req_name.lower()
+                                exact = [a for a in apps if a.get("name", "").lower() == lowered]
+                                selected = exact[0] if exact else apps[0]
+                                selected["app_id"] = selected.pop("guid", "")
+                                return selected
+                            return {"error": "Either app_id or name must be provided"}
                         except Exception as e:
-                            return {"error": str(e), "details": "Error calling engine_api.get_app_details"}
+                            return {"error": str(e)}
 
-                    app = await asyncio.to_thread(_get_app_details)
+                    resolved = await asyncio.to_thread(_resolve_app)
+                    if "error" in resolved:
+                        return [TextContent(type="text", text=json.dumps(resolved, indent=2, ensure_ascii=False))]
+
+                    app_id = resolved.get("app_id") or resolved.get("guid")
+
+                    def _build_compact_details():
+                        app_handle = -1
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            meta = self.engine_api._get_app_metadata_fast(app_handle) or {}
+                            fields_info = self.engine_api.get_fields(app_handle) or {}
+
+                            tables_map = {}
+                            for f in fields_info.get("fields", []):
+                                tname = f.get("table_name", "")
+                                fname = f.get("field_name", "")
+                                if not tname or not fname:
+                                    continue
+                                tables_map.setdefault(tname, []).append(fname)
+
+                            total_tables = len(tables_map)
+                            total_fields = sum(len(v) for v in tables_map.values())
+
+                            mi = self.engine_api._get_user_master_items(app_handle) or {}
+                            master_dimensions = [d.get("name", "") for d in mi.get("dimensions", []) if d.get("name")]
+                            master_measures = [m.get("name", "") for m in mi.get("measures", []) if m.get("name")]
+
+                            sheets_payload = self.engine_api.get_sheets(app_handle) or []
+                            sheets_list = []
+                            for s in sheets_payload:
+                                try:
+                                    sid = s.get("qInfo", {}).get("qId", "")
+                                    sname = s.get("qMeta", {}).get("title", "")
+                                    if not sid:
+                                        continue
+                                    objs = self.engine_api._get_sheet_objects_detailed(app_handle, sid) or []
+                                    obj_list = []
+                                    for o in objs:
+                                        oid = o.get("object_id", "")
+                                        otype = o.get("object_type", "")
+                                        otitle = o.get("object_title", "")
+                                        fields_used = o.get("fields_used", [])
+                                        if not oid:
+                                            continue
+                                        obj_list.append({
+                                            oid: {
+                                                "object_type": otype,
+                                                "object_desription": otitle,
+                                                "fields": fields_used
+                                            }
+                                        })
+                                    sheets_list.append({
+                                        sid: {
+                                            "sheet_name": sname,
+                                            "objects": obj_list
+                                        }
+                                    })
+                                except Exception:
+                                    continue
+
+                            metainfo = {
+                                "app_id": app_id,
+                                "name": resolved.get("name") or meta.get("title", ""),
+                                "description": resolved.get("description") or meta.get("description", ""),
+                                "stream": resolved.get("stream", ""),
+                                "modified_dttm": resolved.get("modified_dttm") or meta.get("modified_date", ""),
+                                "reload_dttm": resolved.get("reload_dttm") or meta.get("last_reload_time", ""),
+                                "size_bytes": meta.get("size", 0)
+                            }
+
+                            return {
+                                "metainfo": metainfo,
+                                "tables_data": tables_map,
+                                "total_tables": total_tables,
+                                "total_fields": total_fields,
+                                "master_dimensions": master_dimensions,
+                                "master_measures": master_measures,
+                                "sheets": sheets_list
+                            }
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            try:
+                                if app_handle != -1:
+                                    self.engine_api.close_doc(app_handle)
+                            finally:
+                                self.engine_api.disconnect()
+
+                    compact = await asyncio.to_thread(_build_compact_details)
                     return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(app, indent=2, ensure_ascii=False)
-                        )
+                        TextContent(type="text", text=json.dumps(compact, indent=2, ensure_ascii=False))
                     ]
 
                 elif name == "engine_get_script":
@@ -234,34 +396,6 @@ class QlikSenseMCPServer:
                         TextContent(
                             type="text",
                             text=json.dumps(script, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "engine_get_field_values":
-                    app_id = arguments["app_id"]
-                    field_name = arguments["field_name"]
-                    max_values = arguments.get("max_values", 100)
-                    include_frequency = arguments.get("include_frequency", True)
-
-                    def _get_field_values():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_field_values(app_handle, field_name, max_values, include_frequency)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_get_field_values)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -373,6 +507,170 @@ class QlikSenseMCPServer:
                             text=json.dumps(objects, indent=2, ensure_ascii=False)
                         )
                     ]
+                elif name == "get_app_field":
+                    app_id = arguments["app_id"]
+                    field_name = arguments["field_name"]
+                    limit = arguments.get("limit", 10)
+                    offset = arguments.get("offset", 0)
+                    search_string = arguments.get("search_string")
+                    search_number = arguments.get("search_number")
+                    case_sensitive = arguments.get("case_sensitive", False)
+
+                    if limit is None or limit < 1:
+                        limit = 10
+                    if limit > 100:
+                        limit = 100
+                    if offset is None or offset < 0:
+                        offset = 0
+
+                    def _wildcard_to_regex(pattern: str, case_sensitive_flag: bool) -> Any:
+                        import re
+                        escaped = re.escape(pattern).replace("\\*", ".*").replace("%", ".*")
+                        regex = f"^{escaped}$"
+                        return re.compile(regex, 0 if case_sensitive_flag else re.IGNORECASE)
+
+                    def _get_values():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            fetch_size = max(limit + offset, 500)
+                            if fetch_size > 5000:
+                                fetch_size = 5000
+                            field_data = self.engine_api.get_field_values(app_handle, field_name, fetch_size, include_frequency=False)
+                            values = [v.get("value", "") for v in field_data.get("values", [])]
+
+                            if search_string:
+                                rx = _wildcard_to_regex(search_string, case_sensitive)
+                                values = [val for val in values if isinstance(val, str) and rx.match(val)]
+
+                            if search_number:
+                                rxn = _wildcard_to_regex(search_number, case_sensitive)
+                                filtered = []
+                                for idx, vobj in enumerate(field_data.get("values", [])):
+                                    cell_text = vobj.get("value", "")
+                                    qnum = vobj.get("numeric_value", None)
+                                    if qnum is not None:
+                                        if rxn.match(str(qnum)) or rxn.match(str(cell_text)):
+                                            filtered.append(cell_text)
+                                values = filtered
+
+                            sliced = values[offset:offset + limit]
+                            return {"field_values": sliced}
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_values)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+                elif name == "get_app_variables":
+                    app_id = arguments["app_id"]
+                    limit = arguments.get("limit", 10)
+                    offset = arguments.get("offset", 0)
+                    created_in_script_arg = arguments.get("created_in_script", None)
+                    search_string = arguments.get("search_string")
+                    search_number = arguments.get("search_number")
+                    case_sensitive = arguments.get("case_sensitive", False)
+
+                    if limit is None or limit < 1:
+                        limit = 10
+                    if limit > 100:
+                        limit = 100
+                    if offset is None or offset < 0:
+                        offset = 0
+
+                    def _to_bool(value: Any, default: Optional[bool] = None) -> Optional[bool]:
+                        if value is None:
+                            return default
+                        if isinstance(value, bool):
+                            return value
+                        if isinstance(value, int):
+                            return value != 0
+                        if isinstance(value, str):
+                            v = value.strip().lower()
+                            if v in ("true", "1", "yes", "y"): return True
+                            if v in ("false", "0", "no", "n"): return False
+                        return default
+
+                    created_in_script = _to_bool(created_in_script_arg, None)
+
+                    def _wildcard_to_regex(pattern: str, case_sensitive_flag: bool):
+                        import re
+                        escaped = re.escape(pattern).replace("\\*", ".*").replace("%", ".*")
+                        regex = f"^{escaped}$"
+                        return re.compile(regex, 0 if case_sensitive_flag else re.IGNORECASE)
+
+                    def _get_variables():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            # Use the alternative method for getting variables
+                            var_list = self.engine_api._get_user_variables(app_handle) or []
+                            prepared = []
+                            for v in var_list:
+                                name = v.get("name", "")
+                                text_val = v.get("text_value", "")
+                                num_val = v.get("numeric_value")
+                                is_script = v.get("is_script_created", False)
+                                prepared.append({
+                                    "name": name,
+                                    "text_value": text_val if text_val is not None else "",
+                                    "numeric_value": num_val,
+                                    "is_script": is_script
+                                })
+
+                            if created_in_script is True:
+                                prepared = [x for x in prepared if x["is_script"]]
+                            elif created_in_script is False:
+                                prepared = [x for x in prepared if not x["is_script"]]
+
+                            if search_string:
+                                rx = _wildcard_to_regex(search_string, case_sensitive)
+                                prepared = [x for x in prepared if rx.match(x["name"]) or rx.match(x.get("text_value", ""))]
+
+                            if search_number:
+                                rxn = _wildcard_to_regex(search_number, case_sensitive)
+                                prepared = [x for x in prepared if x.get("numeric_value") is not None and rxn.match(str(x.get("numeric_value")))]
+
+                            from_script = [x for x in prepared if x["is_script"]]
+                            from_ui = [x for x in prepared if not x["is_script"]]
+
+                            def _slice_and_map(items):
+                                sliced = items[offset:offset + limit]
+                                result_map = {}
+                                for it in sliced:
+                                    val = it.get("text_value")
+                                    if val is None or val == "":
+                                        if it.get("numeric_value") is not None:
+                                            val = str(it["numeric_value"])
+                                        else:
+                                            val = ""
+                                    result_map[it["name"]] = val
+                                return result_map
+
+                            res_script = _slice_and_map(from_script)
+                            res_ui = _slice_and_map(from_ui)
+
+                            return {
+                                "variables_from_script": res_script if res_script else "",
+                                "variables_from_ui": res_ui if res_ui else ""
+                            }
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_variables)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
                 elif name == "engine_get_field_info":
                     app_id = arguments["app_id"]
@@ -901,7 +1199,7 @@ EXAMPLES:
 
 AVAILABLE TOOLS:
     Repository API: get_apps (comprehensive), get_app_details
-    Engine API: engine_get_script, engine_create_hypercube, engine_get_field_values, engine_get_field_statistics
+    Engine API: engine_get_script, engine_create_hypercube, engine_get_field_statistics
 
     Total: 8 tools for Qlik Sense analytics operations
 

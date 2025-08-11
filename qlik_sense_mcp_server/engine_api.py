@@ -304,7 +304,7 @@ class QlikEngineAPI:
     def get_sheets(self, app_handle: int) -> List[Dict[str, Any]]:
         """Get app sheets."""
         try:
-            # Шаг 1: Создаем SheetList объект
+            # Step 1: Create a SheetList session object
             sheet_list_def = {
                 "qInfo": {
                     "qType": "SheetList"
@@ -323,7 +323,7 @@ class QlikEngineAPI:
                 }
             }
 
-            # Создаем session object для списка листов
+            # Create session object for the sheet list
             create_result = self.send_request("CreateSessionObject", [sheet_list_def], handle=app_handle)
 
             if "qReturn" not in create_result or "qHandle" not in create_result["qReturn"]:
@@ -332,7 +332,7 @@ class QlikEngineAPI:
 
             sheet_list_handle = create_result["qReturn"]["qHandle"]
 
-            # Шаг 2: Получаем layout со списком листов
+            # Step 2: Retrieve layout with the list of sheets
             layout_result = self.send_request("GetLayout", [], handle=sheet_list_handle)
 
             if "qLayout" not in layout_result or "qAppObjectList" not in layout_result["qLayout"]:
@@ -428,7 +428,7 @@ class QlikEngineAPI:
 
                 print(f"INFO: Processing sheet {sheet_id}: {sheet_title}")
 
-                # Получаем объекты листа правильным способом
+                # Retrieve sheet objects using the proper method
                 sheet_objects = self._get_sheet_objects_detailed(app_handle, sheet_id)
 
                 # Анализируем поля в объектах
