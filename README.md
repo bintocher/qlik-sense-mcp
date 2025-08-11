@@ -17,7 +17,7 @@ Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise A
 
 ## Overview
 
-Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 6 essential tools for application metadata retrieval and data analysis operations.
+Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 7 essential tools for application metadata retrieval and data analysis operations.
 
 ### Key Features
 
@@ -34,11 +34,12 @@ Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Mode
 | Tool | Description | API | Status |
 |------|-------------|-----|--------|
 | `get_apps` | Get comprehensive list of applications with metadata | Repository | ✅ |
-| `get_app_details` | Get detailed application analysis including data model | Engine | ✅ |
+| `get_app_details` | Get compact app overview (metadata, fields, master items, sheets/objects) | Engine | ✅ |
 | `engine_get_script` | Extract load script from application | Engine | ✅ |
-| `get_app_field` | Return values of a field with pagination and wildcard search | Engine | ✅ |
 | `engine_get_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
 | `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
+| `get_app_field` | Return values of a field with pagination and wildcard search | Engine | ✅ |
+| `get_app_variables` | Return variables split by source with pagination and wildcard search | Engine | ✅ |
 
 ## Installation
 
@@ -71,7 +72,8 @@ make dev
 - Python 3.12+
 - Qlik Sense Enterprise
 - Valid certificates for authentication
-- Network access to Qlik Sense server (ports 4242, 4747)
+- Network access to Qlik Sense server (ports 4242 Repository, 4747 Engine)
+- Ensure your MCP client model can handle large JSON responses; prefer small limits in requests during testing
 
 ### Setup
 
@@ -118,15 +120,15 @@ Create `mcp.json` file for MCP client integration:
 {
   "mcpServers": {
     "qlik-sense": {
-      "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "command": "python3",
+      "args": ["-m", "qlik_sense_mcp_server.server"],
       "env": {
         "QLIK_SERVER_URL": "https://your-qlik-server.company.com",
         "QLIK_USER_DIRECTORY": "COMPANY",
         "QLIK_USER_ID": "your-username",
-        "QLIK_CLIENT_CERT_PATH": "/path/to/certs/client.pem",
-        "QLIK_CLIENT_KEY_PATH": "/path/to/certs/client_key.pem",
-        "QLIK_CA_CERT_PATH": "/path/to/certs/root.pem",
+        "QLIK_CLIENT_CERT_PATH": "/absolute/path/to/certs/client.pem",
+        "QLIK_CLIENT_KEY_PATH": "/absolute/path/to/certs/client_key.pem",
+        "QLIK_CA_CERT_PATH": "/absolute/path/to/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
         "QLIK_ENGINE_PORT": "4747",
         "QLIK_VERIFY_SSL": "false"
@@ -136,9 +138,10 @@ Create `mcp.json` file for MCP client integration:
         "get_apps",
         "get_app_details",
         "engine_get_script",
-        "get_app_field",
         "engine_get_field_statistics",
-        "engine_create_hypercube"
+        "engine_create_hypercube",
+        "get_app_field",
+        "get_app_variables"
       ]
     }
   }
@@ -581,6 +584,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 6/6 Tools Working | v1.1.1
+**Project Status**: Production Ready | 7/7 Tools Working | v1.2.0
 
 **Installation**: `uvx qlik-sense-mcp-server`
