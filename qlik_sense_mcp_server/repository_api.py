@@ -78,151 +78,95 @@ class QlikRepositoryAPI:
             return {"error": str(e)}
 
     def get_comprehensive_apps(self,
-                                   limit: int = 50,
+                                   limit: int = 25,
                                    offset: int = 0,
-                                   name_filter: Optional[str] = None,
-                                   app_id_filter: Optional[str] = None,
-                                   include_unpublished: bool = False) -> Dict[str, Any]:
+                                   name: Optional[str] = None,
+                                   stream: Optional[str] = None,
+                                   published: Optional[bool] = True) -> Dict[str, Any]:
         """
-        Get comprehensive list of apps with streams, metadata and ownership information.
+        Get minimal list of apps with essential fields and proper filtering/pagination.
 
-        Args:
-            limit: Maximum number of apps to return (default: 50, max: 100)
-            offset: Number of apps to skip for pagination (default: 0)
-            name_filter: Filter apps by name (case-insensitive partial match)
-            app_id_filter: Filter by specific app ID/GUID
-            include_unpublished: Include unpublished apps (default: False)
+        Returns only: guid, name, description, stream, modified_dttm, reload_dttm.
+        Supports case-insensitive wildcard filters for name and stream, and published flag.
+        Enforces default limit=25 and maximum limit=50.
         """
-        # Enforce strict limit - maximum 100 apps per request
-        if limit > 100:
-            limit = 100
-        # 1. Build filter query
-        filters = []
+        if limit is None or limit < 1:
+            limit = 25
+        if limit > 50:
+            limit = 50
+        if offset is None or offset < 0:
+            offset = 0
 
-        if app_id_filter:
-            filters.append(f"id eq {app_id_filter}")
+        filters: List[str] = []
+        if published is not None:
+            filters.append(f"published eq {'true' if published else 'false'}")
+        if name:
+            raw_name = name.replace('*', '')
+            safe_name = raw_name.replace("'", "''")
+            filters.append(f"name so '{safe_name}'")
+        if stream:
+            raw_stream = stream.replace('*', '')
+            safe_stream = raw_stream.replace("'", "''")
+            filters.append(f"stream.name so '{safe_stream}'")
 
-        if name_filter:
-            # Use contains for partial name matching
-            filters.append(f"name so '{name_filter}'")
-
-        if not include_unpublished:
-            filters.append("stream ne null")
-
-        # 2. Get applications list
-        endpoint = "app/full"
+        params: Dict[str, Any] = {}
         if filters:
-            filter_query = " and ".join(filters)
-            endpoint += f"?filter={filter_query}"
+            params["filter"] = " and ".join(filters)
+        params["orderby"] = "modifiedDate desc"
 
-        apps_result = self._make_request("GET", endpoint)
+        apps_result = self._make_request("GET", "app/full", params=params)
 
-        # Normalize apps result
         if isinstance(apps_result, list):
             apps = apps_result
         elif isinstance(apps_result, dict):
             if "error" in apps_result:
                 apps = []
             else:
-                apps = apps_result.get("apps", apps_result.get("data", []))
+                apps = apps_result.get("data", []) or apps_result.get("apps", [])
         else:
             apps = []
 
-        # 2. Получаем список streams
-        streams = self.get_streams()
-        streams_dict = {stream.get("id"): stream for stream in streams}
-
-        # 3. Обогащаем каждое приложение
-        enriched_apps = []
+        minimal_apps: List[Dict[str, Any]] = []
         for app in apps:
             try:
-                app_id = app.get("id", "")
-
-                # Базовая информация
-                enriched_app = {
-                    "basic_info": {
-                        "id": app_id,
-                        "name": app.get("name", ""),
-                        "description": app.get("description", ""),
-                        "filename": app.get("filename", ""),
-                        "owner": app.get("owner", {}),
-                        "created_date": app.get("createdDate", ""),
-                        "modified_date": app.get("modifiedDate", ""),
-                        "privileges": app.get("privileges", [])
-                    },
-                    "stream_info": {
-                        "published": app.get("published", False),
-                        "publish_time": app.get("publishTime", ""),
-                        "stream_id": app.get("stream", {}).get("id", "") if app.get("stream") else "",
-                        "stream_name": "",
-                        "stream_owner": {}
-                    },
-                    "size_info": {
-                        "file_size_bytes": app.get("fileSize", 0),
-                        "static_byte_size": app.get("qStaticByteSize", 0),
-                        "last_reload_time": app.get("lastReloadTime", "")
-                    }
-                }
-
-                # Обогащаем информацию о потоке (стриме)
-                stream_id = enriched_app["stream_info"]["stream_id"]
-                if stream_id and stream_id in streams_dict:
-                    stream_info = streams_dict[stream_id]
-                    enriched_app["stream_info"]["stream_name"] = stream_info.get("name", "")
-                    enriched_app["stream_info"]["stream_owner"] = stream_info.get("owner", {})
-
-                enriched_apps.append(enriched_app)
-
-            except Exception as e:
-                # Если ошибка при обработке конкретного приложения, включаем базовую информацию
-                enriched_apps.append({
-                    "basic_info": {
-                        "id": app.get("id", ""),
-                        "name": app.get("name", ""),
-                        "error": f"Failed to enrich app data: {str(e)}"
-                    }
+                is_published = bool(app.get("published", False))
+                stream_name = app.get("stream", {}).get("name", "") if is_published else ""
+                minimal_apps.append({
+                    "guid": app.get("id", ""),
+                    "name": app.get("name", ""),
+                    "description": app.get("description") or "",
+                    "stream": stream_name or "",
+                    "modified_dttm": app.get("modifiedDate", "") or "",
+                    "reload_dttm": app.get("lastReloadTime", "") or "",
                 })
+            except Exception:
+                continue
 
-        # 4. Apply additional client-side filtering if needed
-        if name_filter:
-            # Additional case-insensitive filtering on client side for better matching
-            enriched_apps = [
-                app for app in enriched_apps
-                if name_filter.lower() in app.get("basic_info", {}).get("name", "").lower()
-            ]
+        if name:
+            lowered = name.lower().replace('*', '')
+            minimal_apps = [a for a in minimal_apps if lowered in (a.get("name", "").lower())]
+        if stream:
+            lowered_stream = stream.lower().replace('*', '')
+            minimal_apps = [a for a in minimal_apps if lowered_stream in (a.get("stream", "").lower())]
+        if published is not None:
+            if published:
+                minimal_apps = [a for a in minimal_apps if a.get("stream", "") != ""]
+            else:
+                minimal_apps = [a for a in minimal_apps if a.get("stream", "") == ""]
 
-        # 5. Calculate totals before pagination
-        total_found = len(enriched_apps)
-        total_published = len([app for app in enriched_apps if app.get("stream_info", {}).get("published", False)])
-        total_private = total_found - total_published
+        total_found = len(minimal_apps)
+        paginated_apps = minimal_apps[offset:offset + limit]
 
-        # 6. Apply pagination
-        paginated_apps = enriched_apps[offset:offset + limit]
-
-        # 7. Build final response with pagination metadata
         return {
             "apps": paginated_apps,
-            "streams": streams,
             "pagination": {
                 "limit": limit,
                 "offset": offset,
                 "returned": len(paginated_apps),
                 "total_found": total_found,
-                "has_more": offset + limit < total_found,
-                "next_offset": offset + limit if offset + limit < total_found else None
+                "has_more": (offset + limit) < total_found,
+                "next_offset": (offset + limit) if (offset + limit) < total_found else None,
             },
-            "filters": {
-                "name_filter": name_filter,
-                "app_id_filter": app_id_filter,
-                "include_unpublished": include_unpublished
-            },
-            "summary": {
-                "total_apps": total_found,
-                "published_apps": total_published,
-                "private_apps": total_private,
-                "total_streams": len(streams),
-                "showing": f"{offset + 1}-{min(offset + limit, total_found)} of {total_found}"
-            }
         }
 
     def get_app_by_id(self, app_id: str) -> Dict[str, Any]:

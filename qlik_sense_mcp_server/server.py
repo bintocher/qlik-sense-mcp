@@ -63,7 +63,38 @@ class QlikSenseMCPServer:
             including applications, analytics tools, and data export.
             """
             tools_list = [
-                Tool(name="get_apps", description="Get comprehensive list of Qlik Sense applications with streams, metadata and ownership information. Supports pagination and filtering.", inputSchema={"type": "object", "properties": {"limit": {"type": "integer", "description": "Maximum number of apps to return (default: 50, max: 100)", "default": 50}, "offset": {"type": "integer", "description": "Number of apps to skip for pagination (default: 0)", "default": 0}, "name_filter": {"type": "string", "description": "Filter apps by name (case-insensitive partial match)"}, "app_id_filter": {"type": "string", "description": "Filter by specific app ID/GUID"}, "include_unpublished": {"type": "boolean", "description": "Include unpublished apps (default: false)", "default": False}}}),
+                Tool(
+                    name="get_apps",
+                    description="Get list of Qlik Sense applications with essential fields and filters (name, stream, published) and pagination.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of apps to return (default: 25, max: 50)",
+                                "default": 25
+                            },
+                            "offset": {
+                                "type": "integer",
+                                "description": "Number of apps to skip for pagination (default: 0)",
+                                "default": 0
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Wildcard case-insensitive search in application name"
+                            },
+                            "stream": {
+                                "type": "string",
+                                "description": "Wildcard case-insensitive search in stream name"
+                            },
+                            "published": {
+                                "type": ["boolean", "integer", "string"],
+                                "description": "Filter by published status (true/false or 1/0). Default: true",
+                                "default": True
+                            }
+                        }
+                    }
+                ),
                 Tool(name="get_app_details", description="Get comprehensive information about application including data model, tables with fields and types, usage analysis, and performance metrics.", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
 
                 Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
@@ -103,31 +134,42 @@ class QlikSenseMCPServer:
             """
             try:
                 if name == "get_apps":
-                    # Extract pagination and filter parameters
-                    limit = arguments.get("limit", 50)
+                    limit = arguments.get("limit", 25)
                     offset = arguments.get("offset", 0)
-                    name_filter = arguments.get("name_filter")
-                    app_id_filter = arguments.get("app_id_filter")
-                    include_unpublished = arguments.get("include_unpublished", False)
+                    name_filter = arguments.get("name")
+                    stream_filter = arguments.get("stream")
+                    published_arg = arguments.get("published", True)
 
-                    # Validate limit
-                    if limit > 100:
-                        limit = 100
-                    if limit < 1:
-                        limit = 1
+                    if limit is None or limit < 1:
+                        limit = 25
+                    if limit > 50:
+                        limit = 50
 
-                    comprehensive_apps = await asyncio.to_thread(
+                    def _to_bool(value: Any, default: bool = True) -> bool:
+                        if isinstance(value, bool):
+                            return value
+                        if isinstance(value, int):
+                            return value != 0
+                        if isinstance(value, str):
+                            v = value.strip().lower()
+                            if v in ("true", "1", "yes", "y"): return True
+                            if v in ("false", "0", "no", "n"): return False
+                        return default
+
+                    published_bool = _to_bool(published_arg, True)
+
+                    apps_payload = await asyncio.to_thread(
                         self.repository_api.get_comprehensive_apps,
-                        limit=limit,
-                        offset=offset,
-                        name_filter=name_filter,
-                        app_id_filter=app_id_filter,
-                        include_unpublished=include_unpublished
+                        limit,
+                        offset,
+                        name_filter,
+                        stream_filter,
+                        published_bool,
                     )
                     return [
                         TextContent(
                             type="text",
-                            text=json.dumps(comprehensive_apps, indent=2, ensure_ascii=False)
+                            text=json.dumps(apps_payload, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -148,62 +190,43 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-
-
-                # Engine API handlers
-
                 elif name == "engine_get_script":
                     app_id = arguments["app_id"]
 
                     def _get_script():
                         app_handle = -1
                         try:
-                            # Шаг 1: Создать engine (подключиться)
                             self.engine_api.connect()
-
-                            # Шаг 2: Через engine сделать openapp (безопасно)
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
-
-                            # Проверяем результат открытия
                             if "qReturn" not in app_result:
                                 raise Exception(f"Failed to open app: invalid response {app_result}")
-
                             app_handle = app_result["qReturn"].get("qHandle", -1)
                             if app_handle == -1:
                                 raise Exception(f"Failed to get app handle: {app_result}")
-
-                            # Шаг 3: Только теперь внутри получаем script
                             script = self.engine_api.get_script(app_handle)
-
                             return {
                                 "qScript": script,
                                 "app_id": app_id,
                                 "app_handle": app_handle,
                                 "script_length": len(script) if script else 0
                             }
-
                         except Exception as e:
                             error_msg = str(e)
-                            # Более детальная обработка ошибок
                             if "already open" in error_msg.lower():
                                 error_msg = f"App {app_id} is already open in another session. Try again later or use a different session."
                             elif "failed to open app" in error_msg.lower():
                                 error_msg = f"Could not open app {app_id}. Check if app exists and you have access."
-
                             return {
                                 "error": error_msg,
                                 "app_id": app_id,
                                 "app_handle": app_handle
                             }
                         finally:
-                            # Закрываем документ если он был открыт
                             if app_handle != -1:
                                 try:
                                     self.engine_api.close_doc(app_handle)
                                 except:
-                                    pass  # Игнорируем ошибки закрытия
-
-                            # Отключаемся от engine
+                                    pass
                             self.engine_api.disconnect()
 
                     script = await asyncio.to_thread(_get_script)
@@ -214,7 +237,6 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                # New Analytics Tools - Этап 1
                 elif name == "engine_get_field_values":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
@@ -252,28 +274,20 @@ class QlikSenseMCPServer:
                         debug_info = []
                         try:
                             debug_info.append(f"Starting field statistics for app_id={app_id}, field_name={field_name}")
-
                             self.engine_api.connect()
                             debug_info.append("Connected to engine")
-
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
                             debug_info.append(f"App open result: {app_result}")
-
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             debug_info.append(f"App handle: {app_handle}")
-
                             if app_handle != -1:
                                 result = self.engine_api.get_field_statistics(app_handle, field_name)
                                 debug_info.append("Field statistics method completed")
-
-                                # Add debug info to result if it doesn't already have it
                                 if isinstance(result, dict) and "debug_log" not in result:
                                     result["server_debug"] = debug_info
-
                                 return result
                             else:
                                 raise Exception(f"Failed to open app: {app_result}")
-
                         except Exception as e:
                             import traceback
                             debug_info.append(f"Exception in server handler: {e}")
@@ -294,10 +308,6 @@ class QlikSenseMCPServer:
                             text=json.dumps(result, indent=2, ensure_ascii=False)
                         )
                     ]
-
-
-
-
 
                 elif name == "engine_create_hypercube":
                     app_id = arguments["app_id"]
@@ -327,28 +337,22 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                # Advanced Repository API handlers
                 elif name == "get_app_reload_chain":
                     app_id = arguments["app_id"]
 
                     def _get_reload_chain():
-                        # Get reload tasks for app
                         tasks = self.repository_api.get_reload_tasks_for_app(app_id)
-
-                        # Get execution history for each task
                         chain_info = {
                             "app_id": app_id,
                             "reload_tasks": [],
                             "execution_history": []
                         }
-
                         for task in tasks:
                             task_id = task.get("id")
                             if task_id:
                                 executions = self.repository_api.get_task_executions(task_id, 10)
                                 chain_info["reload_tasks"].append(task)
                                 chain_info["execution_history"].extend(executions)
-
                         return chain_info
 
                     chain = await asyncio.to_thread(_get_reload_chain)
@@ -370,7 +374,6 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                # Advanced Engine API handlers
                 elif name == "engine_get_field_info":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
@@ -412,12 +415,9 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc(app_id)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle != -1:
-                                # Create hypercube
                                 cube_result = self.engine_api.create_hypercube(app_handle, dimensions, measures, max_rows)
                                 cube_handle = cube_result.get("qReturn", {}).get("qHandle", -1)
-
                                 if cube_handle != -1:
-                                    # Get data from hypercube
                                     data = self.engine_api.get_hypercube_data(cube_handle, 0, max_rows)
                                     return {
                                         "dimensions": dimensions,
@@ -475,8 +475,6 @@ class QlikSenseMCPServer:
                             if app_handle != -1:
                                 search_results = self.engine_api.search_objects(app_handle, search_terms)
                                 fields = self.engine_api.get_fields(app_handle)
-
-                                # Filter fields that match search terms
                                 matching_fields = []
                                 for field in fields:
                                     field_name = field.get("qName", "").lower()
@@ -484,7 +482,6 @@ class QlikSenseMCPServer:
                                         if term.lower() in field_name:
                                             matching_fields.append(field)
                                             break
-
                                 return {
                                     "search_terms": search_terms,
                                     "object_matches": search_results,
@@ -503,7 +500,6 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                # Advanced QIX Engine API handlers
                 elif name == "engine_get_master_items":
                     app_id = arguments["app_id"]
 
@@ -654,7 +650,6 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                # New table and visualization methods
                 elif name == "engine_get_visualization_data":
                     app_id = arguments["app_id"]
                     object_id = arguments["object_id"]
@@ -794,15 +789,10 @@ class QlikSenseMCPServer:
                     ]
 
                 else:
-                    raise ValueError(f"Unknown tool: {name}")
+                    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, indent=2, ensure_ascii=False))]
 
             except Exception as e:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"Error: {str(e)}"
-                    )
-                ]
+                return [TextContent(type="text", text=json.dumps({"error": str(e)}, indent=2, ensure_ascii=False))]
 
     async def run(self):
         """
