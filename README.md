@@ -584,6 +584,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 7/7 Tools Working | v1.2.0
+**Project Status**: Production Ready | 7/7 Tools Working | v1.3.0 (planning new tools: get_app_object, get_app_sheets)
 
 **Installation**: `uvx qlik-sense-mcp-server`

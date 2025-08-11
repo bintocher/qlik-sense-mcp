@@ -1105,7 +1105,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.2.0",
+                    server_version="1.3.0",
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1137,7 +1137,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.2.0")
+            print("qlik-sense-mcp-server 1.3.0")
             return
 
     asyncio.run(async_main())
