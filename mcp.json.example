@@ -1,15 +1,15 @@
 {
   "mcpServers": {
     "qlik-sense": {
-      "command": "python3",
-      "args": ["-m", "qlik_sense_mcp_server.server"],
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
       "env": {
         "QLIK_SERVER_URL": "https://your-qlik-server",
         "QLIK_USER_DIRECTORY": "your-domain",
         "QLIK_USER_ID": "your-username",
-        "QLIK_CLIENT_CERT_PATH": "/absolute/path/to/certs/client.pem",
-        "QLIK_CLIENT_KEY_PATH": "/absolute/path/to/certs/client_key.pem",
-        "QLIK_CA_CERT_PATH": "/absolute/path/to/certs/root.pem",
+        "QLIK_CLIENT_CERT_PATH": "/path/to/certs/client.pem",
+        "QLIK_CLIENT_KEY_PATH": "/path/to/certs/client_key.pem",
+        "QLIK_CA_CERT_PATH": "/path/to/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
         "QLIK_ENGINE_PORT": "4747",
         "QLIK_VERIFY_SSL": "false"

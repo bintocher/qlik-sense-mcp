@@ -190,7 +190,6 @@ class QlikRepositoryAPI:
     def get_app_metadata(self, app_id: str) -> Dict[str, Any]:
         """Get detailed app metadata using Engine REST API."""
         try:
-            # Используем Engine REST API вместо QRS
             base_url = f"{self.config.server_url}"
             url = f"{base_url}/api/v1/apps/{app_id}/data/metadata"
 
