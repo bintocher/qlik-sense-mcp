@@ -14,6 +14,27 @@ from .config import QlikSenseConfig
 from .repository_api import QlikRepositoryAPI
 from .engine_api import QlikEngineAPI
 
+import logging
+import os
+from dotenv import load_dotenv
+
+# Initialize logging configuration early
+load_dotenv()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Configure root logger to stderr (stdout reserved for MCP protocol)
+_logging_level = getattr(logging, LOG_LEVEL, logging.INFO)
+if not logging.getLogger().handlers:
+    handler = logging.StreamHandler(stream=sys.stderr)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    logging.getLogger().addHandler(handler)
+logging.getLogger().setLevel(_logging_level)
+logger = logging.getLogger(__name__)
+
 
 class QlikSenseMCPServer:
     """MCP Server for Qlik Sense Enterprise APIs."""
@@ -36,7 +57,7 @@ class QlikSenseMCPServer:
                 self.engine_api = QlikEngineAPI(self.config)
             except Exception as e:
                 # API clients will be None, tools will return errors
-                pass
+                logging.getLogger(__name__).warning("Failed to initialize APIs: %s", e)
 
         self.server = Server("qlik-sense-mcp-server")
         self._setup_handlers()
@@ -1183,12 +1204,12 @@ CONFIGURATION:
 
 EXAMPLES:
     # Using uvx with environment variables
-    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \\
-        --with-env QLIK_USER_DIRECTORY=COMPANY \\
-        --with-env QLIK_USER_ID=username \\
-        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \\
-        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \\
-        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \\
+    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \
+        --with-env QLIK_USER_DIRECTORY=COMPANY \
+        --with-env QLIK_USER_ID=username \
+        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \
+        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \
+        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \
         qlik-sense-mcp-server
 
     # Using environment file

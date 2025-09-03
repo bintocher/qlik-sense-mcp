@@ -6,6 +6,9 @@ import ssl
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 from .config import QlikSenseConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class QlikEngineAPI:
@@ -291,13 +294,13 @@ class QlikEngineAPI:
             }
 
         # Debug logging
-        print(f"DEBUG: get_objects params: {params}")
+        logger.debug(f"get_objects params: {params}")
 
         result = self.send_request("GetObjects", params, handle=app_handle)
 
         # Debug result
         if "error" in str(result) or "Missing Types" in str(result):
-            print(f"DEBUG: get_objects error result: {result}")
+            logger.debug(f"get_objects error result: {result}")
 
         return result.get("qList", {}).get("qItems", [])
 
@@ -323,21 +326,21 @@ class QlikEngineAPI:
             create_result = self.send_request("CreateSessionObject", [sheet_list_def], handle=app_handle)
 
             if "qReturn" not in create_result or "qHandle" not in create_result["qReturn"]:
-                print(f"WARNING: Failed to create SheetList object: {create_result}")
+                logger.warning(f"Failed to create SheetList object: {create_result}")
                 return []
 
             sheet_list_handle = create_result["qReturn"]["qHandle"]
             layout_result = self.send_request("GetLayout", [], handle=sheet_list_handle)
             if "qLayout" not in layout_result or "qAppObjectList" not in layout_result["qLayout"]:
-                print(f"WARNING: No sheet list in layout: {layout_result}")
+                logger.warning(f"No sheet list in layout: {layout_result}")
                 return []
 
             sheets = layout_result["qLayout"]["qAppObjectList"]["qItems"]
-            print(f"INFO: Found {len(sheets)} sheets")
+            logger.info(f"Found {len(sheets)} sheets")
             return sheets
 
         except Exception as e:
-            print(f"ERROR: get_sheets exception: {str(e)}")
+            logger.error(f"get_sheets exception: {str(e)}")
             return []
 
     def get_sheet_objects(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
@@ -394,7 +397,7 @@ class QlikEngineAPI:
 
             # Get sheets using correct API sequence
             sheets = self.get_sheets(app_handle)
-            print(f"DEBUG: get_sheets returned {len(sheets)} sheets")
+            logger.debug(f"get_sheets returned {len(sheets)} sheets")
 
             if not sheets:
                 return {
@@ -417,7 +420,7 @@ class QlikEngineAPI:
                 sheet_id = sheet["qInfo"]["qId"]
                 sheet_title = sheet.get("qMeta", {}).get("title", "")
 
-                print(f"INFO: Processing sheet {sheet_id}: {sheet_title}")
+                logger.info(f"Processing sheet {sheet_id}: {sheet_title}")
 
                 sheet_objects = self._get_sheet_objects_detailed(app_handle, sheet_id)
 
@@ -474,13 +477,13 @@ class QlikEngineAPI:
         try:
             sheet_result = self.send_request("GetObject", {"qId": sheet_id}, handle=app_handle)
             if "qReturn" not in sheet_result or "qHandle" not in sheet_result["qReturn"]:
-                print(f"WARNING: Failed to get sheet object {sheet_id}: {sheet_result}")
+                logger.warning(f"Failed to get sheet object {sheet_id}: {sheet_result}")
                 return []
 
             sheet_handle = sheet_result["qReturn"]["qHandle"]
             sheet_layout = self.send_request("GetLayout", [], handle=sheet_handle)
             if "qLayout" not in sheet_layout or "qChildList" not in sheet_layout["qLayout"]:
-                print(f"WARNING: No child objects in sheet {sheet_id}")
+                logger.warning(f"No child objects in sheet {sheet_id}")
                 return []
 
             child_objects = sheet_layout["qLayout"]["qChildList"]["qItems"]
@@ -510,15 +513,15 @@ class QlikEngineAPI:
                         "detailed_layout": obj_layout["qLayout"]
                     }
                     detailed_objects.append(detailed_obj)
-                    print(f"INFO: Processed object {obj_id} ({obj_type}) with {len(fields_used)} fields")
+                    logger.info(f"Processed object {obj_id} ({obj_type}) with {len(fields_used)} fields")
                 except Exception as obj_error:
-                    print(f"WARNING: Error processing object {obj_id}: {obj_error}")
+                    logger.warning(f"Error processing object {obj_id}: {obj_error}")
                     continue
 
             return detailed_objects
 
         except Exception as e:
-            print(f"ERROR: _get_sheet_objects_detailed error: {str(e)}")
+            logger.error(f"_get_sheet_objects_detailed error: {str(e)}")
             return []
 
     def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
@@ -552,7 +555,7 @@ class QlikEngineAPI:
                     pass
 
         except Exception as e:
-            print(f"WARNING: Error extracting fields from object: {e}")
+            logger.warning(f"Error extracting fields from object: {e}")
 
         return list(fields)
 
