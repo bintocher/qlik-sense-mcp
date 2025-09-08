@@ -169,6 +169,29 @@ class QlikSenseMCPServer:
                         },
                         "required": ["app_id"],
                     }
+                ),
+                Tool(
+                    name="get_app_sheets",
+                    description="Get list of sheets from application with title and description.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"}
+                        },
+                        "required": ["app_id"]
+                    }
+                ),
+                Tool(
+                    name="get_app_sheet_objects",
+                    description="Get list of objects from specific sheet with object ID, type and description.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "sheet_id": {"type": "string", "description": "Sheet GUID"}
+                        },
+                        "required": ["app_id", "sheet_id"]
+                    }
                 )
                 ]
             return tools_list
@@ -693,6 +716,82 @@ class QlikSenseMCPServer:
                     result = await asyncio.to_thread(_get_variables)
                     return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
+                elif name == "get_app_sheets":
+                    app_id = arguments["app_id"]
+
+                    def _get_app_sheets():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            sheets = self.engine_api.get_sheets(app_handle)
+                            sheets_list = []
+                            for sheet in sheets:
+                                sheet_info = sheet.get("qMeta", {})
+                                sheet_data = sheet.get("qData", {})
+                                sheets_list.append({
+                                    "sheet_id": sheet.get("qInfo", {}).get("qId", ""),
+                                    "title": sheet_info.get("title", ""),
+                                    "description": sheet_info.get("description", "")
+                                })
+
+                            return {
+                                "app_id": app_id,
+                                "total_sheets": len(sheets_list),
+                                "sheets": sheets_list
+                            }
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_app_sheets)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+                elif name == "get_app_sheet_objects":
+                    app_id = arguments["app_id"]
+                    sheet_id = arguments["sheet_id"]
+
+                    def _get_sheet_objects():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            # Get detailed objects from the sheet
+                            objects = self.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
+
+                            # Format objects according to requirements: id объекта, тип объекта, описание объекта
+                            formatted_objects = []
+                            for obj in objects:
+                                if isinstance(obj, dict):
+                                    obj_info = {
+                                        "object_id": obj.get("object_id", ""),
+                                        "object_type": obj.get("object_type", ""),
+                                        "object_description": obj.get("object_title", "")
+                                    }
+                                    formatted_objects.append(obj_info)
+
+                            return {
+                                "app_id": app_id,
+                                "sheet_id": sheet_id,
+                                "total_objects": len(formatted_objects),
+                                "objects": formatted_objects
+                            }
+
+                        except Exception as e:
+                            return {"error": str(e), "details": f"Error getting objects for sheet {sheet_id} in app {app_id}"}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_sheet_objects)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
                 elif name == "engine_get_field_info":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
@@ -1107,6 +1206,136 @@ class QlikSenseMCPServer:
                         )
                     ]
 
+                elif name == "get_app_object":
+                    app_id = arguments["app_id"]
+                    object_id = arguments["object_id"]
+
+                    def _get_app_object():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc(app_id, no_data=False)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            # Get object
+                            obj_result = self.engine_api.send_request("GetObject", {"qId": object_id}, handle=app_handle)
+                            if "qReturn" not in obj_result:
+                                return {"error": f"Object {object_id} not found"}
+
+                            obj_handle = obj_result["qReturn"]["qHandle"]
+
+                            # Get layout
+                            layout_result = self.engine_api.send_request("GetLayout", [], handle=obj_handle)
+                            if "qLayout" not in layout_result:
+                                return {"error": "Failed to get object layout"}
+
+                            layout = layout_result["qLayout"]
+
+                            # Extract object properties
+                            obj_info = layout.get("qInfo", {})
+                            obj_meta = layout.get("qMeta", {})
+
+                            object_type = obj_info.get("qType", "unknown")
+                            object_title = layout.get("title", "")
+                            object_description = layout.get("subtitle", "")
+
+                            # Extract dimensions and measures
+                            dimensions = []
+                            measures = []
+
+                            if "qHyperCube" in layout:
+                                hypercube = layout["qHyperCube"]
+
+                                # Dimensions
+                                for dim_info in hypercube.get("qDimensionInfo", []):
+                                    dimensions.append({
+                                        "title": dim_info.get("qFallbackTitle", ""),
+                                        "field": (dim_info.get("qGroupFieldDefs", [""])[0] if dim_info.get("qGroupFieldDefs") else ""),
+                                        "cardinal": dim_info.get("qCardinal", 0),
+                                    })
+
+                                # Measures
+                                for measure_info in hypercube.get("qMeasureInfo", []):
+                                    # Try to get expression from different places
+                                    expression = ""
+                                    if measure_info.get("qDef"):
+                                        expression = measure_info.get("qDef")
+                                    elif measure_info.get("qMeasure", {}).get("qDef"):
+                                        expression = measure_info.get("qMeasure", {}).get("qDef")
+
+                                    measures.append({
+                                        "title": measure_info.get("qFallbackTitle", ""),
+                                        "expression": expression,
+                                    })
+
+                            # Extract table data for tables and charts
+                            table_data = None
+                            if object_type in ["sn-table", "sn-bar-chart", "sn-line-chart", "sn-pie-chart", "sn-combo-chart", "sn-scatter-plot", "sn-kpi"]:
+                                table_data = _extract_table_data_from_layout(layout)
+
+                            result = {
+                                "object_id": object_id,
+                                "object_type": object_type,
+                                "title": object_title,
+                                "description": object_description,
+                                "dimensions": dimensions,
+                                "measures": measures,
+                                "table_data": table_data,
+                            }
+
+                            return result
+
+                        except Exception as e:
+                            return {"error": str(e), "app_id": app_id, "object_id": object_id}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    def _extract_table_data_from_layout(layout):
+                        """Extract table data from layout."""
+                        if "qHyperCube" not in layout:
+                            return None
+
+                        hypercube = layout["qHyperCube"]
+
+                        if not hypercube.get("qDataPages"):
+                            return None
+
+                        # Form headers
+                        headers = []
+                        for dim_info in hypercube.get("qDimensionInfo", []):
+                            headers.append(dim_info.get("qFallbackTitle", ""))
+                        for measure_info in hypercube.get("qMeasureInfo", []):
+                            headers.append(measure_info.get("qFallbackTitle", ""))
+
+                        # Extract data
+                        table_rows = []
+                        for page in hypercube.get("qDataPages", []):
+                            for row in page.get("qMatrix", []):
+                                row_data = {}
+                                for i, cell in enumerate(row):
+                                    if i < len(headers):
+                                        header = headers[i]
+                                        cell_text = cell.get("qText", "")
+                                        cell_num = cell.get("qNum", None)
+
+                                        row_data[f"{header}_text"] = cell_text
+                                        if cell_num is not None and str(cell_num) != "NaN":
+                                            row_data[f"{header}_num"] = cell_num
+
+                                table_rows.append(row_data)
+
+                        return table_rows
+
+                    result = await asyncio.to_thread(_get_app_object)
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(result, indent=2, ensure_ascii=False)
+                        )
+                    ]
+
                 else:
                     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, indent=2, ensure_ascii=False))]
 
@@ -1219,10 +1448,10 @@ EXAMPLES:
     qlik-sense-mcp-server
 
 AVAILABLE TOOLS:
-    Repository API: get_apps (comprehensive), get_app_details
+    Repository API: get_apps (comprehensive), get_app_details, get_app_sheet_objects
     Engine API: engine_get_script, engine_create_hypercube, engine_get_field_statistics
 
-    Total: 8 tools for Qlik Sense analytics operations
+    Total: 10 tools for Qlik Sense analytics operations
 
 MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp

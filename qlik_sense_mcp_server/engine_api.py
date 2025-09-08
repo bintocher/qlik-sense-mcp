@@ -7,6 +7,7 @@ from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
 from .config import QlikSenseConfig
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,17 @@ class QlikEngineAPI:
         self.config = config
         self.ws = None
         self.request_id = 0
+        # Timeouts / retries from env
+        ws_timeout_env = os.getenv("QLIK_WS_TIMEOUT")
+        try:
+            self.ws_timeout_seconds = float(ws_timeout_env) if ws_timeout_env else 8.0
+        except ValueError:
+            self.ws_timeout_seconds = 8.0
+        retries_env = os.getenv("QLIK_WS_RETRIES")
+        try:
+            self.ws_retries = int(retries_env) if retries_env else 2
+        except ValueError:
+            self.ws_retries = 2
 
     def _get_next_request_id(self) -> int:
         """Get next request ID."""
@@ -31,12 +43,14 @@ class QlikEngineAPI:
             "http://", ""
         )
 
-        endpoints_to_try = [
+        # Order and count of endpoints controlled by retries setting
+        endpoints_all = [
             f"wss://{server_host}:{self.config.engine_port}/app/engineData",
             f"wss://{server_host}:{self.config.engine_port}/app",
             f"ws://{server_host}:{self.config.engine_port}/app/engineData",
             f"ws://{server_host}:{self.config.engine_port}/app",
         ]
+        endpoints_to_try = endpoints_all[: max(1, min(self.ws_retries, len(endpoints_all)))]
 
         # Setup SSL context
         ssl_context = ssl.create_default_context()
@@ -62,20 +76,23 @@ class QlikEngineAPI:
             try:
                 if url.startswith("wss://"):
                     self.ws = websocket.create_connection(
-                        url, sslopt={"context": ssl_context}, header=headers, timeout=10
+                        url, sslopt={"context": ssl_context}, header=headers, timeout=self.ws_timeout_seconds
                     )
                 else:
                     self.ws = websocket.create_connection(
-                        url, header=headers, timeout=10
+                        url, header=headers, timeout=self.ws_timeout_seconds
                     )
 
-
+                # initial recv to establish session
                 self.ws.recv()
                 return  # Success
             except Exception as e:
                 last_error = e
                 if self.ws:
-                    self.ws.close()
+                    try:
+                        self.ws.close()
+                    except Exception:
+                        pass
                     self.ws = None
                 continue
 

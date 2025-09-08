@@ -17,7 +17,7 @@ Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise A
 
 ## Overview
 
-Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 7 essential tools for application metadata retrieval and data analysis operations.
+Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 9 essential tools for application metadata retrieval and data analysis operations.
 
 ### Key Features
 
@@ -35,6 +35,8 @@ Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Mode
 |------|-------------|-----|--------|
 | `get_apps` | Get comprehensive list of applications with metadata | Repository | ✅ |
 | `get_app_details` | Get compact app overview (metadata, fields, master items, sheets/objects) | Engine | ✅ |
+| `get_app_sheet_objects` | Get list of objects from specific sheet with object ID, type and description | Engine | ✅ |
+| `get_app_sheets` | Get list of sheets from application with title and description | Engine | ✅ |
 | `engine_get_script` | Extract load script from application | Engine | ✅ |
 | `engine_get_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
 | `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
@@ -294,6 +296,41 @@ Gets comprehensive application analysis including data model, object counts, and
     "total_fields": 45
   },
   "object_counts": {...}
+}
+```
+
+### get_app_sheet_objects
+Retrieves list of objects from a specific sheet in Qlik Sense application with their metadata.
+
+**Parameters:**
+- `app_id` (required): Application identifier
+- `sheet_id` (required): Sheet identifier
+
+**Returns:** Object containing sheet objects with their IDs, types and descriptions
+
+**Example:**
+```json
+{
+  "app_id": "e2958865-2aed-4f8a-b3c7-20e6f21d275c",
+  "sheet_id": "abc123-def456-ghi789",
+  "total_objects": 3,
+  "objects": [
+    {
+      "object_id": "chart-1",
+      "object_type": "barchart",
+      "object_description": "Sales by Region"
+    },
+    {
+      "object_id": "table-1",
+      "object_type": "table",
+      "object_description": "Customer Details"
+    },
+    {
+      "object_id": "kpi-1",
+      "object_type": "kpi",
+      "object_description": "Total Revenue"
+    }
+  ]
 }
 ```
 

@@ -6,6 +6,7 @@ import asyncio
 from typing import Dict, List, Any, Optional
 import httpx
 import logging
+import os
 from .config import QlikSenseConfig
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,13 @@ class QlikRepositoryAPI:
         if self.config.client_cert_path and self.config.client_key_path:
             cert = (self.config.client_cert_path, self.config.client_key_path)
 
+        # Timeouts from env (seconds)
+        http_timeout_env = os.getenv("QLIK_HTTP_TIMEOUT")
+        try:
+            timeout_val = float(http_timeout_env) if http_timeout_env else 10.0
+        except ValueError:
+            timeout_val = 10.0
+
         # XSRF key for Qlik Sense API
         self.xrfkey = "0123456789abcdef"
 
@@ -39,7 +47,7 @@ class QlikRepositoryAPI:
         self.client = httpx.Client(
             verify=ssl_context if self.config.verify_ssl else False,
             cert=cert,
-            timeout=30.0,
+            timeout=timeout_val,
             headers={
                 "X-Qlik-User": f"UserDirectory={self.config.user_directory}; UserId={self.config.user_id}",
                 "X-Qlik-Xrfkey": self.xrfkey,
