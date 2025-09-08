@@ -755,7 +755,6 @@ class QlikSenseMCPServer:
                             # Use the alternative method for getting variables
                             var_list = self.engine_api._get_user_variables(app_handle) or []
                             prepared = []
-                            print (var_list)
                             for v in var_list:
                                 name = v.get("name", "")
                                 text_val = v.get("text_value", "")
