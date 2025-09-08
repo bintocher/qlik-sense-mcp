@@ -17,7 +17,7 @@ Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise A
 
 ## Overview
 
-Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 7 essential tools for application metadata retrieval and data analysis operations.
+Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 10 comprehensive tools for complete Qlik Sense analytics workflow including application discovery, data analysis, script extraction, and metadata management.
 
 ### Key Features
 
@@ -34,12 +34,15 @@ Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Mode
 | Tool | Description | API | Status |
 |------|-------------|-----|--------|
 | `get_apps` | Get comprehensive list of applications with metadata | Repository | ✅ |
-| `get_app_details` | Get compact app overview (metadata, fields, master items, sheets/objects) | Engine | ✅ |
-| `engine_get_script` | Extract load script from application | Engine | ✅ |
-| `engine_get_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
-| `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
+| `get_app_details` | Get compact app overview (metadata, fields, master items, sheets/objects) | Repository | ✅ |
+| `get_app_sheets` | Get list of sheets from application with title and description | Engine | ✅ |
+| `get_app_sheet_objects` | Get list of objects from specific sheet with object ID, type and description | Engine | ✅ |
+| `get_app_script` | Extract load script from application | Engine | ✅ |
 | `get_app_field` | Return values of a field with pagination and wildcard search | Engine | ✅ |
 | `get_app_variables` | Return variables split by source with pagination and wildcard search | Engine | ✅ |
+| `get_app_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
+| `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
+| `get_app_object` | Get specific object layout by ID (GetObject + GetLayout) | Engine | ✅ |
 
 ## Installation
 
@@ -112,6 +115,17 @@ QLIK_ENGINE_PORT=4747
 QLIK_VERIFY_SSL=false
 ```
 
+### Optional Environment Variables
+
+```bash
+# Logging level (default: INFO)
+LOG_LEVEL=INFO
+
+# Engine WebSocket timeouts and retries
+QLIK_WS_TIMEOUT=8.0     # seconds
+QLIK_WS_RETRIES=2       # number of endpoints to try
+```
+
 ### MCP Configuration
 
 Create `mcp.json` file for MCP client integration:
@@ -137,11 +151,14 @@ Create `mcp.json` file for MCP client integration:
       "autoApprove": [
         "get_apps",
         "get_app_details",
-        "engine_get_script",
-        "engine_get_field_statistics",
+        "get_app_script",
+        "get_app_field_statistics",
         "engine_create_hypercube",
         "get_app_field",
-        "get_app_variables"
+        "get_app_variables",
+        "get_app_sheets",
+        "get_app_sheet_objects",
+        "get_app_object"
       ]
     }
   }
@@ -207,7 +224,7 @@ result = mcp_client.call_tool("engine_create_hypercube", {
 #### Get Field Statistics
 ```python
 # Get detailed field statistics
-result = mcp_client.call_tool("engine_get_field_statistics", {
+result = mcp_client.call_tool("get_app_field_statistics", {
     "app_id": "your-app-id",
     "field_name": "Sales"
 })
@@ -277,7 +294,7 @@ result = mcp_client.call_tool("get_apps", {
 ```
 
 ### get_app_details
-Gets comprehensive application analysis including data model, object counts, and metadata.
+Gets comprehensive application analysis including data model, object counts, and metadata. Provides detailed field information, table structures, and application properties.
 
 **Parameters:**
 - `app_id` (required): Application identifier
@@ -297,7 +314,88 @@ Gets comprehensive application analysis including data model, object counts, and
 }
 ```
 
-### engine_get_script
+### get_app_sheets
+Get list of sheets from application with title and description.
+
+**Parameters:**
+- `app_id` (required): Application GUID
+
+**Returns:** Object containing application sheets with their IDs, titles and descriptions
+
+**Example:**
+```json
+{
+  "app_id": "e2958865-2aed-4f8a-b3c7-20e6f21d275c",
+  "total_sheets": 2,
+  "sheets": [
+    {
+      "sheet_id": "abc123-def456-ghi789",
+      "title": "Main Dashboard",
+      "description": "Primary analysis dashboard"
+    },
+    {
+      "sheet_id": "def456-ghi789-jkl012",
+      "title": "Detailed Analysis",
+      "description": "Detailed data analysis"
+    }
+  ]
+}
+```
+
+### get_app_sheet_objects
+Retrieves list of objects from a specific sheet in Qlik Sense application with their metadata.
+
+**Parameters:**
+- `app_id` (required): Application identifier
+- `sheet_id` (required): Sheet identifier
+
+**Returns:** Object containing sheet objects with their IDs, types and descriptions
+
+**Example:**
+```json
+{
+  "app_id": "e2958865-2aed-4f8a-b3c7-20e6f21d275c",
+  "sheet_id": "abc123-def456-ghi789",
+  "total_objects": 3,
+  "objects": [
+    {
+      "object_id": "chart-1",
+      "object_type": "barchart",
+      "object_description": "Sales by Region"
+    },
+    {
+      "object_id": "table-1",
+      "object_type": "table",
+      "object_description": "Customer Details"
+    },
+    {
+      "object_id": "kpi-1",
+      "object_type": "kpi",
+      "object_description": "Total Revenue"
+    }
+  ]
+}
+```
+
+### get_app_object
+Retrieves layout of a specific object by its ID using sequential GetObject and GetLayout requests.
+
+**Parameters:**
+- `app_id` (required): Application identifier
+- `object_id` (required): Object identifier
+
+**Returns:** Object layout structure as returned by GetLayout
+
+**Example:**
+```json
+{
+  "qLayout": {
+    "...": "..."
+  }
+}
+```
+
+### get_app_script
 Retrieves load script from application.
 
 **Parameters:**
@@ -339,7 +437,35 @@ Returns values of a single field with pagination and optional wildcard search.
 }
 ```
 
-### engine_get_field_statistics
+### get_app_variables
+Returns variables split by source (script/ui) with pagination and wildcard search.
+
+**Parameters:**
+- `app_id` (required): Application GUID
+- `limit` (optional): Max variables to return (default: 10, max: 100)
+- `offset` (optional): Offset for pagination (default: 0)
+- `created_in_script` (optional): Return only variables created in script (true/false). If omitted, return both
+- `search_string` (optional): Wildcard search by variable name or text value (* and % supported), case-insensitive by default
+- `search_number` (optional): Wildcard search among numeric variable values (* and % supported)
+- `case_sensitive` (optional): Case sensitive matching for search_string (default: false)
+
+**Returns:** Object containing variables from script and UI
+
+**Example:**
+```json
+{
+  "variables_from_script": {
+    "vSalesTarget": "1000000",
+    "vCurrentYear": "2024"
+  },
+  "variables_from_ui": {
+    "vSelectedRegion": "Europe",
+    "vDateRange": "Q1-Q4"
+  }
+}
+```
+
+### get_app_field_statistics
 Retrieves comprehensive field statistics.
 
 **Parameters:**
@@ -537,9 +663,14 @@ print('Server initialized:', server.config_valid)
 | Operation | Average Time | Recommendations |
 |-----------|--------------|-----------------|
 | get_apps | 0.5s | Use filters |
-| get_app_details | 2-5s | Analyze specific apps |
+| get_app_details | 0.5s-2s | Analyze specific apps |
+| get_app_sheets | 0.3-1s | Fast metadata retrieval |
+| get_app_sheet_objects | 0.5-2s | Sheet analysis |
+| get_app_script | 1-5s | Script extraction |
+| get_app_field | 0.5-2s | Field values with pagination |
+| get_app_variables | 0.3-1s | Variable listing |
+| get_app_field_statistics | 0.5-2s | Use for numeric fields |
 | engine_create_hypercube | 1-10s | Limit dimensions and measures |
-| engine_get_field_statistics | 0.5-2s | Use for numeric fields |
 
 ## Security
 
@@ -584,6 +715,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 7/7 Tools Working | v1.2.0
+**Project Status**: Production Ready | 10/10 Tools Working | v1.3.0
 
 **Installation**: `uvx qlik-sense-mcp-server`

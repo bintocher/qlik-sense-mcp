@@ -14,6 +14,31 @@ from .config import QlikSenseConfig
 from .repository_api import QlikRepositoryAPI
 from .engine_api import QlikEngineAPI
 
+import logging
+import os
+import requests
+from urllib3.exceptions import InsecureRequestWarning
+from dotenv import load_dotenv
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+# Initialize logging configuration early
+load_dotenv()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+# Configure root logger to stderr (stdout reserved for MCP protocol)
+_logging_level = getattr(logging, LOG_LEVEL, logging.INFO)
+if not logging.getLogger().handlers:
+    handler = logging.StreamHandler(stream=sys.stderr)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    logging.getLogger().addHandler(handler)
+logging.getLogger().setLevel(_logging_level)
+logger = logging.getLogger(__name__)
+
 
 class QlikSenseMCPServer:
     """MCP Server for Qlik Sense Enterprise APIs."""
@@ -36,7 +61,7 @@ class QlikSenseMCPServer:
                 self.engine_api = QlikEngineAPI(self.config)
             except Exception as e:
                 # API clients will be None, tools will return errors
-                pass
+                logging.getLogger(__name__).warning("Failed to initialize APIs: %s", e)
 
         self.server = Server("qlik-sense-mcp-server")
         self._setup_handlers()
@@ -50,6 +75,136 @@ class QlikSenseMCPServer:
             self.config.user_directory and
             self.config.user_id
         )
+
+    def _get_qlik_ticket(self) -> Optional[str]:
+        """Get Qlik Sense ticket for user authentication."""
+        ticket_url = f"{self.config.server_url}:{self.config.proxy_port}/qps/ticket"
+
+        ticket_data = {
+            "UserDirectory": self.config.user_directory,
+            "UserId": self.config.user_id,
+            "Attributes": []
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Qlik-Xrfkey": "0123456789abcdef"
+        }
+
+        params = {"xrfkey": "0123456789abcdef"}
+
+        cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
+        verify_ssl = self.config.ca_cert_path if self.config.ca_cert_path else False
+
+        try:
+            response = requests.post(
+                ticket_url,
+                json=ticket_data,
+                headers=headers,
+                params=params,
+                cert=cert,
+                verify=verify_ssl,
+                timeout=30
+            )
+            response.raise_for_status()
+
+            ticket_response = response.json()
+            ticket = ticket_response.get("Ticket")
+
+            if not ticket:
+                raise ValueError("Ticket not found in response")
+
+            return ticket
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get ticket: {e}")
+            return None
+
+    def _get_app_metadata_via_proxy(self, app_id: str, ticket: str) -> Dict[str, Any]:
+        """Get application metadata via Qlik Sense Proxy API."""
+        metadata_url = f"{self.config.server_url}/api/v1/apps/{app_id}/data/metadata?qlikTicket={ticket}"
+
+        headers = {
+            "X-Qlik-Xrfkey": "0123456789abcdef"
+        }
+
+        params = {"xrfkey": "0123456789abcdef"}
+
+        cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
+        verify_ssl = self.config.ca_cert_path if self.config.ca_cert_path else False
+
+        try:
+            response = requests.get(
+                metadata_url,
+                headers=headers,
+                params=params,
+                cert=cert,
+                verify=verify_ssl,
+                timeout=30
+            )
+            response.raise_for_status()
+
+            metadata = response.json()
+            return self._filter_metadata(metadata)
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to get app metadata: {e}")
+            return {"error": str(e)}
+
+    def _filter_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Filter metadata to remove system fields and hidden items."""
+        # Fields to remove from output
+        fields_to_remove = {
+            'is_system', 'is_hidden', 'is_semantic', 'distinct_only',
+            'is_locked', 'always_one_selected', 'is_numeric', 'hash',
+            'tags', 'has_section_access', 'tables_profiling_data',
+            'is_direct_query_mode', 'usage', 'reload_meta', 'static_byte_size', 'byte_size', 'no_of_key_fields'
+        }
+
+        # Qlik Sense reserved fields to remove
+        qlik_reserved_fields = {'$Field', '$Table', '$Rows', '$Fields', '$FieldNo', '$Info'}
+
+        def filter_object(obj):
+            """Recursively filter object."""
+            if isinstance(obj, dict):
+                filtered = {}
+                for key, value in obj.items():
+                    # Skip fields to remove
+                    if key in fields_to_remove:
+                        continue
+
+                    # Skip fields with is_system: true or is_hidden: true
+                    if isinstance(value, dict):
+                        if value.get('is_system') or value.get('is_hidden'):
+                            continue
+                        # Replace cardinal with unique_count
+                        if key == 'cardinal':
+                            filtered['unique_count'] = value
+                            continue
+
+                    # Recursively filter nested objects
+                    filtered[key] = filter_object(value)
+                return filtered
+            elif isinstance(obj, list):
+                # Filter field arrays, removing reserved Qlik fields
+                if obj and isinstance(obj[0], dict) and 'name' in obj[0]:
+                    # This is a fields array
+                    return [filter_object(item) for item in obj if item.get('name') not in qlik_reserved_fields]
+                else:
+                    return [filter_object(item) for item in obj]
+            else:
+                return obj
+
+        # Keep only fields and tables
+        filtered = filter_object(metadata)
+        result = {}
+
+        if 'fields' in filtered:
+            result['fields'] = filtered['fields']
+        if 'tables' in filtered:
+            result['tables'] = filtered['tables']
+
+        return result
 
     def _setup_handlers(self):
         """Setup MCP server handlers."""
@@ -111,8 +266,8 @@ class QlikSenseMCPServer:
                     }
                 ),
 
-                Tool(name="engine_get_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
-                Tool(name="engine_get_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
+                Tool(name="get_app_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
+                Tool(name="get_app_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
                 Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]})
                 ,
                 Tool(
@@ -147,6 +302,41 @@ class QlikSenseMCPServer:
                             "case_sensitive": {"type": "boolean", "description": "Case sensitive matching for search_string", "default": False}
                         },
                         "required": ["app_id"],
+                    }
+                ),
+                Tool(
+                    name="get_app_sheets",
+                    description="Get list of sheets from application with title and description.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"}
+                        },
+                        "required": ["app_id"]
+                    }
+                ),
+                Tool(
+                    name="get_app_sheet_objects",
+                    description="Get list of objects from specific sheet with object ID, type and description.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "sheet_id": {"type": "string", "description": "Sheet GUID"}
+                        },
+                        "required": ["app_id", "sheet_id"]
+                    }
+                ),
+                Tool(
+                    name="get_app_object",
+                    description="Get specific object layout by calling GetObject and GetLayout sequentially via WebSocket.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "object_id": {"type": "string", "description": "Object ID to retrieve"}
+                        },
+                        "required": ["app_id", "object_id"]
                     }
                 )
                 ]
@@ -226,6 +416,7 @@ class QlikSenseMCPServer:
                     req_name = arguments.get("name")
 
                     def _resolve_app() -> Dict[str, Any]:
+                        """Resolve application by ID or name from Repository API."""
                         try:
                             if req_app_id:
                                 app_meta = self.repository_api.get_app_by_id(req_app_id)
@@ -236,7 +427,8 @@ class QlikSenseMCPServer:
                                         "description": app_meta.get("description") or "",
                                         "stream": (app_meta.get("stream", {}) or {}).get("name", "") if app_meta.get("published") else "",
                                         "modified_dttm": app_meta.get("modifiedDate", "") or "",
-                                        "reload_dttm": app_meta.get("lastReloadTime", "") or ""
+                                        "reload_dttm": app_meta.get("lastReloadTime", "") or "",
+                                        "size_bytes": 0
                                     }
                                 return {"error": "App not found by provided app_id"}
                             if req_name:
@@ -248,111 +440,58 @@ class QlikSenseMCPServer:
                                 exact = [a for a in apps if a.get("name", "").lower() == lowered]
                                 selected = exact[0] if exact else apps[0]
                                 selected["app_id"] = selected.pop("guid", "")
+                                selected["size_bytes"] = 0
                                 return selected
                             return {"error": "Either app_id or name must be provided"}
                         except Exception as e:
                             return {"error": str(e)}
 
-                    resolved = await asyncio.to_thread(_resolve_app)
-                    if "error" in resolved:
-                        return [TextContent(type="text", text=json.dumps(resolved, indent=2, ensure_ascii=False))]
-
-                    app_id = resolved.get("app_id") or resolved.get("guid")
-
-                    def _build_compact_details():
-                        app_handle = -1
+                    def _get_app_details():
+                        """Get application details with metadata, fields and tables."""
                         try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                            # Get app metadata from Repository API
+                            resolved = _resolve_app()
+                            if "error" in resolved:
+                                return resolved
 
-                            meta = self.engine_api._get_app_metadata_fast(app_handle) or {}
-                            fields_info = self.engine_api.get_fields(app_handle) or {}
+                            app_id = resolved.get("app_id")
 
-                            tables_map = {}
-                            for f in fields_info.get("fields", []):
-                                tname = f.get("table_name", "")
-                                fname = f.get("field_name", "")
-                                if not tname or not fname:
-                                    continue
-                                tables_map.setdefault(tname, []).append(fname)
+                            # Get Qlik ticket for authentication
+                            ticket = self._get_qlik_ticket()
+                            if not ticket:
+                                return {"error": "Failed to obtain Qlik ticket"}
 
-                            total_tables = len(tables_map)
-                            total_fields = sum(len(v) for v in tables_map.values())
+                            # Get fields and tables metadata via Proxy API
+                            metadata = self._get_app_metadata_via_proxy(app_id, ticket)
+                            if "error" in metadata:
+                                return metadata
 
-                            mi = self.engine_api._get_user_master_items(app_handle) or {}
-                            master_dimensions = [d.get("name", "") for d in mi.get("dimensions", []) if d.get("name")]
-                            master_measures = [m.get("name", "") for m in mi.get("measures", []) if m.get("name")]
-
-                            sheets_payload = self.engine_api.get_sheets(app_handle) or []
-                            sheets_list = []
-                            for s in sheets_payload:
-                                try:
-                                    sid = s.get("qInfo", {}).get("qId", "")
-                                    sname = s.get("qMeta", {}).get("title", "")
-                                    if not sid:
-                                        continue
-                                    objs = self.engine_api._get_sheet_objects_detailed(app_handle, sid) or []
-                                    obj_list = []
-                                    for o in objs:
-                                        oid = o.get("object_id", "")
-                                        otype = o.get("object_type", "")
-                                        otitle = o.get("object_title", "")
-                                        fields_used = o.get("fields_used", [])
-                                        if not oid:
-                                            continue
-                                        obj_list.append({
-                                            oid: {
-                                                "object_type": otype,
-                                                "object_desription": otitle,
-                                                "fields": fields_used
-                                            }
-                                        })
-                                    sheets_list.append({
-                                        sid: {
-                                            "sheet_name": sname,
-                                            "objects": obj_list
-                                        }
-                                    })
-                                except Exception:
-                                    continue
-
-                            metainfo = {
-                                "app_id": app_id,
-                                "name": resolved.get("name") or meta.get("title", ""),
-                                "description": resolved.get("description") or meta.get("description", ""),
-                                "stream": resolved.get("stream", ""),
-                                "modified_dttm": resolved.get("modified_dttm") or meta.get("modified_date", ""),
-                                "reload_dttm": resolved.get("reload_dttm") or meta.get("last_reload_time", ""),
-                                "size_bytes": meta.get("size", 0)
+                            # Build final response
+                            result = {
+                                "metainfo": {
+                                    "app_id": app_id,
+                                    "name": resolved.get("name", ""),
+                                    "description": resolved.get("description", ""),
+                                    "stream": resolved.get("stream", ""),
+                                    "modified_dttm": resolved.get("modified_dttm", ""),
+                                    "reload_dttm": resolved.get("reload_dttm", ""),
+                                    "size_bytes": resolved.get("size_bytes", 0)
+                                },
+                                "fields": metadata.get("fields", []),
+                                "tables": metadata.get("tables", [])
                             }
 
-                            return {
-                                "metainfo": metainfo,
-                                "tables_data": tables_map,
-                                "total_tables": total_tables,
-                                "total_fields": total_fields,
-                                "master_dimensions": master_dimensions,
-                                "master_measures": master_measures,
-                                "sheets": sheets_list
-                            }
+                            return result
+
                         except Exception as e:
                             return {"error": str(e)}
-                        finally:
-                            try:
-                                if app_handle != -1:
-                                    self.engine_api.close_doc(app_handle)
-                            finally:
-                                self.engine_api.disconnect()
 
-                    compact = await asyncio.to_thread(_build_compact_details)
+                    details = await asyncio.to_thread(_get_app_details)
                     return [
-                        TextContent(type="text", text=json.dumps(compact, indent=2, ensure_ascii=False))
+                        TextContent(type="text", text=json.dumps(details, indent=2, ensure_ascii=False))
                     ]
 
-                elif name == "engine_get_script":
+                elif name == "get_app_script":
                     app_id = arguments["app_id"]
 
                     def _get_script():
@@ -399,7 +538,7 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                elif name == "engine_get_field_statistics":
+                elif name == "get_app_field_statistics":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
 
@@ -670,6 +809,82 @@ class QlikSenseMCPServer:
                             self.engine_api.disconnect()
 
                     result = await asyncio.to_thread(_get_variables)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+                elif name == "get_app_sheets":
+                    app_id = arguments["app_id"]
+
+                    def _get_app_sheets():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            sheets = self.engine_api.get_sheets(app_handle)
+                            sheets_list = []
+                            for sheet in sheets:
+                                sheet_info = sheet.get("qMeta", {})
+                                sheet_data = sheet.get("qData", {})
+                                sheets_list.append({
+                                    "sheet_id": sheet.get("qInfo", {}).get("qId", ""),
+                                    "title": sheet_info.get("title", ""),
+                                    "description": sheet_info.get("description", "")
+                                })
+
+                            return {
+                                "app_id": app_id,
+                                "total_sheets": len(sheets_list),
+                                "sheets": sheets_list
+                            }
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_app_sheets)
+                    return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+
+                elif name == "get_app_sheet_objects":
+                    app_id = arguments["app_id"]
+                    sheet_id = arguments["sheet_id"]
+
+                    def _get_sheet_objects():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            # Get detailed objects from the sheet
+                            objects = self.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
+
+                            # Format objects according to requirements: id объекта, тип объекта, описание объекта
+                            formatted_objects = []
+                            for obj in objects:
+                                if isinstance(obj, dict):
+                                    obj_info = {
+                                        "object_id": obj.get("object_id", ""),
+                                        "object_type": obj.get("object_type", ""),
+                                        "object_description": obj.get("object_title", "")
+                                    }
+                                    formatted_objects.append(obj_info)
+
+                            return {
+                                "app_id": app_id,
+                                "sheet_id": sheet_id,
+                                "total_objects": len(formatted_objects),
+                                "objects": formatted_objects
+                            }
+
+                        except Exception as e:
+                            return {"error": str(e), "details": f"Error getting objects for sheet {sheet_id} in app {app_id}"}
+                        finally:
+                            self.engine_api.disconnect()
+
+                    result = await asyncio.to_thread(_get_sheet_objects)
                     return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
 
                 elif name == "engine_get_field_info":
@@ -1086,6 +1301,48 @@ class QlikSenseMCPServer:
                         )
                     ]
 
+                elif name == "get_app_object":
+                    app_id = arguments["app_id"]
+                    object_id = arguments["object_id"]
+
+                    def _get_app_object():
+                        try:
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc(app_id, no_data=False)
+                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
+
+                            if app_handle == -1:
+                                return {"error": "Failed to open app"}
+
+                            # Get object
+                            obj_result = self.engine_api.send_request("GetObject", {"qId": object_id}, handle=app_handle)
+                            if "qReturn" not in obj_result:
+                                return {"error": f"Object {object_id} not found"}
+
+                            obj_handle = obj_result["qReturn"]["qHandle"]
+
+                            # Get layout
+                            layout_result = self.engine_api.send_request("GetLayout", [], handle=obj_handle)
+                            if "qLayout" not in layout_result:
+                                return {"error": "Failed to get object layout"}
+
+                            # Return only the result part as requested
+                            return layout_result
+
+                        except Exception as e:
+                            return {"error": str(e), "app_id": app_id, "object_id": object_id}
+                        finally:
+                            self.engine_api.disconnect()
+
+
+                    result = await asyncio.to_thread(_get_app_object)
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(result, indent=2, ensure_ascii=False)
+                        )
+                    ]
+
                 else:
                     return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, indent=2, ensure_ascii=False))]
 
@@ -1105,7 +1362,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.2.0",
+                    server_version="1.3.0",
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1137,7 +1394,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.2.0")
+            print("qlik-sense-mcp-server 1.3.0")
             return
 
     asyncio.run(async_main())
@@ -1183,12 +1440,12 @@ CONFIGURATION:
 
 EXAMPLES:
     # Using uvx with environment variables
-    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \\
-        --with-env QLIK_USER_DIRECTORY=COMPANY \\
-        --with-env QLIK_USER_ID=username \\
-        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \\
-        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \\
-        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \\
+    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \
+        --with-env QLIK_USER_DIRECTORY=COMPANY \
+        --with-env QLIK_USER_ID=username \
+        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \
+        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \
+        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \
         qlik-sense-mcp-server
 
     # Using environment file
@@ -1198,10 +1455,10 @@ EXAMPLES:
     qlik-sense-mcp-server
 
 AVAILABLE TOOLS:
-    Repository API: get_apps (comprehensive), get_app_details
-    Engine API: engine_get_script, engine_create_hypercube, engine_get_field_statistics
+    Repository API: get_apps, get_app_details
+    Engine API: get_app_sheets, get_app_sheet_objects, get_app_script, get_app_field, get_app_variables, get_app_field_statistics, engine_create_hypercube, get_app_object
 
-    Total: 8 tools for Qlik Sense analytics operations
+    Total: 10 tools for Qlik Sense analytics operations
 
 MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp
