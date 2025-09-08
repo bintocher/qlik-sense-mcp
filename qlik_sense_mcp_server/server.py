@@ -131,7 +131,7 @@ class QlikSenseMCPServer:
         params = {"xrfkey": "0123456789abcdef"}
 
         cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
-        verify_ssl = self.config.ca_cert_path if self.config.ca_cert_path else False
+        verify_ssl = self.config.verify_ssl
 
         try:
             response = requests.get(
@@ -1362,7 +1362,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.3.0",
+                    server_version="1.3.1",
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1394,7 +1394,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.3.0")
+            print("qlik-sense-mcp-server 1.3.1")
             return
 
     asyncio.run(async_main())
