@@ -144,8 +144,13 @@ Create `mcp.json` file for MCP client integration:
         "QLIK_CLIENT_KEY_PATH": "/absolute/path/to/certs/client_key.pem",
         "QLIK_CA_CERT_PATH": "/absolute/path/to/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
+        "QLIK_PROXY_PORT": "4243",
         "QLIK_ENGINE_PORT": "4747",
-        "QLIK_VERIFY_SSL": "false"
+        "QLIK_VERIFY_SSL": "false",
+        "QLIK_HTTP_TIMEOUT": "10.0",
+        "QLIK_WS_TIMEOUT": "8.0",
+        "QLIK_WS_RETRIES": "2",
+        "LOG_LEVEL": "INFO"
       },
       "disabled": false,
       "autoApprove": [
@@ -164,6 +169,36 @@ Create `mcp.json` file for MCP client integration:
   }
 }
 ```
+
+### Environment Variables Configuration
+
+The server requires the following environment variables for configuration:
+
+#### Required Variables
+- **`QLIK_SERVER_URL`** - Qlik Sense server URL (e.g., `https://qlik.company.com`)
+- **`QLIK_USER_DIRECTORY`** - User directory for authentication (e.g., `COMPANY`)
+- **`QLIK_USER_ID`** - User ID for authentication (e.g., `your-username`)
+
+#### Certificate Configuration (Required for production)
+- **`QLIK_CLIENT_CERT_PATH`** - Absolute path to client certificate file (`.pem` format)
+- **`QLIK_CLIENT_KEY_PATH`** - Absolute path to client private key file (`.pem` format)
+- **`QLIK_CA_CERT_PATH`** - Absolute path to CA certificate file (`.pem` format). If not specified, SSL certificate verification will be disabled
+
+#### Network Configuration
+- **`QLIK_REPOSITORY_PORT`** - Repository API port (default: `4242`)
+- **`QLIK_PROXY_PORT`** - Proxy API port for authentication (default: `4243`)
+- **`QLIK_ENGINE_PORT`** - Engine API port for WebSocket connections (default: `4747`)
+
+#### SSL and Security
+- **`QLIK_VERIFY_SSL`** - Verify SSL certificates (`true`/`false`, default: `true`)
+
+#### Timeouts and Performance
+- **`QLIK_HTTP_TIMEOUT`** - HTTP request timeout in seconds (default: `10.0`)
+- **`QLIK_WS_TIMEOUT`** - WebSocket connection timeout in seconds (default: `8.0`)
+- **`QLIK_WS_RETRIES`** - Number of WebSocket connection retry attempts (default: `2`)
+
+#### Logging
+- **`LOG_LEVEL`** - Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, default: `INFO`)
 
 ## Usage
 
