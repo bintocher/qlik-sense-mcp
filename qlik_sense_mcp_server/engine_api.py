@@ -2153,11 +2153,11 @@ class QlikEngineAPI:
             for variable in variables:
                 # Additional filter for user variables only
                 if not variable.get("qIsReserved", False) and not variable.get("qIsConfig", False):
+                    definition = variable.get("qDefinition", "")
+
                     user_variables.append({
                         "name": variable.get("qName", ""),
-                        "definition": variable.get("qDefinition", ""),
-                        "text_value": variable.get("qText", ""),
-                        "numeric_value": variable.get("qNum", None),
+                        "text_value": definition,
                         "is_script_created": variable.get("qIsScriptCreated", False)
                     })
 

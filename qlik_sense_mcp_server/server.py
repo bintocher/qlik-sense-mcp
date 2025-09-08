@@ -243,9 +243,9 @@ class QlikSenseMCPServer:
                                 "description": "Wildcard case-insensitive search in stream name"
                             },
                             "published": {
-                                "type": ["boolean", "integer", "string"],
+                                "type": "string",
                                 "description": "Filter by published status (true/false or 1/0). Default: true",
-                                "default": True
+                                "default": "true"
                             }
                         }
                     }
@@ -296,7 +296,7 @@ class QlikSenseMCPServer:
                             "app_id": {"type": "string", "description": "Application GUID"},
                             "limit": {"type": "integer", "description": "Max variables to return (default: 10, max: 100)", "default": 10},
                             "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
-                            "created_in_script": {"type": ["boolean", "integer", "string"], "description": "Return only variables created in script (true/false). If omitted, return both"},
+                            "created_in_script": {"type": "string", "description": "Return only variables created in script (true/false). If omitted, return both"},
                             "search_string": {"type": "string", "description": "Wildcard search by variable name or text value (* and % supported), case-insensitive by default"},
                             "search_number": {"type": "string", "description": "Wildcard search among numeric variable values (* and % supported)"},
                             "case_sensitive": {"type": "boolean", "description": "Case sensitive matching for search_string", "default": False}
@@ -758,12 +758,10 @@ class QlikSenseMCPServer:
                             for v in var_list:
                                 name = v.get("name", "")
                                 text_val = v.get("text_value", "")
-                                num_val = v.get("numeric_value")
                                 is_script = v.get("is_script_created", False)
                                 prepared.append({
                                     "name": name,
                                     "text_value": text_val if text_val is not None else "",
-                                    "numeric_value": num_val,
                                     "is_script": is_script
                                 })
 
@@ -771,14 +769,13 @@ class QlikSenseMCPServer:
                                 prepared = [x for x in prepared if x["is_script"]]
                             elif created_in_script is False:
                                 prepared = [x for x in prepared if not x["is_script"]]
+                            else:
+                                # По умолчанию показываем только переменные из UI
+                                prepared = [x for x in prepared if not x["is_script"]]
 
                             if search_string:
                                 rx = _wildcard_to_regex(search_string, case_sensitive)
                                 prepared = [x for x in prepared if rx.match(x["name"]) or rx.match(x.get("text_value", ""))]
-
-                            if search_number:
-                                rxn = _wildcard_to_regex(search_number, case_sensitive)
-                                prepared = [x for x in prepared if x.get("numeric_value") is not None and rxn.match(str(x.get("numeric_value")))]
 
                             from_script = [x for x in prepared if x["is_script"]]
                             from_ui = [x for x in prepared if not x["is_script"]]
@@ -787,12 +784,7 @@ class QlikSenseMCPServer:
                                 sliced = items[offset:offset + limit]
                                 result_map = {}
                                 for it in sliced:
-                                    val = it.get("text_value")
-                                    if val is None or val == "":
-                                        if it.get("numeric_value") is not None:
-                                            val = str(it["numeric_value"])
-                                        else:
-                                            val = ""
+                                    val = it.get("text_value", "")
                                     result_map[it["name"]] = val
                                 return result_map
 
