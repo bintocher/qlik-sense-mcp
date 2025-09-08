@@ -243,9 +243,9 @@ class QlikSenseMCPServer:
                                 "description": "Wildcard case-insensitive search in stream name"
                             },
                             "published": {
-                                "type": ["boolean", "integer", "string"],
+                                "type": "string",
                                 "description": "Filter by published status (true/false or 1/0). Default: true",
-                                "default": True
+                                "default": "true"
                             }
                         }
                     }
@@ -296,7 +296,7 @@ class QlikSenseMCPServer:
                             "app_id": {"type": "string", "description": "Application GUID"},
                             "limit": {"type": "integer", "description": "Max variables to return (default: 10, max: 100)", "default": 10},
                             "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
-                            "created_in_script": {"type": ["boolean", "integer", "string"], "description": "Return only variables created in script (true/false). If omitted, return both"},
+                            "created_in_script": {"type": "string", "description": "Return only variables created in script (true/false). If omitted, return both"},
                             "search_string": {"type": "string", "description": "Wildcard search by variable name or text value (* and % supported), case-insensitive by default"},
                             "search_number": {"type": "string", "description": "Wildcard search among numeric variable values (* and % supported)"},
                             "case_sensitive": {"type": "boolean", "description": "Case sensitive matching for search_string", "default": False}
