@@ -17,7 +17,7 @@ Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise A
 
 ## Overview
 
-Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 9 comprehensive tools for complete Qlik Sense analytics workflow including application discovery, data analysis, script extraction, and metadata management.
+Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Model Context Protocol. Server provides 10 comprehensive tools for complete Qlik Sense analytics workflow including application discovery, data analysis, script extraction, and metadata management.
 
 ### Key Features
 
@@ -42,6 +42,7 @@ Qlik Sense MCP Server bridges Qlik Sense Enterprise with systems supporting Mode
 | `get_app_variables` | Return variables split by source with pagination and wildcard search | Engine | ✅ |
 | `get_app_field_statistics` | Get comprehensive field statistics | Engine | ✅ |
 | `engine_create_hypercube` | Create hypercube for data analysis | Engine | ✅ |
+| `get_app_object` | Get specific object layout by ID (GetObject + GetLayout) | Engine | ✅ |
 
 ## Installation
 
@@ -114,6 +115,17 @@ QLIK_ENGINE_PORT=4747
 QLIK_VERIFY_SSL=false
 ```
 
+### Optional Environment Variables
+
+```bash
+# Logging level (default: INFO)
+LOG_LEVEL=INFO
+
+# Engine WebSocket timeouts and retries
+QLIK_WS_TIMEOUT=8.0     # seconds
+QLIK_WS_RETRIES=2       # number of endpoints to try
+```
+
 ### MCP Configuration
 
 Create `mcp.json` file for MCP client integration:
@@ -143,7 +155,10 @@ Create `mcp.json` file for MCP client integration:
         "get_app_field_statistics",
         "engine_create_hypercube",
         "get_app_field",
-        "get_app_variables"
+        "get_app_variables",
+        "get_app_sheets",
+        "get_app_sheet_objects",
+        "get_app_object"
       ]
     }
   }
@@ -359,6 +374,24 @@ Retrieves list of objects from a specific sheet in Qlik Sense application with t
       "object_description": "Total Revenue"
     }
   ]
+}
+```
+
+### get_app_object
+Retrieves layout of a specific object by its ID using sequential GetObject and GetLayout requests.
+
+**Parameters:**
+- `app_id` (required): Application identifier
+- `object_id` (required): Object identifier
+
+**Returns:** Object layout structure as returned by GetLayout
+
+**Example:**
+```json
+{
+  "qLayout": {
+    "...": "..."
+  }
 }
 ```
 
@@ -682,6 +715,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 9/9 Tools Working | v1.3.0
+**Project Status**: Production Ready | 10/10 Tools Working | v1.3.0
 
 **Installation**: `uvx qlik-sense-mcp-server`

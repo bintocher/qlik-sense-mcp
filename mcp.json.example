@@ -22,7 +22,10 @@
         "get_app_field_statistics",
         "engine_create_hypercube",
         "get_app_field",
-        "get_app_variables"
+        "get_app_variables",
+        "get_app_sheets",
+        "get_app_sheet_objects",
+        "get_app_object"
       ]
     }
   }
