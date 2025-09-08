@@ -755,15 +755,14 @@ class QlikSenseMCPServer:
                             # Use the alternative method for getting variables
                             var_list = self.engine_api._get_user_variables(app_handle) or []
                             prepared = []
+                            print (var_list)
                             for v in var_list:
                                 name = v.get("name", "")
                                 text_val = v.get("text_value", "")
-                                num_val = v.get("numeric_value")
                                 is_script = v.get("is_script_created", False)
                                 prepared.append({
                                     "name": name,
                                     "text_value": text_val if text_val is not None else "",
-                                    "numeric_value": num_val,
                                     "is_script": is_script
                                 })
 
@@ -771,14 +770,13 @@ class QlikSenseMCPServer:
                                 prepared = [x for x in prepared if x["is_script"]]
                             elif created_in_script is False:
                                 prepared = [x for x in prepared if not x["is_script"]]
+                            else:
+                                # По умолчанию показываем только переменные из UI
+                                prepared = [x for x in prepared if not x["is_script"]]
 
                             if search_string:
                                 rx = _wildcard_to_regex(search_string, case_sensitive)
                                 prepared = [x for x in prepared if rx.match(x["name"]) or rx.match(x.get("text_value", ""))]
-
-                            if search_number:
-                                rxn = _wildcard_to_regex(search_number, case_sensitive)
-                                prepared = [x for x in prepared if x.get("numeric_value") is not None and rxn.match(str(x.get("numeric_value")))]
 
                             from_script = [x for x in prepared if x["is_script"]]
                             from_ui = [x for x in prepared if not x["is_script"]]
@@ -787,12 +785,7 @@ class QlikSenseMCPServer:
                                 sliced = items[offset:offset + limit]
                                 result_map = {}
                                 for it in sliced:
-                                    val = it.get("text_value")
-                                    if val is None or val == "":
-                                        if it.get("numeric_value") is not None:
-                                            val = str(it["numeric_value"])
-                                        else:
-                                            val = ""
+                                    val = it.get("text_value", "")
                                     result_map[it["name"]] = val
                                 return result_map
 
