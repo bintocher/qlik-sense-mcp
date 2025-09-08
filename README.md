@@ -1,5 +1,10 @@
 # Qlik Sense MCP Server
 
+[![PyPI version](https://badge.fury.io/py/qlik-sense-mcp-server.svg)](https://pypi.org/project/qlik-sense-mcp-server/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/qlik-sense-mcp-server)](https://pypi.org/project/qlik-sense-mcp-server/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python versions](https://img.shields.io/pypi/pyversions/qlik-sense-mcp-server)](https://pypi.org/project/qlik-sense-mcp-server/)
+
 Model Context Protocol (MCP) server for integration with Qlik Sense Enterprise APIs. Provides unified interface for Repository API and Engine API operations through MCP protocol.
 
 ## Table of Contents
