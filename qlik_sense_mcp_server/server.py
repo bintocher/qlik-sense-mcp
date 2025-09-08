@@ -326,6 +326,18 @@ class QlikSenseMCPServer:
                         },
                         "required": ["app_id", "sheet_id"]
                     }
+                ),
+                Tool(
+                    name="get_app_object",
+                    description="Get specific object layout by calling GetObject and GetLayout sequentially via WebSocket.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "app_id": {"type": "string", "description": "Application GUID"},
+                            "object_id": {"type": "string", "description": "Object ID to retrieve"}
+                        },
+                        "required": ["app_id", "object_id"]
+                    }
                 )
                 ]
             return tools_list
@@ -1314,102 +1326,14 @@ class QlikSenseMCPServer:
                             if "qLayout" not in layout_result:
                                 return {"error": "Failed to get object layout"}
 
-                            layout = layout_result["qLayout"]
-
-                            # Extract object properties
-                            obj_info = layout.get("qInfo", {})
-                            obj_meta = layout.get("qMeta", {})
-
-                            object_type = obj_info.get("qType", "unknown")
-                            object_title = layout.get("title", "")
-                            object_description = layout.get("subtitle", "")
-
-                            # Extract dimensions and measures
-                            dimensions = []
-                            measures = []
-
-                            if "qHyperCube" in layout:
-                                hypercube = layout["qHyperCube"]
-
-                                # Dimensions
-                                for dim_info in hypercube.get("qDimensionInfo", []):
-                                    dimensions.append({
-                                        "title": dim_info.get("qFallbackTitle", ""),
-                                        "field": (dim_info.get("qGroupFieldDefs", [""])[0] if dim_info.get("qGroupFieldDefs") else ""),
-                                        "cardinal": dim_info.get("qCardinal", 0),
-                                    })
-
-                                # Measures
-                                for measure_info in hypercube.get("qMeasureInfo", []):
-                                    # Try to get expression from different places
-                                    expression = ""
-                                    if measure_info.get("qDef"):
-                                        expression = measure_info.get("qDef")
-                                    elif measure_info.get("qMeasure", {}).get("qDef"):
-                                        expression = measure_info.get("qMeasure", {}).get("qDef")
-
-                                    measures.append({
-                                        "title": measure_info.get("qFallbackTitle", ""),
-                                        "expression": expression,
-                                    })
-
-                            # Extract table data for tables and charts
-                            table_data = None
-                            if object_type in ["sn-table", "sn-bar-chart", "sn-line-chart", "sn-pie-chart", "sn-combo-chart", "sn-scatter-plot", "sn-kpi"]:
-                                table_data = _extract_table_data_from_layout(layout)
-
-                            result = {
-                                "object_id": object_id,
-                                "object_type": object_type,
-                                "title": object_title,
-                                "description": object_description,
-                                "dimensions": dimensions,
-                                "measures": measures,
-                                "table_data": table_data,
-                            }
-
-                            return result
+                            # Return only the result part as requested
+                            return layout_result
 
                         except Exception as e:
                             return {"error": str(e), "app_id": app_id, "object_id": object_id}
                         finally:
                             self.engine_api.disconnect()
 
-                    def _extract_table_data_from_layout(layout):
-                        """Extract table data from layout."""
-                        if "qHyperCube" not in layout:
-                            return None
-
-                        hypercube = layout["qHyperCube"]
-
-                        if not hypercube.get("qDataPages"):
-                            return None
-
-                        # Form headers
-                        headers = []
-                        for dim_info in hypercube.get("qDimensionInfo", []):
-                            headers.append(dim_info.get("qFallbackTitle", ""))
-                        for measure_info in hypercube.get("qMeasureInfo", []):
-                            headers.append(measure_info.get("qFallbackTitle", ""))
-
-                        # Extract data
-                        table_rows = []
-                        for page in hypercube.get("qDataPages", []):
-                            for row in page.get("qMatrix", []):
-                                row_data = {}
-                                for i, cell in enumerate(row):
-                                    if i < len(headers):
-                                        header = headers[i]
-                                        cell_text = cell.get("qText", "")
-                                        cell_num = cell.get("qNum", None)
-
-                                        row_data[f"{header}_text"] = cell_text
-                                        if cell_num is not None and str(cell_num) != "NaN":
-                                            row_data[f"{header}_num"] = cell_num
-
-                                table_rows.append(row_data)
-
-                        return table_rows
 
                     result = await asyncio.to_thread(_get_app_object)
                     return [
@@ -1532,9 +1456,9 @@ EXAMPLES:
 
 AVAILABLE TOOLS:
     Repository API: get_apps, get_app_details
-    Engine API: get_app_sheets, get_app_sheet_objects, get_app_script, get_app_field, get_app_variables, get_app_field_statistics, engine_create_hypercube
+    Engine API: get_app_sheets, get_app_sheet_objects, get_app_script, get_app_field, get_app_variables, get_app_field_statistics, engine_create_hypercube, get_app_object
 
-    Total: 9 tools for Qlik Sense analytics operations
+    Total: 10 tools for Qlik Sense analytics operations
 
 MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp
