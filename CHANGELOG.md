@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.3.2] - 2025-01-10
+
+### Fixed
+- Fixed published filter in get_apps function to properly handle filtering logic
+- Removed numeric_value field from user variables and switched to text_value for more accurate data representation
+
+### Changed
+- Improved code readability by removing verbose output of user variable lists
+- Enhanced user variable handling with better filtering for script-created variables
+- Optimized variable data processing for improved performance and accuracy
+
 ## [1.3.1] - 2025-09-08
 
 ### Fixed
@@ -31,5 +42,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[1.3.2]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.2.0...v1.3.0
