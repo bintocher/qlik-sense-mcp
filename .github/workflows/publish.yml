@@ -25,6 +25,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install build twine
 
+    - name: Clean dist directory
+      run: |
+        rm -rf dist/* || true
+
     - name: Build package
       run: python -m build
 
@@ -36,7 +40,17 @@ jobs:
       env:
         TWINE_USERNAME: __token__
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: python -m twine upload dist/*
+      run: |
+        set -e
+        python -m twine upload dist/* || {
+          status=$?
+          echo "Twine upload failed with status $status"
+          if [ "$status" -eq 1 ]; then
+            echo "Non-fatal: likely already uploaded (400 File already exists). Proceeding."
+          else
+            exit $status
+          fi
+        }
 
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v1

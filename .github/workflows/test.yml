@@ -23,10 +23,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install build
 
+    - name: Clean dist directory
+      run: |
+        rm -rf dist/* || true
+
     - name: Build package
       run: python -m build
 
     - name: Test package installation
       run: |
-        pip install dist/*.whl
-        python -c "from qlik_sense_mcp_server import server; print('Package import successful')"
+        set -e
+        python -m pip install --upgrade pip
+        pip install dist/*.whl || pip install dist/*.tar.gz
+        python -c "import qlik_sense_mcp_server; import importlib; importlib.import_module('qlik_sense_mcp_server.server'); print('OK')"
