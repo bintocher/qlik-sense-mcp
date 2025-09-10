@@ -22,6 +22,7 @@ class QlikSenseConfig(BaseModel):
     repository_port: int = Field(4242, description="Repository API port")
     proxy_port: int = Field(4243, description="Proxy API port")
     engine_port: int = Field(4747, description="Engine API port")
+    http_port: Optional[int] = Field(None, description="HTTP API port for metadata requests")
     verify_ssl: bool = Field(True, description="Verify SSL certificates")
 
     @classmethod
@@ -45,5 +46,6 @@ class QlikSenseConfig(BaseModel):
             repository_port=int(os.getenv("QLIK_REPOSITORY_PORT", "4242")),
             proxy_port=int(os.getenv("QLIK_PROXY_PORT", "4243")),
             engine_port=int(os.getenv("QLIK_ENGINE_PORT", "4747")),
+            http_port=int(os.getenv("QLIK_HTTP_PORT")) if os.getenv("QLIK_HTTP_PORT") else None,
             verify_ssl=os.getenv("QLIK_VERIFY_SSL", "true").lower() == "true"
         )

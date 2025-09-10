@@ -4,7 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [1.3.2] - 2025-01-10
+## [1.3.3] - 2025-10-10
+
+### Added
+- New configuration parameter `QLIK_HTTP_PORT` for metadata requests to `/api/v1/apps/{id}/data/metadata` endpoint
+- Dynamic X-Qlik-Xrfkey generation for enhanced security (16 random alphanumeric characters)
+- Utility function `generate_xrfkey()` for secure key generation
+
+### Changed
+- Replaced all static "0123456789abcdef" XSRF keys with dynamic generation
+- Updated help output to use stderr instead of print to maintain MCP protocol compatibility
+- Enhanced logging system throughout the codebase - replaced print statements with proper logging
+
+### Removed
+- Removed `size_bytes` parameter from `get_app_details` tool output (non-functional parameter)
+- Eliminated all print() statements in favor of logging for MCP server compliance
+
+### Documentation
+- Updated README.md with new QLIK_HTTP_PORT configuration parameter
+- Updated .env.example and mcp.json.example with QLIK_HTTP_PORT settings
+- Enhanced configuration documentation with detailed parameter descriptions
+
+## [1.3.2] - 2025-10-06
 
 ### Fixed
 - Fixed published filter in get_apps function to properly handle filtering logic
@@ -42,6 +63,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[1.3.3]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.2.0...v1.3.0
