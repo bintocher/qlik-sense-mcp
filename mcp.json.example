@@ -12,6 +12,7 @@
         "QLIK_CA_CERT_PATH": "/path/to/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
         "QLIK_ENGINE_PORT": "4747",
+        "QLIK_HTTP_PORT": "443",
         "QLIK_VERIFY_SSL": "false"
       },
       "disabled": false,

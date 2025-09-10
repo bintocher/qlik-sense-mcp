@@ -116,6 +116,9 @@ QLIK_CA_CERT_PATH=/path/to/certs/root.pem
 QLIK_REPOSITORY_PORT=4242
 QLIK_ENGINE_PORT=4747
 
+# Optional HTTP port for metadata requests
+QLIK_HTTP_PORT=443
+
 # SSL settings
 QLIK_VERIFY_SSL=false
 ```
@@ -151,6 +154,7 @@ Create `mcp.json` file for MCP client integration:
         "QLIK_REPOSITORY_PORT": "4242",
         "QLIK_PROXY_PORT": "4243",
         "QLIK_ENGINE_PORT": "4747",
+        "QLIK_HTTP_PORT": "443",
         "QLIK_VERIFY_SSL": "false",
         "QLIK_HTTP_TIMEOUT": "10.0",
         "QLIK_WS_TIMEOUT": "8.0",
@@ -193,6 +197,7 @@ The server requires the following environment variables for configuration:
 - **`QLIK_REPOSITORY_PORT`** - Repository API port (default: `4242`)
 - **`QLIK_PROXY_PORT`** - Proxy API port for authentication (default: `4243`)
 - **`QLIK_ENGINE_PORT`** - Engine API port for WebSocket connections (default: `4747`)
+- **`QLIK_HTTP_PORT`** - HTTP API port for metadata requests (optional, only used for `/api/v1/apps/{id}/data/metadata` endpoint)
 
 #### SSL and Security
 - **`QLIK_VERIFY_SSL`** - Verify SSL certificates (`true`/`false`, default: `true`)
@@ -755,6 +760,6 @@ SOFTWARE.
 
 ---
 
-**Project Status**: Production Ready | 10/10 Tools Working | v1.3.0
+**Project Status**: Production Ready | 10/10 Tools Working | v1.3.3
 
 **Installation**: `uvx qlik-sense-mcp-server`

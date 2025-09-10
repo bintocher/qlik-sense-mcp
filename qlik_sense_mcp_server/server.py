@@ -13,6 +13,7 @@ from mcp.types import CallToolResult, TextContent
 from .config import QlikSenseConfig
 from .repository_api import QlikRepositoryAPI
 from .engine_api import QlikEngineAPI
+from .utils import generate_xrfkey
 
 import logging
 import os
@@ -86,12 +87,13 @@ class QlikSenseMCPServer:
             "Attributes": []
         }
 
+        xrfkey = generate_xrfkey()
         headers = {
             "Content-Type": "application/json",
-            "X-Qlik-Xrfkey": "0123456789abcdef"
+            "X-Qlik-Xrfkey": xrfkey
         }
 
-        params = {"xrfkey": "0123456789abcdef"}
+        params = {"xrfkey": xrfkey}
 
         cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
         verify_ssl = self.config.ca_cert_path if self.config.ca_cert_path else False
@@ -122,13 +124,17 @@ class QlikSenseMCPServer:
 
     def _get_app_metadata_via_proxy(self, app_id: str, ticket: str) -> Dict[str, Any]:
         """Get application metadata via Qlik Sense Proxy API."""
-        metadata_url = f"{self.config.server_url}/api/v1/apps/{app_id}/data/metadata?qlikTicket={ticket}"
+        server_url = self.config.server_url
+        if self.config.http_port:
+            server_url = f"{server_url}:{self.config.http_port}"
+        metadata_url = f"{server_url}/api/v1/apps/{app_id}/data/metadata?qlikTicket={ticket}"
 
+        xrfkey = generate_xrfkey()
         headers = {
-            "X-Qlik-Xrfkey": "0123456789abcdef"
+            "X-Qlik-Xrfkey": xrfkey
         }
 
-        params = {"xrfkey": "0123456789abcdef"}
+        params = {"xrfkey": xrfkey}
 
         cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
         verify_ssl = self.config.verify_ssl
@@ -427,8 +433,7 @@ class QlikSenseMCPServer:
                                         "description": app_meta.get("description") or "",
                                         "stream": (app_meta.get("stream", {}) or {}).get("name", "") if app_meta.get("published") else "",
                                         "modified_dttm": app_meta.get("modifiedDate", "") or "",
-                                        "reload_dttm": app_meta.get("lastReloadTime", "") or "",
-                                        "size_bytes": 0
+                                        "reload_dttm": app_meta.get("lastReloadTime", "") or ""
                                     }
                                 return {"error": "App not found by provided app_id"}
                             if req_name:
@@ -440,7 +445,6 @@ class QlikSenseMCPServer:
                                 exact = [a for a in apps if a.get("name", "").lower() == lowered]
                                 selected = exact[0] if exact else apps[0]
                                 selected["app_id"] = selected.pop("guid", "")
-                                selected["size_bytes"] = 0
                                 return selected
                             return {"error": "Either app_id or name must be provided"}
                         except Exception as e:
@@ -474,8 +478,7 @@ class QlikSenseMCPServer:
                                     "description": resolved.get("description", ""),
                                     "stream": resolved.get("stream", ""),
                                     "modified_dttm": resolved.get("modified_dttm", ""),
-                                    "reload_dttm": resolved.get("reload_dttm", ""),
-                                    "size_bytes": resolved.get("size_bytes", 0)
+                                    "reload_dttm": resolved.get("reload_dttm", "")
                                 },
                                 "fields": metadata.get("fields", []),
                                 "tables": metadata.get("tables", [])
@@ -1354,7 +1357,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.3.1",
+                    server_version="1.3.3",
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1386,14 +1389,15 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            print("qlik-sense-mcp-server 1.3.1")
+            sys.stderr.write("qlik-sense-mcp-server 1.3.3\n")
+            sys.stderr.flush()
             return
 
     asyncio.run(async_main())
 
 
 def print_help():
-    """Print help information."""
+    """Print help information using logging instead of print."""
     help_text = """
 Qlik Sense MCP Server - Model Context Protocol server for Qlik Sense Enterprise APIs
 
@@ -1428,6 +1432,7 @@ CONFIGURATION:
 
     QLIK_REPOSITORY_PORT  - Repository API port (optional, default: 4242)
     QLIK_ENGINE_PORT      - Engine API port (optional, default: 4747)
+    QLIK_HTTP_PORT        - HTTP API port for metadata requests (optional)
     QLIK_VERIFY_SSL       - Verify SSL certificates (optional, default: true)
 
 EXAMPLES:
@@ -1456,7 +1461,10 @@ MORE INFO:
     GitHub: https://github.com/bintocher/qlik-sense-mcp
     PyPI: https://pypi.org/project/qlik-sense-mcp-server/
 """
-    print(help_text)
+    # Use stderr for help output to avoid mixing with MCP protocol output
+    import sys
+    sys.stderr.write(help_text + "\n")
+    sys.stderr.flush()
 
 
 if __name__ == "__main__":

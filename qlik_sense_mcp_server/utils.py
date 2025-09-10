@@ -2,6 +2,8 @@
 
 import re
 import json
+import random
+import string
 from typing import Any, Dict, List, Optional, Union
 from datetime import datetime, timedelta
 
@@ -232,3 +234,8 @@ def escape_qlik_field_name(field_name: str) -> str:
     if " " in field_name or any(char in field_name for char in "()[]{}+-*/=<>!@#$%^&"):
         return f"[{field_name}]"
     return field_name
+
+
+def generate_xrfkey() -> str:
+    """Generate a random X-Qlik-Xrfkey with 16 alphanumeric characters."""
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=16))

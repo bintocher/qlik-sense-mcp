@@ -8,6 +8,7 @@ import httpx
 import logging
 import os
 from .config import QlikSenseConfig
+from .utils import generate_xrfkey
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,6 @@ class QlikRepositoryAPI:
         except ValueError:
             timeout_val = 10.0
 
-        # XSRF key for Qlik Sense API
-        self.xrfkey = "0123456789abcdef"
-
         # Create httpx client with certificates and SSL context
         self.client = httpx.Client(
             verify=ssl_context if self.config.verify_ssl else False,
@@ -50,7 +48,6 @@ class QlikRepositoryAPI:
             timeout=timeout_val,
             headers={
                 "X-Qlik-User": f"UserDirectory={self.config.user_directory}; UserId={self.config.user_id}",
-                "X-Qlik-Xrfkey": self.xrfkey,
                 "Content-Type": "application/json",
             },
         )
@@ -65,10 +62,18 @@ class QlikRepositoryAPI:
         try:
             url = self._get_api_url(endpoint)
 
+            # Generate dynamic xrfkey for each request
+            xrfkey = generate_xrfkey()
+
             # Add xrfkey parameter to all requests
             params = kwargs.get('params', {})
-            params['xrfkey'] = self.xrfkey
+            params['xrfkey'] = xrfkey
             kwargs['params'] = params
+
+            # Add xrfkey header
+            headers = kwargs.get('headers', {})
+            headers['X-Qlik-Xrfkey'] = xrfkey
+            kwargs['headers'] = headers
 
             response = self.client.request(method, url, **kwargs)
             response.raise_for_status()
