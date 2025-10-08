@@ -274,7 +274,55 @@ class QlikSenseMCPServer:
 
                 Tool(name="get_app_script", description="Get load script from app", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}}, "required": ["app_id"]}),
                 Tool(name="get_app_field_statistics", description="Get comprehensive statistics for a field", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "field_name": {"type": "string", "description": "Field name"}}, "required": ["app_id", "field_name"]}),
-                Tool(name="engine_create_hypercube", description="Create hypercube for data analysis", inputSchema={"type": "object", "properties": {"app_id": {"type": "string", "description": "Application ID"}, "dimensions": {"type": "array", "items": {"type": "string"}, "description": "List of dimension fields"}, "measures": {"type": "array", "items": {"type": "string"}, "description": "List of measure expressions"}, "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}}, "required": ["app_id", "dimensions", "measures"]})
+                Tool(name="engine_create_hypercube", description="Create hypercube for data analysis with custom sorting options. IMPORTANT: To get top-N records, use qSortByExpression: 1 in dimension sorting with qExpression containing the measure formula (e.g., 'Count(field)' for ascending, '-Count(field)' for descending). Measure sorting is ignored by Qlik Engine.", inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "app_id": {"type": "string", "description": "Application ID"},
+                        "dimensions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": {"type": "string", "description": "Field name for dimension"},
+                                    "label": {"type": "string", "description": "Optional label for dimension"},
+                                    "sort_by": {
+                                        "type": "object",
+                                        "properties": {
+                                            "qSortByNumeric": {"type": "integer", "description": "Sort by numeric value (-1 desc, 0 none, 1 asc)", "default": 0},
+                                            "qSortByAscii": {"type": "integer", "description": "Sort by ASCII value (-1 desc, 0 none, 1 asc)", "default": 1},
+                                            "qSortByExpression": {"type": "integer", "description": "Use expression for sorting (0/1). For top-N results, set to 1 and use qExpression with measure formula", "default": 0},
+                                            "qExpression": {"type": "string", "description": "Expression for custom sorting. For top-N: 'Count(field)' for ascending, '-Count(field)' for descending", "default": ""}
+                                        },
+                                        "additionalProperties": False
+                                    }
+                                },
+                                "additionalProperties": False
+                            },
+                            "description": "List of dimension definitions with optional sorting"
+                        },
+                        "measures": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "expression": {"type": "string", "description": "Measure expression"},
+                                    "label": {"type": "string", "description": "Optional label for measure"},
+                                    "sort_by": {
+                                        "type": "object",
+                                        "properties": {
+                                            "qSortByNumeric": {"type": "integer", "description": "Sort by numeric value (-1 desc, 0 none, 1 asc). NOTE: Measure sorting is ignored by Qlik Engine - use dimension sorting with qSortByExpression for top-N results", "default": -1}
+                                        },
+                                        "additionalProperties": False
+                                    }
+                                },
+                                "additionalProperties": False
+                            },
+                            "description": "List of measure definitions with optional sorting"
+                        },
+                        "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}
+                    },
+                    "required": ["app_id"]
+                })
                 ,
                 Tool(
                     name="get_app_field",
@@ -587,8 +635,8 @@ class QlikSenseMCPServer:
 
                 elif name == "engine_create_hypercube":
                     app_id = arguments["app_id"]
-                    dimensions = arguments["dimensions"]
-                    measures = arguments["measures"]
+                    dimensions = arguments.get("dimensions", [])
+                    measures = arguments.get("measures", [])
                     max_rows = arguments.get("max_rows", 1000)
 
                     def _create_hypercube():
@@ -913,8 +961,8 @@ class QlikSenseMCPServer:
 
                 elif name == "engine_extract_data":
                     app_id = arguments["app_id"]
-                    dimensions = arguments["dimensions"]
-                    measures = arguments["measures"]
+                    dimensions = arguments.get("dimensions", [])
+                    measures = arguments.get("measures", [])
                     max_rows = arguments.get("max_rows", 1000)
 
                     def _extract_data():
@@ -1123,8 +1171,8 @@ class QlikSenseMCPServer:
 
                 elif name == "engine_create_pivot_analysis":
                     app_id = arguments["app_id"]
-                    dimensions = arguments["dimensions"]
-                    measures = arguments["measures"]
+                    dimensions = arguments.get("dimensions", [])
+                    measures = arguments.get("measures", [])
                     max_rows = arguments.get("max_rows", 1000)
 
                     def _create_pivot():
@@ -1215,8 +1263,8 @@ class QlikSenseMCPServer:
                 elif name == "engine_get_chart_data":
                     app_id = arguments["app_id"]
                     chart_type = arguments["chart_type"]
-                    dimensions = arguments["dimensions"]
-                    measures = arguments["measures"]
+                    dimensions = arguments.get("dimensions", [])
+                    measures = arguments.get("measures", [])
                     max_rows = arguments.get("max_rows", 1000)
 
                     def _get_chart_data():
@@ -1243,8 +1291,8 @@ class QlikSenseMCPServer:
 
                 elif name == "engine_create_hypercube":
                     app_id = arguments["app_id"]
-                    dimensions = arguments["dimensions"]
-                    measures = arguments["measures"]
+                    dimensions = arguments.get("dimensions", [])
+                    measures = arguments.get("measures", [])
                     max_rows = arguments.get("max_rows", 1000)
 
                     def _create_hypercube():
@@ -1357,7 +1405,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.3.3",
+                    server_version="1.3.4",
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1389,7 +1437,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            sys.stderr.write("qlik-sense-mcp-server 1.3.3\n")
+            sys.stderr.write("qlik-sense-mcp-server 1.3.4\n")
             sys.stderr.flush()
             return
 
