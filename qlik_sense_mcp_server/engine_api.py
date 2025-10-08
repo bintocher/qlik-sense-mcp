@@ -751,59 +751,110 @@ class QlikEngineAPI:
     def create_hypercube(
         self,
         app_handle: int,
-        dimensions: List[str],
-        measures: List[str],
+        dimensions: List[Dict[str, Any]] = None,
+        measures: List[Dict[str, Any]] = None,
         max_rows: int = 1000,
     ) -> Dict[str, Any]:
         """Create hypercube for data extraction with proper structure."""
         try:
+            # Handle empty dimensions/measures
+            if dimensions is None:
+                dimensions = []
+            if measures is None:
+                measures = []
+
+            # Convert old format (list of strings) to new format (list of dicts) for backward compatibility
+            converted_dimensions = []
+            for dim in dimensions:
+                if isinstance(dim, str):
+                    # Old format - just field name
+                    converted_dimensions.append({
+                        "field": dim,
+                        "sort_by": {
+                            "qSortByNumeric": 0,
+                            "qSortByAscii": 1,  # Default: ASCII ascending
+                            "qSortByExpression": 0,
+                            "qExpression": ""
+                        }
+                    })
+                else:
+                    # New format - dict with field and sort options
+                    # Set defaults if not specified
+                    if "sort_by" not in dim:
+                        dim["sort_by"] = {
+                            "qSortByNumeric": 0,
+                            "qSortByAscii": 1,  # Default: ASCII ascending
+                            "qSortByExpression": 0,
+                            "qExpression": ""
+                        }
+                    converted_dimensions.append(dim)
+
+            converted_measures = []
+            for measure in measures:
+                if isinstance(measure, str):
+                    # Old format - just expression
+                    converted_measures.append({
+                        "expression": measure,
+                        "sort_by": {
+                            "qSortByNumeric": -1  # Default: numeric descending
+                        }
+                    })
+                else:
+                    # New format - dict with expression and sort options
+                    # Set defaults if not specified
+                    if "sort_by" not in measure:
+                        measure["sort_by"] = {
+                            "qSortByNumeric": -1  # Default: numeric descending
+                        }
+                    converted_measures.append(measure)
+
             # Create correct hypercube structure
             hypercube_def = {
                 "qDimensions": [
                     {
                         "qDef": {
-                            "qFieldDefs": [dim],
+                            "qFieldDefs": [dim["field"]],
                             "qSortCriterias": [
                                 {
                                     "qSortByState": 0,
                                     "qSortByFrequency": 0,
-                                    "qSortByNumeric": 1,
-                                    "qSortByAscii": 1,
+                                    "qSortByNumeric": dim["sort_by"].get("qSortByNumeric", 0),
+                                    "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
                                     "qSortByLoadOrder": 0,
-                                    "qSortByExpression": 0,
-                                    "qExpression": {"qv": ""},
+                                    "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
+                                    "qExpression": {"qv": dim["sort_by"].get("qExpression", "")},
                                 }
                             ],
                         },
                         "qNullSuppression": False,
                         "qIncludeElemValue": True,
                     }
-                    for dim in dimensions
+                    for dim in converted_dimensions
                 ],
                 "qMeasures": [
                     {
-                        "qDef": {"qDef": measure, "qLabel": f"Measure_{i}"},
-                        "qSortBy": {"qSortByNumeric": -1, "qSortByLoadOrder": 0},
+                        "qDef": {"qDef": measure["expression"], "qLabel": measure.get("label", f"Measure_{i}")},
+                        "qSortBy": measure["sort_by"],
                     }
-                    for i, measure in enumerate(measures)
+                    for i, measure in enumerate(converted_measures)
                 ],
                 "qInitialDataFetch": [
                     {
                         "qTop": 0,
                         "qLeft": 0,
                         "qHeight": max_rows,
-                        "qWidth": len(dimensions) + len(measures),
+                        "qWidth": len(converted_dimensions) + len(converted_measures),
                     }
                 ],
                 "qSuppressZero": False,
                 "qSuppressMissing": False,
                 "qMode": "S",
-                "qInterColumnSortOrder": list(range(len(dimensions) + len(measures))),
+                "qInterColumnSortOrder": list(range(len(converted_dimensions) + len(converted_measures))),
             }
 
             obj_def = {
                 "qInfo": {
-                    "qId": f"hypercube-{len(dimensions)}d-{len(measures)}m",
+                    "qId": f"hypercube-{len(converted_dimensions)}d-{len(converted_measures)}m",
                     "qType": "HyperCube",
                 },
                 "qHyperCubeDef": hypercube_def,
@@ -829,8 +880,8 @@ class QlikEngineAPI:
             return {
                 "hypercube_handle": cube_handle,
                 "hypercube_data": hypercube,
-                "dimensions": dimensions,
-                "measures": measures,
+                "dimensions": converted_dimensions,
+                "measures": converted_measures,
                 "total_rows": hypercube.get("qSize", {}).get("qcy", 0),
                 "total_columns": hypercube.get("qSize", {}).get("qcx", 0),
             }
@@ -1413,7 +1464,7 @@ class QlikEngineAPI:
                         "qTop": 0,
                         "qLeft": 0,
                         "qHeight": max_rows,
-                        "qWidth": len(dimensions) + len(measures),
+                        "qWidth": len(converted_dimensions) + len(converted_measures),
                     }
                 ],
                 "qSuppressZero": True,
