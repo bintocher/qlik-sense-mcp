@@ -1,4 +1,4 @@
-.PHONY: help install dev clean build version-patch version-minor version-major publish create-pr git-clean
+.PHONY: help install dev clean build test version-patch version-minor version-major publish create-pr git-clean
 
 # Default target
 help:
@@ -7,6 +7,7 @@ help:
 	@echo "  dev            - Setup development environment"
 	@echo "  clean          - Clean build artifacts"
 	@echo "  build          - Build package for distribution"
+	@echo "  test           - Run tests"
 	@echo "  version-patch  - Bump patch version and create PR"
 	@echo "  version-minor  - Bump minor version and create PR"
 	@echo "  version-major  - Bump major version and create PR"
@@ -16,11 +17,10 @@ help:
 
 # Development setup
 install:
-	pip install -e .
+	uv pip install -e .
 
 dev:
-	pip install -e ".[dev]"
-	pip install build twine bump2version
+	uv pip install -e ".[dev]"
 
 # Clean build artifacts
 clean:
@@ -32,22 +32,26 @@ clean:
 
 # Build package
 build: clean
-	python -m build
+	uv run python -m build
+
+# Run tests
+test:
+	uv run pytest tests/ -v
 
 # Version bumping with PR creation
 version-patch:
 	@echo "Bumping patch version..."
-	bump2version patch
+	uv run bump2version patch
 	$(MAKE) create-pr
 
 version-minor:
 	@echo "Bumping minor version..."
-	bump2version minor
+	uv run bump2version minor
 	$(MAKE) create-pr
 
 version-major:
 	@echo "Bumping major version..."
-	bump2version major
+	uv run bump2version major
 	$(MAKE) create-pr
 
 # Create pull request

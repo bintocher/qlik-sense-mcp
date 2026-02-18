@@ -7,8 +7,14 @@ from typing import Dict, List, Any, Optional
 import httpx
 import logging
 import os
-from .config import QlikSenseConfig
+from .config import (
+    QlikSenseConfig,
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_APPS_LIMIT,
+    MAX_APPS_LIMIT,
+)
 from .utils import generate_xrfkey
+from .exceptions import QlikRepositoryError
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +43,9 @@ class QlikRepositoryAPI:
         # Timeouts from env (seconds)
         http_timeout_env = os.getenv("QLIK_HTTP_TIMEOUT")
         try:
-            timeout_val = float(http_timeout_env) if http_timeout_env else 10.0
+            timeout_val = float(http_timeout_env) if http_timeout_env else DEFAULT_HTTP_TIMEOUT
         except ValueError:
-            timeout_val = 10.0
+            timeout_val = DEFAULT_HTTP_TIMEOUT
 
         # Create httpx client with certificates and SSL context
         self.client = httpx.Client(
@@ -91,7 +97,7 @@ class QlikRepositoryAPI:
             return {"error": str(e)}
 
     def get_comprehensive_apps(self,
-                                   limit: int = 25,
+                                   limit: int = DEFAULT_APPS_LIMIT,
                                    offset: int = 0,
                                    name: Optional[str] = None,
                                    stream: Optional[str] = None,
@@ -101,12 +107,11 @@ class QlikRepositoryAPI:
 
         Returns only: guid, name, description, stream, modified_dttm, reload_dttm.
         Supports case-insensitive wildcard filters for name and stream, and published flag.
-        Enforces default limit=25 and maximum limit=50.
         """
         if limit is None or limit < 1:
-            limit = 25
-        if limit > 50:
-            limit = 50
+            limit = DEFAULT_APPS_LIMIT
+        if limit > MAX_APPS_LIMIT:
+            limit = MAX_APPS_LIMIT
         if offset is None or offset < 0:
             offset = 0
 
@@ -155,18 +160,6 @@ class QlikRepositoryAPI:
             except Exception:
                 continue
 
-        if name:
-            lowered = name.lower().replace('*', '')
-            minimal_apps = [a for a in minimal_apps if lowered in (a.get("name", "").lower())]
-        if stream:
-            lowered_stream = stream.lower().replace('*', '')
-            minimal_apps = [a for a in minimal_apps if lowered_stream in (a.get("stream", "").lower())]
-        if published is not None:
-            if published:
-                minimal_apps = [a for a in minimal_apps if a.get("stream", "") != ""]
-            else:
-                minimal_apps = [a for a in minimal_apps if a.get("stream", "") == ""]
-
         total_found = len(minimal_apps)
         paginated_apps = minimal_apps[offset:offset + limit]
 
@@ -206,8 +199,9 @@ class QlikRepositoryAPI:
             base_url = f"{self.config.server_url}"
             url = f"{base_url}/api/v1/apps/{app_id}/data/metadata"
 
-            # Add xrfkey parameter
-            params = {'xrfkey': self.xrfkey}
+            # Generate dynamic xrfkey for each request
+            xrfkey = generate_xrfkey()
+            params = {'xrfkey': xrfkey}
 
             response = self.client.request("GET", url, params=params)
             response.raise_for_status()
