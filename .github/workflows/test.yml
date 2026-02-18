@@ -19,22 +19,21 @@ jobs:
     - name: Set up Python
       run: uv python install 3.12
 
-    - name: Clean dist directory
+    - name: Create venv and install
       run: |
-        rm -rf dist/* || true
+        uv venv
+        uv pip install build pytest pytest-asyncio
 
-    - name: Install dependencies and build
-      run: |
-        uv pip install --system build
-        python -m build
+    - name: Clean dist directory
+      run: rm -rf dist/* || true
+
+    - name: Build package
+      run: uv run python -m build
 
     - name: Test package installation
       run: |
-        uv pip install --system dist/*.whl || uv pip install --system dist/*.tar.gz
-        python -c "import qlik_sense_mcp_server; import importlib; importlib.import_module('qlik_sense_mcp_server.server'); print('OK')"
-
-    - name: Install test dependencies
-      run: uv pip install --system pytest pytest-asyncio
+        uv pip install dist/*.whl || uv pip install dist/*.tar.gz
+        uv run python -c "import qlik_sense_mcp_server; import importlib; importlib.import_module('qlik_sense_mcp_server.server'); print('OK')"
 
     - name: Run tests
-      run: pytest tests/ -v
+      run: uv run pytest tests/ -v

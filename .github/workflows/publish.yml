@@ -21,19 +21,19 @@ jobs:
     - name: Set up Python
       run: uv python install 3.12
 
-    - name: Clean dist directory
+    - name: Create venv and install build tools
       run: |
-        rm -rf dist/* || true
+        uv venv
+        uv pip install build twine
+
+    - name: Clean dist directory
+      run: rm -rf dist/* || true
 
     - name: Build package
-      run: |
-        uv pip install --system build
-        python -m build
+      run: uv run python -m build
 
     - name: Verify package
-      run: |
-        uv pip install --system twine
-        python -m twine check dist/*
+      run: uv run python -m twine check dist/*
 
     - name: Publish to PyPI
       env:
@@ -41,7 +41,7 @@ jobs:
         TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
       run: |
         set -e
-        python -m twine upload dist/* || {
+        uv run python -m twine upload dist/* || {
           status=$?
           echo "Twine upload failed with status $status"
           if [ "$status" -eq 1 ]; then

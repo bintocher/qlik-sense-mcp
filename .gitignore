@@ -177,3 +177,6 @@ config.local.py
 
 # Bump2version
 .bumpversion.cfg.bak
+
+.claude
+claude.md
