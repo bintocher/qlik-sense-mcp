@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import ssl
 import sys
 from typing import Any, Dict, List, Optional
 from mcp.server import Server
@@ -10,18 +11,26 @@ from mcp.server.stdio import stdio_server
 from mcp.types import ServerCapabilities, Tool
 from mcp.types import CallToolResult, TextContent
 
-from .config import QlikSenseConfig
+from .config import (
+    QlikSenseConfig,
+    DEFAULT_APPS_LIMIT,
+    MAX_APPS_LIMIT,
+    DEFAULT_FIELD_LIMIT,
+    MAX_FIELD_LIMIT,
+    DEFAULT_HYPERCUBE_MAX_ROWS,
+    DEFAULT_FIELD_FETCH_SIZE,
+    MAX_FIELD_FETCH_SIZE,
+    DEFAULT_TICKET_TIMEOUT,
+)
 from .repository_api import QlikRepositoryAPI
 from .engine_api import QlikEngineAPI
 from .utils import generate_xrfkey
+from . import __version__
 
+import httpx
 import logging
 import os
-import requests
-from urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
-
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 # Initialize logging configuration early
 load_dotenv()
@@ -39,6 +48,13 @@ if not logging.getLogger().handlers:
     logging.getLogger().addHandler(handler)
 logging.getLogger().setLevel(_logging_level)
 logger = logging.getLogger(__name__)
+
+
+def _make_error(message: str, **extra: Any) -> Dict[str, Any]:
+    """Create a standardized error response dict."""
+    result = {"error": message}
+    result.update(extra)
+    return result
 
 
 class QlikSenseMCPServer:
@@ -77,6 +93,27 @@ class QlikSenseMCPServer:
             self.config.user_id
         )
 
+    def _create_httpx_client(self) -> httpx.Client:
+        """Create an httpx client configured with Qlik certificates."""
+        if self.config.verify_ssl:
+            ssl_context = ssl.create_default_context()
+            if self.config.ca_cert_path:
+                ssl_context.load_verify_locations(self.config.ca_cert_path)
+        else:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+
+        cert = None
+        if self.config.client_cert_path and self.config.client_key_path:
+            cert = (self.config.client_cert_path, self.config.client_key_path)
+
+        return httpx.Client(
+            verify=ssl_context if self.config.verify_ssl else False,
+            cert=cert,
+            timeout=DEFAULT_TICKET_TIMEOUT,
+        )
+
     def _get_qlik_ticket(self) -> Optional[str]:
         """Get Qlik Sense ticket for user authentication."""
         ticket_url = f"{self.config.server_url}:{self.config.proxy_port}/qps/ticket"
@@ -92,33 +129,30 @@ class QlikSenseMCPServer:
             "Content-Type": "application/json",
             "X-Qlik-Xrfkey": xrfkey
         }
-
         params = {"xrfkey": xrfkey}
 
-        cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
-        verify_ssl = self.config.ca_cert_path if self.config.ca_cert_path else False
-
         try:
-            response = requests.post(
-                ticket_url,
-                json=ticket_data,
-                headers=headers,
-                params=params,
-                cert=cert,
-                verify=verify_ssl,
-                timeout=30
-            )
-            response.raise_for_status()
+            client = self._create_httpx_client()
+            try:
+                response = client.post(
+                    ticket_url,
+                    json=ticket_data,
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
 
-            ticket_response = response.json()
-            ticket = ticket_response.get("Ticket")
+                ticket_response = response.json()
+                ticket = ticket_response.get("Ticket")
 
-            if not ticket:
-                raise ValueError("Ticket not found in response")
+                if not ticket:
+                    raise ValueError("Ticket not found in response")
 
-            return ticket
+                return ticket
+            finally:
+                client.close()
 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f"Failed to get ticket: {e}")
             return None
 
@@ -130,32 +164,27 @@ class QlikSenseMCPServer:
         metadata_url = f"{server_url}/api/v1/apps/{app_id}/data/metadata?qlikTicket={ticket}"
 
         xrfkey = generate_xrfkey()
-        headers = {
-            "X-Qlik-Xrfkey": xrfkey
-        }
-
+        headers = {"X-Qlik-Xrfkey": xrfkey}
         params = {"xrfkey": xrfkey}
 
-        cert = (self.config.client_cert_path, self.config.client_key_path) if self.config.client_cert_path and self.config.client_key_path else None
-        verify_ssl = self.config.verify_ssl
-
         try:
-            response = requests.get(
-                metadata_url,
-                headers=headers,
-                params=params,
-                cert=cert,
-                verify=verify_ssl,
-                timeout=30
-            )
-            response.raise_for_status()
+            client = self._create_httpx_client()
+            try:
+                response = client.get(
+                    metadata_url,
+                    headers=headers,
+                    params=params,
+                )
+                response.raise_for_status()
 
-            metadata = response.json()
-            return self._filter_metadata(metadata)
+                metadata = response.json()
+                return self._filter_metadata(metadata)
+            finally:
+                client.close()
 
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             logger.error(f"Failed to get app metadata: {e}")
-            return {"error": str(e)}
+            return _make_error(str(e))
 
     def _filter_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Filter metadata to remove system fields and hidden items."""
@@ -175,33 +204,24 @@ class QlikSenseMCPServer:
             if isinstance(obj, dict):
                 filtered = {}
                 for key, value in obj.items():
-                    # Skip fields to remove
                     if key in fields_to_remove:
                         continue
-
-                    # Skip fields with is_system: true or is_hidden: true
                     if isinstance(value, dict):
                         if value.get('is_system') or value.get('is_hidden'):
                             continue
-                        # Replace cardinal with unique_count
                         if key == 'cardinal':
                             filtered['unique_count'] = value
                             continue
-
-                    # Recursively filter nested objects
                     filtered[key] = filter_object(value)
                 return filtered
             elif isinstance(obj, list):
-                # Filter field arrays, removing reserved Qlik fields
                 if obj and isinstance(obj[0], dict) and 'name' in obj[0]:
-                    # This is a fields array
                     return [filter_object(item) for item in obj if item.get('name') not in qlik_reserved_fields]
                 else:
                     return [filter_object(item) for item in obj]
             else:
                 return obj
 
-        # Keep only fields and tables
         filtered = filter_object(metadata)
         result = {}
 
@@ -232,8 +252,8 @@ class QlikSenseMCPServer:
                         "properties": {
                             "limit": {
                                 "type": "integer",
-                                "description": "Maximum number of apps to return (default: 25, max: 50)",
-                                "default": 25
+                                "description": f"Maximum number of apps to return (default: {DEFAULT_APPS_LIMIT}, max: {MAX_APPS_LIMIT})",
+                                "default": DEFAULT_APPS_LIMIT
                             },
                             "offset": {
                                 "type": "integer",
@@ -319,7 +339,7 @@ class QlikSenseMCPServer:
                             },
                             "description": "List of measure definitions with optional sorting"
                         },
-                        "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": 1000}
+                        "max_rows": {"type": "integer", "description": "Maximum rows to return", "default": DEFAULT_HYPERCUBE_MAX_ROWS}
                     },
                     "required": ["app_id"]
                 })
@@ -332,7 +352,7 @@ class QlikSenseMCPServer:
                         "properties": {
                             "app_id": {"type": "string", "description": "Application GUID"},
                             "field_name": {"type": "string", "description": "Field name"},
-                            "limit": {"type": "integer", "description": "Max values to return (default: 10, max: 100)", "default": 10},
+                            "limit": {"type": "integer", "description": f"Max values to return (default: {DEFAULT_FIELD_LIMIT}, max: {MAX_FIELD_LIMIT})", "default": DEFAULT_FIELD_LIMIT},
                             "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
                             "search_string": {"type": "string", "description": "Wildcard text search mask (* and % supported), case-insensitive by default"},
                             "search_number": {"type": "string", "description": "Wildcard numeric search mask (* and % supported)"},
@@ -348,7 +368,7 @@ class QlikSenseMCPServer:
                         "type": "object",
                         "properties": {
                             "app_id": {"type": "string", "description": "Application GUID"},
-                            "limit": {"type": "integer", "description": "Max variables to return (default: 10, max: 100)", "default": 10},
+                            "limit": {"type": "integer", "description": f"Max variables to return (default: {DEFAULT_FIELD_LIMIT}, max: {MAX_FIELD_LIMIT})", "default": DEFAULT_FIELD_LIMIT},
                             "offset": {"type": "integer", "description": "Offset for pagination (default: 0)", "default": 0},
                             "created_in_script": {"type": "string", "description": "Return only variables created in script (true/false). If omitted, return both"},
                             "search_string": {"type": "string", "description": "Wildcard search by variable name or text value (* and % supported), case-insensitive by default"},
@@ -400,10 +420,10 @@ class QlikSenseMCPServer:
         async def handle_call_tool(name: str, arguments: Dict[str, Any]):
             # Check configuration before processing any tool calls
             if not self.config_valid:
-                error_msg = {
-                    "error": "Qlik Sense configuration missing",
-                    "message": "Please set the following environment variables:",
-                    "required": [
+                error_msg = _make_error(
+                    "Qlik Sense configuration missing",
+                    message="Please set the following environment variables:",
+                    required=[
                         "QLIK_SERVER_URL - Qlik Sense server URL",
                         "QLIK_USER_DIRECTORY - User directory",
                         "QLIK_USER_ID - User ID",
@@ -411,8 +431,8 @@ class QlikSenseMCPServer:
                         "QLIK_CLIENT_KEY_PATH - Path to client key",
                         "QLIK_CA_CERT_PATH - Path to CA certificate"
                     ],
-                    "example": "uvx --with-env QLIK_SERVER_URL=https://qlik.company.com qlik-sense-mcp-server"
-                }
+                    example="uvx --with-env QLIK_SERVER_URL=https://qlik.company.com qlik-sense-mcp-server"
+                )
                 return [TextContent(type="text", text=json.dumps(error_msg, indent=2))]
             """
             Handle MCP tool calls by routing to appropriate API handlers.
@@ -426,16 +446,16 @@ class QlikSenseMCPServer:
             """
             try:
                 if name == "get_apps":
-                    limit = arguments.get("limit", 25)
+                    limit = arguments.get("limit", DEFAULT_APPS_LIMIT)
                     offset = arguments.get("offset", 0)
                     name_filter = arguments.get("name")
                     stream_filter = arguments.get("stream")
                     published_arg = arguments.get("published", True)
 
                     if limit is None or limit < 1:
-                        limit = 25
-                    if limit > 50:
-                        limit = 50
+                        limit = DEFAULT_APPS_LIMIT
+                    if limit > MAX_APPS_LIMIT:
+                        limit = MAX_APPS_LIMIT
 
                     def _to_bool(value: Any, default: bool = True) -> bool:
                         if isinstance(value, bool):
@@ -483,42 +503,38 @@ class QlikSenseMCPServer:
                                         "modified_dttm": app_meta.get("modifiedDate", "") or "",
                                         "reload_dttm": app_meta.get("lastReloadTime", "") or ""
                                     }
-                                return {"error": "App not found by provided app_id"}
+                                return _make_error("App not found by provided app_id")
                             if req_name:
-                                apps_payload = self.repository_api.get_comprehensive_apps(limit=50, offset=0, name=req_name, stream=None, published=None)
+                                apps_payload = self.repository_api.get_comprehensive_apps(limit=MAX_APPS_LIMIT, offset=0, name=req_name, stream=None, published=None)
                                 apps = apps_payload.get("apps", []) if isinstance(apps_payload, dict) else []
                                 if not apps:
-                                    return {"error": "No apps found by name"}
+                                    return _make_error("No apps found by name")
                                 lowered = req_name.lower()
                                 exact = [a for a in apps if a.get("name", "").lower() == lowered]
                                 selected = exact[0] if exact else apps[0]
                                 selected["app_id"] = selected.pop("guid", "")
                                 return selected
-                            return {"error": "Either app_id or name must be provided"}
+                            return _make_error("Either app_id or name must be provided")
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
 
                     def _get_app_details():
                         """Get application details with metadata, fields and tables."""
                         try:
-                            # Get app metadata from Repository API
                             resolved = _resolve_app()
                             if "error" in resolved:
                                 return resolved
 
                             app_id = resolved.get("app_id")
 
-                            # Get Qlik ticket for authentication
                             ticket = self._get_qlik_ticket()
                             if not ticket:
-                                return {"error": "Failed to obtain Qlik ticket"}
+                                return _make_error("Failed to obtain Qlik ticket")
 
-                            # Get fields and tables metadata via Proxy API
                             metadata = self._get_app_metadata_via_proxy(app_id, ticket)
                             if "error" in metadata:
                                 return metadata
 
-                            # Build final response
                             result = {
                                 "metainfo": {
                                     "app_id": app_id,
@@ -535,7 +551,7 @@ class QlikSenseMCPServer:
                             return result
 
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
 
                     details = await asyncio.to_thread(_get_app_details)
                     return [
@@ -568,16 +584,12 @@ class QlikSenseMCPServer:
                                 error_msg = f"App {app_id} is already open in another session. Try again later or use a different session."
                             elif "failed to open app" in error_msg.lower():
                                 error_msg = f"Could not open app {app_id}. Check if app exists and you have access."
-                            return {
-                                "error": error_msg,
-                                "app_id": app_id,
-                                "app_handle": app_handle
-                            }
+                            return _make_error(error_msg, app_id=app_id, app_handle=app_handle)
                         finally:
                             if app_handle != -1:
                                 try:
                                     self.engine_api.close_doc(app_handle)
-                                except:
+                                except Exception:
                                     pass
                             self.engine_api.disconnect()
 
@@ -616,11 +628,11 @@ class QlikSenseMCPServer:
                             import traceback
                             debug_info.append(f"Exception in server handler: {e}")
                             debug_info.append(f"Traceback: {traceback.format_exc()}")
-                            return {
-                                "error": str(e),
-                                "server_debug": debug_info,
-                                "traceback": traceback.format_exc()
-                            }
+                            return _make_error(
+                                str(e),
+                                server_debug=debug_info,
+                                traceback=traceback.format_exc()
+                            )
                         finally:
                             debug_info.append("Disconnecting from engine")
                             self.engine_api.disconnect()
@@ -637,7 +649,7 @@ class QlikSenseMCPServer:
                     app_id = arguments["app_id"]
                     dimensions = arguments.get("dimensions", [])
                     measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
+                    max_rows = arguments.get("max_rows", DEFAULT_HYPERCUBE_MAX_ROWS)
 
                     def _create_hypercube():
                         try:
@@ -649,7 +661,7 @@ class QlikSenseMCPServer:
                             else:
                                 raise Exception("Failed to open app")
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -700,16 +712,16 @@ class QlikSenseMCPServer:
                 elif name == "get_app_field":
                     app_id = arguments["app_id"]
                     field_name = arguments["field_name"]
-                    limit = arguments.get("limit", 10)
+                    limit = arguments.get("limit", DEFAULT_FIELD_LIMIT)
                     offset = arguments.get("offset", 0)
                     search_string = arguments.get("search_string")
                     search_number = arguments.get("search_number")
                     case_sensitive = arguments.get("case_sensitive", False)
 
                     if limit is None or limit < 1:
-                        limit = 10
-                    if limit > 100:
-                        limit = 100
+                        limit = DEFAULT_FIELD_LIMIT
+                    if limit > MAX_FIELD_LIMIT:
+                        limit = MAX_FIELD_LIMIT
                     if offset is None or offset < 0:
                         offset = 0
 
@@ -725,11 +737,11 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                                return _make_error("Failed to open app")
 
-                            fetch_size = max(limit + offset, 500)
-                            if fetch_size > 5000:
-                                fetch_size = 5000
+                            fetch_size = max(limit + offset, DEFAULT_FIELD_FETCH_SIZE)
+                            if fetch_size > MAX_FIELD_FETCH_SIZE:
+                                fetch_size = MAX_FIELD_FETCH_SIZE
                             field_data = self.engine_api.get_field_values(app_handle, field_name, fetch_size, include_frequency=False)
                             values = [v.get("value", "") for v in field_data.get("values", [])]
 
@@ -751,7 +763,7 @@ class QlikSenseMCPServer:
                             sliced = values[offset:offset + limit]
                             return {"field_values": sliced}
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -760,7 +772,7 @@ class QlikSenseMCPServer:
 
                 elif name == "get_app_variables":
                     app_id = arguments["app_id"]
-                    limit = arguments.get("limit", 10)
+                    limit = arguments.get("limit", DEFAULT_FIELD_LIMIT)
                     offset = arguments.get("offset", 0)
                     created_in_script_arg = arguments.get("created_in_script", None)
                     search_string = arguments.get("search_string")
@@ -768,9 +780,9 @@ class QlikSenseMCPServer:
                     case_sensitive = arguments.get("case_sensitive", False)
 
                     if limit is None or limit < 1:
-                        limit = 10
-                    if limit > 100:
-                        limit = 100
+                        limit = DEFAULT_FIELD_LIMIT
+                    if limit > MAX_FIELD_LIMIT:
+                        limit = MAX_FIELD_LIMIT
                     if offset is None or offset < 0:
                         offset = 0
 
@@ -801,17 +813,16 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=False)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                                return _make_error("Failed to open app")
 
-                            # Use the alternative method for getting variables
                             var_list = self.engine_api._get_user_variables(app_handle) or []
                             prepared = []
                             for v in var_list:
-                                name = v.get("name", "")
+                                var_name = v.get("name", "")
                                 text_val = v.get("text_value", "")
                                 is_script = v.get("is_script_created", False)
                                 prepared.append({
-                                    "name": name,
+                                    "name": var_name,
                                     "text_value": text_val if text_val is not None else "",
                                     "is_script": is_script
                                 })
@@ -821,7 +832,7 @@ class QlikSenseMCPServer:
                             elif created_in_script is False:
                                 prepared = [x for x in prepared if not x["is_script"]]
                             else:
-                                # По умолчанию показываем только переменные из UI
+                                # By default show only UI-created variables
                                 prepared = [x for x in prepared if not x["is_script"]]
 
                             if search_string:
@@ -847,7 +858,7 @@ class QlikSenseMCPServer:
                                 "variables_from_ui": res_ui if res_ui else ""
                             }
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -863,13 +874,12 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                                return _make_error("Failed to open app")
 
                             sheets = self.engine_api.get_sheets(app_handle)
                             sheets_list = []
                             for sheet in sheets:
                                 sheet_info = sheet.get("qMeta", {})
-                                sheet_data = sheet.get("qData", {})
                                 sheets_list.append({
                                     "sheet_id": sheet.get("qInfo", {}).get("qId", ""),
                                     "title": sheet_info.get("title", ""),
@@ -882,7 +892,7 @@ class QlikSenseMCPServer:
                                 "sheets": sheets_list
                             }
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -899,12 +909,11 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc_safe(app_id, no_data=True)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                                return _make_error("Failed to open app")
 
-                            # Get detailed objects from the sheet
                             objects = self.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
 
-                            # Format objects according to requirements: id объекта, тип объекта, описание объекта
+                            # Format objects: object id, object type, object description
                             formatted_objects = []
                             for obj in objects:
                                 if isinstance(obj, dict):
@@ -923,7 +932,7 @@ class QlikSenseMCPServer:
                             }
 
                         except Exception as e:
-                            return {"error": str(e), "details": f"Error getting objects for sheet {sheet_id} in app {app_id}"}
+                            return _make_error(str(e), app_id=app_id, sheet_id=sheet_id)
                         finally:
                             self.engine_api.disconnect()
 
@@ -963,7 +972,7 @@ class QlikSenseMCPServer:
                     app_id = arguments["app_id"]
                     dimensions = arguments.get("dimensions", [])
                     measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
+                    max_rows = arguments.get("max_rows", DEFAULT_HYPERCUBE_MAX_ROWS)
 
                     def _extract_data():
                         self.engine_api.connect(app_id)
@@ -999,23 +1008,25 @@ class QlikSenseMCPServer:
                     app_id = arguments["app_id"]
                     object_id = arguments["object_id"]
 
-                    def _get_viz_data():
-                        self.engine_api.connect(app_id)
+                    def _get_visualization_data():
                         try:
-                            app_result = self.engine_api.open_doc(app_id)
+                            self.engine_api.connect()
+                            app_result = self.engine_api.open_doc(app_id, no_data=False)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle != -1:
-                                return self.engine_api.get_object_data(app_handle, object_id)
+                                return self.engine_api.get_visualization_data(app_handle, object_id)
                             else:
                                 raise Exception("Failed to open app")
+                        except Exception as e:
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
-                    viz_data = await asyncio.to_thread(_get_viz_data)
+                    result = await asyncio.to_thread(_get_visualization_data)
                     return [
                         TextContent(
                             type="text",
-                            text=json.dumps(viz_data, indent=2, ensure_ascii=False)
+                            text=json.dumps(result, indent=2, ensure_ascii=False)
                         )
                     ]
 
@@ -1065,13 +1076,13 @@ class QlikSenseMCPServer:
                             app_result = self.engine_api.open_doc(app_id)
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
                             if app_handle != -1:
-                                dimensions = self.engine_api.get_dimensions(app_handle)
-                                measures = self.engine_api.get_measures(app_handle)
+                                dims = self.engine_api.get_dimensions(app_handle)
+                                meas = self.engine_api.get_measures(app_handle)
                                 variables = self.engine_api.get_variables(app_handle)
 
                                 return {
-                                    "master_dimensions": dimensions,
-                                    "master_measures": measures,
+                                    "master_dimensions": dims,
+                                    "master_measures": meas,
                                     "variables": variables
                                 }
                             else:
@@ -1173,7 +1184,7 @@ class QlikSenseMCPServer:
                     app_id = arguments["app_id"]
                     dimensions = arguments.get("dimensions", [])
                     measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
+                    max_rows = arguments.get("max_rows", DEFAULT_HYPERCUBE_MAX_ROWS)
 
                     def _create_pivot():
                         self.engine_api.connect(app_id)
@@ -1206,37 +1217,11 @@ class QlikSenseMCPServer:
                         )
                     ]
 
-                elif name == "engine_get_visualization_data":
-                    app_id = arguments["app_id"]
-                    object_id = arguments["object_id"]
-
-                    def _get_visualization_data():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.get_visualization_data(app_handle, object_id)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_get_visualization_data)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
                 elif name == "engine_create_simple_table":
                     app_id = arguments["app_id"]
                     dimensions = arguments["dimensions"]
                     measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
+                    max_rows = arguments.get("max_rows", DEFAULT_HYPERCUBE_MAX_ROWS)
 
                     def _create_simple_table():
                         try:
@@ -1248,7 +1233,7 @@ class QlikSenseMCPServer:
                             else:
                                 raise Exception("Failed to open app")
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -1265,7 +1250,7 @@ class QlikSenseMCPServer:
                     chart_type = arguments["chart_type"]
                     dimensions = arguments.get("dimensions", [])
                     measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
+                    max_rows = arguments.get("max_rows", DEFAULT_HYPERCUBE_MAX_ROWS)
 
                     def _get_chart_data():
                         try:
@@ -1277,39 +1262,11 @@ class QlikSenseMCPServer:
                             else:
                                 raise Exception("Failed to open app")
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
                     result = await asyncio.to_thread(_get_chart_data)
-                    return [
-                        TextContent(
-                            type="text",
-                            text=json.dumps(result, indent=2, ensure_ascii=False)
-                        )
-                    ]
-
-                elif name == "engine_create_hypercube":
-                    app_id = arguments["app_id"]
-                    dimensions = arguments.get("dimensions", [])
-                    measures = arguments.get("measures", [])
-                    max_rows = arguments.get("max_rows", 1000)
-
-                    def _create_hypercube():
-                        try:
-                            self.engine_api.connect()
-                            app_result = self.engine_api.open_doc(app_id, no_data=False)
-                            app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
-                            if app_handle != -1:
-                                return self.engine_api.create_hypercube(app_handle, dimensions, measures, max_rows)
-                            else:
-                                raise Exception("Failed to open app")
-                        except Exception as e:
-                            return {"error": str(e)}
-                        finally:
-                            self.engine_api.disconnect()
-
-                    result = await asyncio.to_thread(_create_hypercube)
                     return [
                         TextContent(
                             type="text",
@@ -1332,7 +1289,7 @@ class QlikSenseMCPServer:
                             else:
                                 raise Exception("Failed to open app")
                         except Exception as e:
-                            return {"error": str(e)}
+                            return _make_error(str(e))
                         finally:
                             self.engine_api.disconnect()
 
@@ -1355,28 +1312,24 @@ class QlikSenseMCPServer:
                             app_handle = app_result.get("qReturn", {}).get("qHandle", -1)
 
                             if app_handle == -1:
-                                return {"error": "Failed to open app"}
+                                return _make_error("Failed to open app")
 
-                            # Get object
                             obj_result = self.engine_api.send_request("GetObject", {"qId": object_id}, handle=app_handle)
                             if "qReturn" not in obj_result:
-                                return {"error": f"Object {object_id} not found"}
+                                return _make_error(f"Object {object_id} not found")
 
                             obj_handle = obj_result["qReturn"]["qHandle"]
 
-                            # Get layout
                             layout_result = self.engine_api.send_request("GetLayout", [], handle=obj_handle)
                             if "qLayout" not in layout_result:
-                                return {"error": "Failed to get object layout"}
+                                return _make_error("Failed to get object layout")
 
-                            # Return only the result part as requested
                             return layout_result
 
                         except Exception as e:
-                            return {"error": str(e), "app_id": app_id, "object_id": object_id}
+                            return _make_error(str(e), app_id=app_id, object_id=object_id)
                         finally:
                             self.engine_api.disconnect()
-
 
                     result = await asyncio.to_thread(_get_app_object)
                     return [
@@ -1387,10 +1340,10 @@ class QlikSenseMCPServer:
                     ]
 
                 else:
-                    return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}, indent=2, ensure_ascii=False))]
+                    return [TextContent(type="text", text=json.dumps(_make_error(f"Unknown tool: {name}"), indent=2, ensure_ascii=False))]
 
             except Exception as e:
-                return [TextContent(type="text", text=json.dumps({"error": str(e)}, indent=2, ensure_ascii=False))]
+                return [TextContent(type="text", text=json.dumps(_make_error(str(e)), indent=2, ensure_ascii=False))]
 
     async def run(self):
         """
@@ -1405,7 +1358,7 @@ class QlikSenseMCPServer:
                 write_stream,
                 InitializationOptions(
                     server_name="qlik-sense-mcp-server",
-                    server_version="1.3.4",
+                    server_version=__version__,
                     capabilities=ServerCapabilities(
                         tools={}
                     ),
@@ -1437,7 +1390,7 @@ def main():
             print_help()
             return
         elif sys.argv[1] in ["--version", "-v"]:
-            sys.stderr.write("qlik-sense-mcp-server 1.3.4\n")
+            sys.stderr.write(f"qlik-sense-mcp-server {__version__}\n")
             sys.stderr.flush()
             return
 
@@ -1485,12 +1438,12 @@ CONFIGURATION:
 
 EXAMPLES:
     # Using uvx with environment variables
-    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \
-        --with-env QLIK_USER_DIRECTORY=COMPANY \
-        --with-env QLIK_USER_ID=username \
-        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \
-        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \
-        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \
+    uvx --with-env QLIK_SERVER_URL=https://qlik.company.com \\
+        --with-env QLIK_USER_DIRECTORY=COMPANY \\
+        --with-env QLIK_USER_ID=username \\
+        --with-env QLIK_CLIENT_CERT_PATH=/path/to/client.pem \\
+        --with-env QLIK_CLIENT_KEY_PATH=/path/to/client_key.pem \\
+        --with-env QLIK_CA_CERT_PATH=/path/to/root.pem \\
         qlik-sense-mcp-server
 
     # Using environment file
@@ -1510,7 +1463,6 @@ MORE INFO:
     PyPI: https://pypi.org/project/qlik-sense-mcp-server/
 """
     # Use stderr for help output to avoid mixing with MCP protocol output
-    import sys
     sys.stderr.write(help_text + "\n")
     sys.stderr.flush()
 

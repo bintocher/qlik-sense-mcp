@@ -5,7 +5,15 @@ import websocket
 import ssl
 from typing import Dict, List, Any, Optional, Union
 from datetime import datetime
-from .config import QlikSenseConfig
+from .config import (
+    QlikSenseConfig,
+    DEFAULT_WS_TIMEOUT,
+    DEFAULT_WS_RETRIES,
+    DEFAULT_HYPERCUBE_MAX_ROWS,
+    MAX_TABLES_AND_KEYS_DIM,
+    MAX_TABLES,
+)
+from .exceptions import QlikConnectionError, QlikEngineError
 import logging
 import os
 
@@ -22,14 +30,14 @@ class QlikEngineAPI:
         # Timeouts / retries from env
         ws_timeout_env = os.getenv("QLIK_WS_TIMEOUT")
         try:
-            self.ws_timeout_seconds = float(ws_timeout_env) if ws_timeout_env else 8.0
+            self.ws_timeout_seconds = float(ws_timeout_env) if ws_timeout_env else DEFAULT_WS_TIMEOUT
         except ValueError:
-            self.ws_timeout_seconds = 8.0
+            self.ws_timeout_seconds = DEFAULT_WS_TIMEOUT
         retries_env = os.getenv("QLIK_WS_RETRIES")
         try:
-            self.ws_retries = int(retries_env) if retries_env else 2
+            self.ws_retries = int(retries_env) if retries_env else DEFAULT_WS_RETRIES
         except ValueError:
-            self.ws_retries = 2
+            self.ws_retries = DEFAULT_WS_RETRIES
 
     def _get_next_request_id(self) -> int:
         """Get next request ID."""
@@ -195,7 +203,7 @@ class QlikEngineAPI:
                                     "qGenericId": app_id
                                 }
                             }
-                except:
+                except Exception:
                     pass
             raise e
 
@@ -869,7 +877,7 @@ class QlikEngineAPI:
 
             cube_handle = result["qReturn"]["qHandle"]
 
-            # Получаем layout с данными
+            # Get layout with data
             layout = self.send_request("GetLayout", [], handle=cube_handle)
 
             if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
@@ -1030,7 +1038,7 @@ class QlikEngineAPI:
                         [f"table-data-{table_name}"],
                         handle=app_handle,
                     )
-                except:
+                except Exception:
                     pass
                 return {"error": "No hypercube in layout", "layout": layout}
 
@@ -1068,7 +1076,7 @@ class QlikEngineAPI:
                 "dimension_info": hypercube.get("qDimensionInfo", []),
             }
 
-            # Очищаем созданный объект
+            # Cleanup created session object
             try:
                 self.send_request(
                     "DestroySessionObject",
@@ -1140,7 +1148,7 @@ class QlikEngineAPI:
                         [f"field-values-{field_name}"],
                         handle=app_handle,
                     )
-                except:
+                except Exception:
                     pass
                 return {"error": "No list object in layout", "layout": layout}
 
@@ -1266,7 +1274,7 @@ class QlikEngineAPI:
                         [f"field-stats-{field_name}"],
                         handle=app_handle,
                     )
-                except:
+                except Exception:
                     pass
                 return {"error": "No hypercube in statistics layout", "layout": layout, "debug_log": debug_log}
 
@@ -1653,7 +1661,7 @@ class QlikEngineAPI:
                         [f"data-export-{table_name or 'custom'}"],
                         handle=app_handle,
                     )
-                except:
+                except Exception:
                     pass
                 return {"error": "No hypercube in export layout", "layout": layout}
 
@@ -1841,14 +1849,14 @@ class QlikEngineAPI:
             # Get app layout and properties using correct methods
             try:
                 layout = self.send_request("GetAppLayout", [], handle=app_handle)
-            except:
+            except Exception:
                 layout = {}
 
             try:
                 properties = self.send_request(
                     "GetAppProperties", [], handle=app_handle
                 )
-            except:
+            except Exception:
                 properties = {}
 
             # Get fields information
