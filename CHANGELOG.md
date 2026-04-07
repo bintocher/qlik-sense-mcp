@@ -4,6 +4,101 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.4.1] - 2026-04-07
+
+### Added
+- **`engine_get_field_range` MCP tool** — lightning-fast bounds query for
+  a single field (`Count(DISTINCT)` + `Min` + `Max`) via a measures-only
+  hypercube. Runs in seconds on any table size, regardless of row count.
+  Prefer this over `get_app_field_statistics` for "what's the loaded
+  period" / "what's the cardinality" questions.
+- **`light` parameter on `get_app_field_statistics`** (default `True`).
+  Light mode skips `Sum`/`Avg`/`Median`/`Mode`/`Stdev` — these are
+  meaningless on date/text fields and extremely slow on big fact tables.
+  Pass `full=true` only on small numeric fields.
+- **`get_app_details.warnings` array** that flags huge fact tables
+  (>500M rows / >100M rows), high-cardinality fields (>1M distinct
+  values) and date-typed fields, each with concrete instructions about
+  the right tool and pattern to use.
+- **Hypercube query estimator hints**: rejection responses for
+  `engine_create_hypercube` now carry `error_category` (`limit_exceeded`,
+  `cell_cap_exceeded`, `socket_timeout`, `engine_api_error`,
+  `connection_error`), `failed_step`, `failed_stage`, `elapsed_seconds`
+  and a `hint` pointing at set-analysis / top-N / slice-by-category
+  patterns.
+- **`tool_call_seconds`** is injected as the first key of every MCP tool
+  response (millisecond precision wall-clock time of the call). On
+  exception the same envelope carries `error_type` and `tool` so the
+  caller can attribute failures.
+- **`docs/` folder** with seven topical pages: installation,
+  configuration, usage, tools, architecture, development,
+  troubleshooting. README is now a short landing page that links into
+  `docs/`.
+- **Disclaimer** in `README.md` and `LICENSE`: this project is an
+  independent community integration, not affiliated with Qlik. All
+  protocol information used was obtained from publicly available
+  sources (help.qlik.com, qlik.dev, Qlik Community).
+
+### Changed
+- **Hard hypercube limits enforced server-side, before any RPC**:
+  `engine_create_hypercube` now rejects requests with `max_rows > 5000`
+  or `columns * max_rows > 9900` (Qlik Engine itself caps a single
+  `NxPage` at 10000 cells with error `7009 calc-pages-too-large`). The
+  rejection happens in milliseconds with a structured error and a hint
+  — there is no auto-pagination. The LLM must design narrower queries
+  via set analysis, top-N or slice-by-category.
+- **`QLIK_WS_TIMEOUT` default raised from `8.0` s to `180.0` s**, now
+  uniformly applied to BOTH the WebSocket handshake AND every Engine
+  API call (`OpenDoc`, hypercube creation, `GetLayout`, field
+  statistics).
+- **Per-app WebSocket endpoint** is tried first when an `app_id` is
+  known. `connect(app_id=...)` builds
+  `wss://<host>:<engine_port>/app/<url-encoded-app-id>` as the
+  preferred connection URL, falling back to the global
+  `/app/engineData` endpoint.
+- **All MCP tool docstrings rewritten** in English with generic
+  placeholders (`<DimA>`, `<MetricX>`, `<val>` etc.). The
+  `engine_create_hypercube` docstring documents the two hard rules
+  explicitly: ALWAYS use set analysis (never `If()` inside an
+  aggregate), and NEVER put expressions in `qFieldDefs` (per-row
+  evaluation, not cached, no symbol-table use).
+- **`get_app_field` falls back to a one-dimension hypercube** when the
+  underlying `ListObject` returns an empty result. The response then
+  includes `fallback_used: "hypercube"` and, on total failure, a
+  `warning` field describing the next step.
+
+### Fixed
+- **Strict id-matching in `send_request`**. Every received WebSocket
+  frame is parsed and only the frame whose `id` matches our `req_id` is
+  treated as the answer. Notifications (`OnConnected`, `OnAuthenticated`,
+  `OnSessionTimedOut`) are skipped at DEBUG. Late replies from a
+  previously timed-out request are skipped at WARNING. Without this
+  fix, a single timed-out hypercube call would leave stale data in the
+  recv buffer that the next call consumed as its own response,
+  cascading failures for the rest of the session.
+- **`_kill_socket()` on any failure path**. Timeouts, parse errors and
+  unexpected exceptions all force-close the WebSocket and invalidate
+  the cached app handle. The next call opens a fresh connection
+  instead of reusing a zombie socket.
+- **`tests/test_server.py`** rewritten for the FastMCP architecture
+  (the old `QlikSenseMCPServer` class no longer exists). Covers
+  `_err`/`_ok`, version pin, 24-tool registration, core tool presence,
+  and `_timed` decorator behaviour including exception handling. The
+  full suite now passes again (97 tests).
+- **`tests/test_config.py`** updated for the new `DEFAULT_WS_TIMEOUT`
+  default value.
+
+### Documentation
+- README cut from ~800 to ~100 lines. The full content lives in `docs/`
+  with one topic per file.
+- All facts re-verified against current upstream sources: MCP spec
+  2025-03-26 (Streamable HTTP transport), qlik.dev, help.qlik.com
+  November 2025 (Engine error 7009, hypercube cell cap, standard QSE
+  ports).
+- All approximate numbers (`~`, `+`, "around", "about") removed from
+  user-facing text.
+- Copyright years updated to `2025-2026`.
+
 ## [1.4.0] - 2026-04-06
 
 ### Added
@@ -114,6 +209,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[1.4.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.3...v1.3.4
 [1.3.2]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.1...v1.3.2
