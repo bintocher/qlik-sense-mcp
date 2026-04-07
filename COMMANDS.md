@@ -44,16 +44,3 @@ git push origin v1.0.1
 
 # GitHub Actions will automatically publish to PyPI
 ```
-
-## Git History Reset
-
-```bash
-# Clean all git history (DESTRUCTIVE)
-make git-clean
-```
-
-## Prerequisites for Development
-
-- Python 3.12+
-- GitHub CLI (`gh`) for PR creation
-- PyPI account and API token in GitHub secrets (`PYPI_API_TOKEN`)
