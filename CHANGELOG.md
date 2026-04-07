@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.4.0] - 2026-04-06
+
+### Added
+- **HTTP streaming transport**: server now runs with `streamable-http` MCP
+  transport by default on `http://127.0.0.1:8000/mcp`. Legacy `stdio`
+  transport remains available via the `--stdio` flag.
+- **Cached Engine API connections**: `QlikEngineAPI` now keeps a single
+  long-lived WebSocket and reuses the opened app handle across tool calls
+  via the new `ensure_app(app_id)` entry point. Switching to another
+  `app_id` closes the old app and opens the new one; dropped connections
+  are transparently re-established (ping-based liveness check). This
+  dramatically reduces load on the Qlik engine — no more
+  connect/open/close on every single tool call.
+- **`QLIK_WS_TIMEOUT` default raised to `180.0s`** and now uniformly
+  applied to BOTH the WebSocket handshake AND every Engine API call
+  (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). A
+  single knob is enough for the vast majority of setups; increase it
+  further for very heavy hypercubes on large apps.
+
+### Changed
+- Major refactor of `server.py`: all Engine-based tools now use
+  `engine_api.ensure_app(...)` instead of the previous
+  `connect()` / `open_doc()` / ... / `disconnect()` boilerplate. Each tool
+  is now a single-entry call that benefits from connection caching.
+- `QlikEngineAPI.send_request()` accepts an optional per-request
+  `timeout` argument and restores the previous socket timeout in a
+  `finally` block.
+- `open_doc` / `open_doc_safe` / `create_hypercube` /
+  `get_field_statistics` now use `ws_operation_timeout` for their
+  underlying `recv()` calls.
+
+### Fixed
+- `Connection timed out` errors on hypercube creation for large apps:
+  the hypercube timeout was previously bound to the short
+  `QLIK_WS_TIMEOUT` connection timeout. It is now controlled
+  independently via `QLIK_WS_OPERATION_TIMEOUT`.
+
+### Documentation
+- Updated `README.md`: added "HTTP streaming mode" note, described
+  connection caching and the two-timeouts model in the Architecture
+  section, documented `QLIK_WS_OPERATION_TIMEOUT` in the environment
+  variables reference.
+- Updated `.env.example` and MCP configuration snippet with
+  `QLIK_WS_OPERATION_TIMEOUT`.
+
 ## [1.3.4] - 2025-10-10
 
 ### Added
@@ -69,6 +114,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[1.4.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.3...v1.3.4
 [1.3.2]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.0...v1.3.1

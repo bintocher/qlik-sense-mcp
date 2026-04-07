@@ -1,25 +1,31 @@
-"""Tests for server module."""
+"""Tests for server module (FastMCP-based since v1.4.0)."""
 
-import pytest
-from unittest.mock import patch, MagicMock
-from qlik_sense_mcp_server.server import _make_error, QlikSenseMCPServer
+import json
+
 from qlik_sense_mcp_server import __version__
+from qlik_sense_mcp_server import server as srv
 
 
-class TestMakeError:
-    def test_basic_error(self):
-        result = _make_error("something went wrong")
-        assert result == {"error": "something went wrong"}
+class TestErrorEnvelope:
+    def test_err_basic(self):
+        result = srv._err("something went wrong")
+        parsed = json.loads(result)
+        assert parsed == {"error": "something went wrong"}
 
-    def test_error_with_extras(self):
-        result = _make_error("failed", app_id="abc-123", details="more info")
-        assert result["error"] == "failed"
-        assert result["app_id"] == "abc-123"
-        assert result["details"] == "more info"
+    def test_err_with_extras(self):
+        result = srv._err("failed", app_id="abc-123", details="more info")
+        parsed = json.loads(result)
+        assert parsed["error"] == "failed"
+        assert parsed["app_id"] == "abc-123"
+        assert parsed["details"] == "more info"
 
-    def test_error_always_has_error_key(self):
-        result = _make_error("test")
-        assert "error" in result
+    def test_err_always_has_error_key(self):
+        parsed = json.loads(srv._err("test"))
+        assert "error" in parsed
+
+    def test_ok_wraps_dict(self):
+        parsed = json.loads(srv._ok({"foo": "bar"}))
+        assert parsed == {"foo": "bar"}
 
 
 class TestVersion:
@@ -33,41 +39,82 @@ class TestVersion:
         assert __version__ == "1.4.0"
 
 
-class TestQlikSenseMCPServer:
-    @patch.dict("os.environ", {
-        "QLIK_SERVER_URL": "",
-        "QLIK_USER_DIRECTORY": "",
-        "QLIK_USER_ID": "",
-    }, clear=False)
-    def test_invalid_config(self):
-        server = QlikSenseMCPServer()
-        assert server.config_valid is False
-        assert server.repository_api is None
-        assert server.engine_api is None
+class TestFastMCPRegistration:
+    def test_mcp_instance_exists(self):
+        assert srv.mcp is not None
+        # FastMCP instance should expose a _tool_manager with registered tools.
+        assert hasattr(srv.mcp, "_tool_manager")
 
-    @patch.dict("os.environ", {
-        "QLIK_SERVER_URL": "https://qlik.example.com",
-        "QLIK_USER_DIRECTORY": "DOMAIN",
-        "QLIK_USER_ID": "admin",
-        "QLIK_VERIFY_SSL": "false",
-    }, clear=False)
-    def test_valid_config_creates_apis(self):
-        server = QlikSenseMCPServer()
-        assert server.config_valid is True
-        assert server.repository_api is not None
-        assert server.engine_api is not None
+    def test_tools_count(self):
+        # v1.4.0 ships exactly 24 MCP tools; update this if a tool is added.
+        assert len(srv.mcp._tool_manager._tools) == 24
 
-    def test_validate_config_no_config(self):
-        server = QlikSenseMCPServer.__new__(QlikSenseMCPServer)
-        server.config = None
-        assert server._validate_config() is False
+    def test_core_tools_registered(self):
+        tool_names = set(srv.mcp._tool_manager._tools.keys())
+        expected = {
+            # Repository
+            "get_about",
+            "get_apps",
+            "get_app_details",
+            # Engine
+            "get_app_script",
+            "get_app_field_statistics",
+            "engine_create_hypercube",
+            "engine_get_field_range",
+            "get_app_field",
+            "get_app_variables",
+            "get_app_sheets",
+            "get_app_sheet_objects",
+            "get_app_object",
+            # Task management
+            "get_tasks",
+            "get_task_details",
+            "start_task",
+            "create_task",
+            "update_task",
+            "delete_task",
+            "get_task_schedule",
+            "create_task_schedule",
+            "get_task_executions",
+            "get_task_script_log",
+            "get_failed_tasks_with_logs",
+            "get_task_dependencies",
+        }
+        missing = expected - tool_names
+        assert not missing, f"missing tools: {missing}"
 
-    @patch.dict("os.environ", {
-        "QLIK_SERVER_URL": "https://qlik.example.com",
-        "QLIK_USER_DIRECTORY": "DOMAIN",
-        "QLIK_USER_ID": "admin",
-        "QLIK_VERIFY_SSL": "false",
-    }, clear=False)
-    def test_server_has_server_instance(self):
-        server = QlikSenseMCPServer()
-        assert server.server is not None
+
+class TestTimedDecorator:
+    def test_timed_injects_seconds_key(self):
+        @srv._timed
+        def fake_tool():
+            return srv._ok({"foo": "bar"})
+
+        result = fake_tool()
+        parsed = json.loads(result)
+        # tool_call_seconds must be the first key of the response
+        assert next(iter(parsed.keys())) == "tool_call_seconds"
+        assert isinstance(parsed["tool_call_seconds"], float)
+        assert parsed["foo"] == "bar"
+
+    def test_timed_handles_exceptions(self):
+        @srv._timed
+        def broken_tool():
+            raise ValueError("boom")
+
+        result = broken_tool()
+        parsed = json.loads(result)
+        assert parsed["error"] == "boom"
+        assert parsed["error_type"] == "ValueError"
+        assert parsed["tool"] == "broken_tool"
+        assert "tool_call_seconds" in parsed
+
+    def test_timed_preserves_non_dict_strings(self):
+        @srv._timed
+        def scalar_tool():
+            return "plain text"
+
+        parsed = json.loads(scalar_tool())
+        # Non-JSON / non-dict payloads get wrapped under `result`
+        assert parsed["result"] == "plain text"
+        assert "tool_call_seconds" in parsed

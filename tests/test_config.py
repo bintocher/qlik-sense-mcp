@@ -31,7 +31,7 @@ class TestConstants:
 
     def test_default_timeouts(self):
         assert DEFAULT_HTTP_TIMEOUT == 10.0
-        assert DEFAULT_WS_TIMEOUT == 8.0
+        assert DEFAULT_WS_TIMEOUT == 180.0
 
     def test_default_retries(self):
         assert DEFAULT_WS_RETRIES == 2

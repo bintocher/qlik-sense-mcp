@@ -180,3 +180,7 @@ config.local.py
 
 .claude
 claude.md
+
+.mcp.json
+temp/
+uv.lock

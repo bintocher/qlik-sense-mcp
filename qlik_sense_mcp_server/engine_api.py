@@ -27,12 +27,18 @@ class QlikEngineAPI:
         self.config = config
         self.ws = None
         self.request_id = 0
+        # Connection cache
+        self._cached_app_id: Optional[str] = None
+        self._cached_app_handle: int = -1
+        self._cached_has_data: bool = False
         # Timeouts / retries from env
         ws_timeout_env = os.getenv("QLIK_WS_TIMEOUT")
         try:
             self.ws_timeout_seconds = float(ws_timeout_env) if ws_timeout_env else DEFAULT_WS_TIMEOUT
         except ValueError:
             self.ws_timeout_seconds = DEFAULT_WS_TIMEOUT
+        # Single unified timeout — used for both connection and all Engine operations
+        self.ws_operation_timeout = self.ws_timeout_seconds
         retries_env = os.getenv("QLIK_WS_RETRIES")
         try:
             self.ws_retries = int(retries_env) if retries_env else DEFAULT_WS_RETRIES
@@ -45,20 +51,39 @@ class QlikEngineAPI:
         return self.request_id
 
     def connect(self, app_id: Optional[str] = None) -> None:
-        """Connect to Engine API via WebSocket."""
+        """
+        Connect to Engine API via WebSocket.
+
+        If `app_id` is provided, the per-app endpoint `/app/<app_id>` is tried
+        first — this is the Qlik-recommended way that binds the session to a
+        specific document immediately and avoids an extra OpenDoc round-trip.
+        The global `/app/engineData` endpoint is still tried as a fallback so
+        that global calls (GetDocList, etc.) keep working.
+        """
+        from urllib.parse import quote
         # Try different WebSocket endpoints
         server_host = self.config.server_url.replace("https://", "").replace(
             "http://", ""
         )
 
-        # Order and count of endpoints controlled by retries setting
-        endpoints_all = [
+        # Build endpoint list — per-app first if app_id is given
+        endpoints_all: List[str] = []
+        if app_id:
+            enc = quote(app_id, safe="")
+            endpoints_all.append(
+                f"wss://{server_host}:{self.config.engine_port}/app/{enc}"
+            )
+        endpoints_all.extend([
             f"wss://{server_host}:{self.config.engine_port}/app/engineData",
             f"wss://{server_host}:{self.config.engine_port}/app",
             f"ws://{server_host}:{self.config.engine_port}/app/engineData",
             f"ws://{server_host}:{self.config.engine_port}/app",
-        ]
-        endpoints_to_try = endpoints_all[: max(1, min(self.ws_retries, len(endpoints_all)))]
+        ])
+        # ws_retries controls how many fallback endpoints to try; always at
+        # least 1, and if app_id is given we add +1 to include the per-app URL
+        # without starving the fallback list.
+        retry_budget = max(1, self.ws_retries + (1 if app_id else 0))
+        endpoints_to_try = endpoints_all[: min(retry_budget, len(endpoints_all))]
 
         # Setup SSL context
         ssl_context = ssl.create_default_context()
@@ -110,48 +135,225 @@ class QlikEngineAPI:
 
     def disconnect(self) -> None:
         """Disconnect from Engine API."""
+        self._invalidate_cache()
         if self.ws:
-            self.ws.close()
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+
+    def _invalidate_cache(self) -> None:
+        """Reset cached app state."""
+        self._cached_app_id = None
+        self._cached_app_handle = -1
+        self._cached_has_data = False
+
+    def _is_connected(self) -> bool:
+        """Check if WebSocket connection is alive."""
+        if not self.ws or not self.ws.connected:
+            return False
+        try:
+            self.ws.ping()
+            return True
+        except Exception:
+            return False
+
+    def ensure_app(self, app_id: str, no_data: bool = False) -> int:
+        """
+        Get app handle, reusing cached connection when possible.
+
+        Returns app_handle. Reconnects automatically on stale connections.
+        If cached connection was opened without data but data is now needed,
+        reconnects with data.
+        """
+        needs_data = not no_data
+
+        # Check if we can reuse the cached connection
+        if (self._cached_app_id == app_id
+                and self._cached_app_handle != -1
+                and (not needs_data or self._cached_has_data)
+                and self._is_connected()):
+            logger.debug("Reusing cached connection for app %s (handle=%d)",
+                         app_id, self._cached_app_handle)
+            return self._cached_app_handle
+
+        # Need to (re)connect — close old connection first
+        logger.info("Opening new Engine connection for app %s (no_data=%s)", app_id, no_data)
+        self.disconnect()
+        # Pass app_id so connect() uses the per-app WebSocket endpoint first
+        self.connect(app_id=app_id)
+
+        app_result = self.open_doc(app_id, no_data=no_data)
+        handle = app_result.get("qReturn", {}).get("qHandle", -1)
+        if handle == -1:
+            self.disconnect()
+            raise Exception(f"Failed to open app {app_id}: {app_result}")
+
+        self._cached_app_id = app_id
+        self._cached_app_handle = handle
+        self._cached_has_data = not no_data
+        return handle
+
+    def _set_socket_timeout(self, timeout: float) -> None:
+        """Set timeout on the underlying WebSocket socket."""
+        if self.ws and self.ws.sock:
+            self.ws.sock.settimeout(timeout)
+
+    def _kill_socket(self) -> None:
+        """Force-close the WebSocket and invalidate the cached app handle.
+
+        Called whenever the socket is in an unrecoverable state — after a
+        timeout, after a stray-frame parse error, etc. The next ensure_app()
+        will open a fresh connection. Without this, a single timed-out
+        request leaves stale data sitting in the recv buffer that the next
+        send_request would mistake for its own response.
+        """
+        self._invalidate_cache()
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
             self.ws = None
 
     def send_request(
-        self, method: str, params: List[Any] = None, handle: int = -1
+        self, method: str, params: List[Any] = None, handle: int = -1,
+        timeout: float = None,
     ) -> Dict[str, Any]:
         """
         Send JSON-RPC 2.0 request to Qlik Engine API and return response.
+
+        Strict id-matching: every received frame is parsed and only the
+        frame whose `id` matches our `req_id` is treated as the answer.
+        Stray frames (notifications, late replies to a previous timed-out
+        call, OnConnected events) are logged and skipped.
+
+        On any timeout or socket error the WebSocket is force-closed via
+        `_kill_socket()` so the next call gets a fresh connection — this
+        prevents the "WebSocket recv() failed" cascade after a single slow
+        hypercube.
 
         Args:
             method: Engine API method name
             params: Method parameters list
             handle: Object handle for scoped operations (-1 for global)
-
-        Returns:
-            Response dictionary from Engine API
+            timeout: Override socket timeout for this request (seconds)
         """
+        import socket as _socket
         if not self.ws:
             raise ConnectionError("Not connected to Engine API")
 
+        effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
+        if timeout is not None:
+            self._set_socket_timeout(timeout)
 
+        req_id = self._get_next_request_id()
         request = {
             "jsonrpc": "2.0",
-            "id": self._get_next_request_id(),
+            "id": req_id,
             "handle": handle,
             "method": method,
             "params": params or [],
         }
 
-        self.ws.send(json.dumps(request))
+        response: Optional[Dict[str, Any]] = None
+        try:
+            try:
+                self.ws.send(json.dumps(request))
+            except (_socket.timeout, TimeoutError) as e:
+                self._kill_socket()
+                raise TimeoutError(
+                    f"WebSocket send() timed out after {effective_timeout:.1f}s "
+                    f"for Engine method '{method}' (handle={handle}, req_id={req_id})"
+                ) from e
+            except Exception as e:
+                self._kill_socket()
+                raise ConnectionError(
+                    f"WebSocket send() failed for Engine method '{method}' "
+                    f"(handle={handle}, req_id={req_id}): {type(e).__name__}: {e}"
+                ) from e
 
+            # Strict id-matching loop. Skip notifications and stale replies
+            # from previous timed-out requests until we see our own id.
+            stray_frames = 0
+            try:
+                while True:
+                    data = self.ws.recv()
+                    try:
+                        frame = json.loads(data)
+                    except Exception as parse_err:
+                        # Unparseable frame — socket state is suspect.
+                        self._kill_socket()
+                        raise ConnectionError(
+                            f"Failed to parse WebSocket frame for method "
+                            f"'{method}' (req_id={req_id}): {parse_err}"
+                        ) from parse_err
 
-        while True:
-            data = self.ws.recv()
-            if "result" in data or "error" in data:
-                break
+                    frame_id = frame.get("id")
+                    if frame_id == req_id:
+                        response = frame
+                        break
 
-        response = json.loads(data)
+                    # Stray frame: notification (no id), or a late reply to
+                    # an earlier request whose recv() timed out. Log and
+                    # keep reading.
+                    if frame_id is None:
+                        # Engine notifications: OnConnected, OnAuthenticated,
+                        # OnSessionTimedOut, change events. Harmless.
+                        logger.debug(
+                            "send_request[%s req_id=%d]: skipping notification: %s",
+                            method, req_id, frame.get("method", "<no-method>"),
+                        )
+                    else:
+                        logger.warning(
+                            "send_request[%s req_id=%d]: discarding stale frame "
+                            "with id=%s (likely a late reply to a previously "
+                            "timed-out request)",
+                            method, req_id, frame_id,
+                        )
+                    stray_frames += 1
+                    if stray_frames > 100:
+                        # Sanity cap. Something is very wrong; bail out.
+                        self._kill_socket()
+                        raise ConnectionError(
+                            f"send_request[{method} req_id={req_id}]: "
+                            f"received {stray_frames} stray frames without a "
+                            f"matching id, killing connection"
+                        )
+            except (_socket.timeout, TimeoutError) as e:
+                self._kill_socket()
+                raise TimeoutError(
+                    f"WebSocket recv() timed out after {effective_timeout:.1f}s "
+                    f"waiting for response to Engine method '{method}' "
+                    f"(handle={handle}, req_id={req_id}). "
+                    f"Increase QLIK_WS_TIMEOUT if the operation is legitimately heavy."
+                ) from e
+            except ConnectionError:
+                raise
+            except Exception as e:
+                self._kill_socket()
+                raise ConnectionError(
+                    f"WebSocket recv() failed for Engine method '{method}' "
+                    f"(handle={handle}, req_id={req_id}): {type(e).__name__}: {e}"
+                ) from e
+        finally:
+            if timeout is not None and self.ws is not None:
+                try:
+                    self._set_socket_timeout(self.ws_timeout_seconds)
+                except Exception:
+                    pass
+
+        if response is None:
+            # Should be unreachable — the loop only exits via break or raise.
+            raise ConnectionError(
+                f"send_request[{method} req_id={req_id}]: no response received"
+            )
 
         if "error" in response:
-            raise Exception(f"Engine API error: {response['error']}")
+            raise Exception(
+                f"Engine API error for method '{method}' (handle={handle}): {response['error']}"
+            )
 
         return response.get("result", {})
 
@@ -185,9 +387,11 @@ class QlikEngineAPI:
         """
         try:
             if no_data:
-                return self.send_request("OpenDoc", [app_id, "", "", "", True])
+                return self.send_request("OpenDoc", [app_id, "", "", "", True],
+                                         timeout=self.ws_operation_timeout)
             else:
-                return self.send_request("OpenDoc", [app_id])
+                return self.send_request("OpenDoc", [app_id],
+                                         timeout=self.ws_operation_timeout)
         except Exception as e:
             # If app is already open, try to get existing handle
             if "already open" in str(e).lower():
@@ -237,9 +441,11 @@ class QlikEngineAPI:
         try:
             # First try to open normally
             if no_data:
-                return self.send_request("OpenDoc", [app_id, "", "", "", True])
+                return self.send_request("OpenDoc", [app_id, "", "", "", True],
+                                         timeout=self.ws_operation_timeout)
             else:
-                return self.send_request("OpenDoc", [app_id])
+                return self.send_request("OpenDoc", [app_id],
+                                         timeout=self.ws_operation_timeout)
 
         except Exception as e:
             error_msg = str(e)
@@ -411,14 +617,7 @@ class QlikEngineAPI:
     def get_sheets_with_objects(self, app_id: str) -> Dict[str, Any]:
         """Get sheets and their objects with detailed field usage analysis."""
         try:
-            self.connect()
-
-            # Open the app
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app", "response": app_result}
-
-            app_handle = app_result["qReturn"]["qHandle"]
+            app_handle = self.ensure_app(app_id, no_data=False)
 
             # Get sheets using correct API sequence
             sheets = self.get_sheets(app_handle)
@@ -764,6 +963,10 @@ class QlikEngineAPI:
         max_rows: int = 1000,
     ) -> Dict[str, Any]:
         """Create hypercube for data extraction with proper structure."""
+        import time
+        import traceback as _tb
+        step = "init"
+        t0 = time.monotonic()
         try:
             # Handle empty dimensions/measures
             if dimensions is None:
@@ -816,6 +1019,81 @@ class QlikEngineAPI:
                         }
                     converted_measures.append(measure)
 
+            # Hard limits enforced in our layer — NOT in Qlik Engine.
+            # The intent is to force the LLM to design narrow, focused
+            # hypercubes (with set analysis, smart dimensions, and top-N
+            # patterns) rather than bulk-dump huge tables and post-process
+            # client-side. If the LLM needs more data, it should issue
+            # multiple well-scoped queries, not one giant one.
+            HARD_MAX_ROWS = 5000
+            HARD_MAX_CELLS = 9900  # Qlik's own cell cap per NxPage is 10k
+            n_cols = len(converted_dimensions) + len(converted_measures)
+
+            # Reject max_rows over the hard cap.
+            if max_rows > HARD_MAX_ROWS:
+                return {
+                    "error": (
+                        f"max_rows={max_rows} exceeds the hard limit of "
+                        f"{HARD_MAX_ROWS}. This limit is enforced by the MCP "
+                        f"server to force narrow, focused queries."
+                    ),
+                    "error_category": "limit_exceeded",
+                    "failed_step": "plan",
+                    "hard_max_rows": HARD_MAX_ROWS,
+                    "hint": (
+                        "Design a smaller query instead of bulk-dumping:\n"
+                        "  1. Add set analysis to narrow the period/scope, "
+                        "e.g. {<[<DimPeriod>]={<val>}>} inside each measure "
+                        "(substitute real field and value).\n"
+                        "  2. For top-N ranking: pass max_rows=N (N<=50) "
+                        "with qSortByExpression on the ranking measure.\n"
+                        "  3. Split the problem: 100 small focused queries "
+                        "beat one giant scan — iterate over values of one "
+                        "categorical dimension, one hypercube per value.\n"
+                        "  4. Use get_app_details to see distinct_values "
+                        "for each dimension BEFORE building the cube."
+                    ),
+                }
+
+            # Reject cubes whose theoretical width*height exceeds Qlik's
+            # 10k-cell page cap — we refuse instead of auto-paginating.
+            # This teaches the LLM to either reduce dimensions/measures
+            # or reduce max_rows.
+            if n_cols > 0 and n_cols * max_rows > HARD_MAX_CELLS:
+                suggested_rows = max(1, HARD_MAX_CELLS // n_cols)
+                return {
+                    "error": (
+                        f"Hypercube too wide: columns={n_cols} * "
+                        f"max_rows={max_rows} = {n_cols * max_rows} cells, "
+                        f"exceeds Qlik's {HARD_MAX_CELLS}-cell limit per "
+                        f"fetch page."
+                    ),
+                    "error_category": "cell_cap_exceeded",
+                    "failed_step": "plan",
+                    "columns": n_cols,
+                    "max_rows_requested": max_rows,
+                    "cells_requested": n_cols * max_rows,
+                    "cell_cap": HARD_MAX_CELLS,
+                    "hint": (
+                        f"Either drop to max_rows={suggested_rows} with the "
+                        f"current {n_cols} columns, OR reduce the number "
+                        f"of dimensions/measures. The MCP server refuses "
+                        f"to auto-paginate — design the query you actually "
+                        f"need instead. Unique-row estimation: multiply "
+                        f"distinct_values of all your dimensions "
+                        f"(from get_app_details) — if the product is over "
+                        f"{HARD_MAX_ROWS}, the query is too broad."
+                    ),
+                }
+
+            first_page_height = max(1, min(max_rows, HARD_MAX_ROWS))
+            logger.info(
+                "create_hypercube: planning qInitialDataFetch height=%d "
+                "(max_rows=%d, columns=%d, cells=%d/%d)",
+                first_page_height, max_rows, n_cols,
+                n_cols * first_page_height, HARD_MAX_CELLS,
+            )
+
             # Create correct hypercube structure
             hypercube_def = {
                 "qDimensions": [
@@ -850,14 +1128,14 @@ class QlikEngineAPI:
                     {
                         "qTop": 0,
                         "qLeft": 0,
-                        "qHeight": max_rows,
-                        "qWidth": len(converted_dimensions) + len(converted_measures),
+                        "qHeight": first_page_height,
+                        "qWidth": n_cols,
                     }
                 ],
                 "qSuppressZero": False,
                 "qSuppressMissing": False,
                 "qMode": "S",
-                "qInterColumnSortOrder": list(range(len(converted_dimensions) + len(converted_measures))),
+                "qInterColumnSortOrder": list(range(n_cols)),
             }
 
             obj_def = {
@@ -868,34 +1146,134 @@ class QlikEngineAPI:
                 "qHyperCubeDef": hypercube_def,
             }
 
-            result = self.send_request(
-                "CreateSessionObject", [obj_def], handle=app_handle
+            step = "CreateSessionObject"
+            logger.info(
+                "create_hypercube: %s (dims=%d, measures=%d, max_rows=%d, op_timeout=%.1fs)",
+                step, len(converted_dimensions), len(converted_measures),
+                max_rows, self.ws_operation_timeout,
             )
+            t_step = time.monotonic()
+            result = self.send_request(
+                "CreateSessionObject", [obj_def], handle=app_handle,
+                timeout=self.ws_operation_timeout,
+            )
+            logger.info("create_hypercube: %s done in %.2fs",
+                        step, time.monotonic() - t_step)
 
             if "qReturn" not in result or "qHandle" not in result["qReturn"]:
-                return {"error": "Failed to create hypercube", "response": result}
+                return {
+                    "error": "Failed to create hypercube session object",
+                    "step": step,
+                    "response": result,
+                }
 
             cube_handle = result["qReturn"]["qHandle"]
 
             # Get layout with data
-            layout = self.send_request("GetLayout", [], handle=cube_handle)
+            step = "GetLayout"
+            logger.info("create_hypercube: %s (cube_handle=%d)", step, cube_handle)
+            t_step = time.monotonic()
+            layout = self.send_request("GetLayout", [], handle=cube_handle,
+                                       timeout=self.ws_operation_timeout)
+            logger.info("create_hypercube: %s done in %.2fs",
+                        step, time.monotonic() - t_step)
 
             if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
-                return {"error": "No hypercube in layout", "layout": layout}
+                return {
+                    "error": "No hypercube in layout",
+                    "step": step,
+                    "layout": layout,
+                }
 
             hypercube = layout["qLayout"]["qHyperCube"]
+            total_rows_on_server = hypercube.get("qSize", {}).get("qcy", 0)
+            total_cols = hypercube.get("qSize", {}).get("qcx", n_cols)
+
+            # Count how many rows we actually got back.
+            initial_pages = hypercube.get("qDataPages", []) or []
+            rows_fetched = sum(
+                len(p.get("qMatrix", [])) for p in initial_pages
+            )
+
+            # Warn the caller if the server has MORE data than we returned.
+            # No pagination — the LLM must narrow the query with set
+            # analysis and re-run it.
+            truncation_warning: Optional[str] = None
+            if total_rows_on_server > rows_fetched:
+                truncation_warning = (
+                    f"TRUNCATED: server has {total_rows_on_server} rows, "
+                    f"returned only {rows_fetched} (max_rows={max_rows}, "
+                    f"HARD_LIMIT={HARD_MAX_ROWS}). "
+                    f"Narrow the query instead of asking for more rows:\n"
+                    f"  - add set-analysis filters inside measures: "
+                    f"{{<[<DimPeriod>]={{<val>}}>}} — substitute real "
+                    f"field and value\n"
+                    f"  - use qSortByExpression for top-N ranking and "
+                    f"set max_rows small (15-50)\n"
+                    f"  - split into multiple focused queries (one per "
+                    f"category/period) rather than a giant dump"
+                )
 
             return {
                 "hypercube_handle": cube_handle,
                 "hypercube_data": hypercube,
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
-                "total_rows": hypercube.get("qSize", {}).get("qcy", 0),
-                "total_columns": hypercube.get("qSize", {}).get("qcx", 0),
+                "total_rows": total_rows_on_server,
+                "returned_rows": rows_fetched,
+                "total_columns": total_cols,
+                "hard_max_rows": HARD_MAX_ROWS,
+                "truncation_warning": truncation_warning,
             }
 
         except Exception as e:
-            return {"error": str(e), "details": "Error in create_hypercube method"}
+            elapsed = time.monotonic() - t0
+            err_type = type(e).__name__
+            err_msg = str(e) or repr(e)
+            # Classify the error so the caller knows WHAT actually failed
+            import socket as _socket
+            if isinstance(e, (_socket.timeout, TimeoutError)):
+                category = "socket_timeout"
+                hint = (
+                    f"WebSocket recv() timed out after ~{self.ws_operation_timeout:.0f}s on step '{step}'. "
+                    f"Increase QLIK_WS_OPERATION_TIMEOUT or simplify the hypercube "
+                    f"(fewer dimensions/measures, smaller max_rows, lighter expressions)."
+                )
+                # Timeout on recv leaves the socket in an inconsistent state —
+                # invalidate cache so the next call opens a fresh connection.
+                self._invalidate_cache()
+                try:
+                    if self.ws:
+                        self.ws.close()
+                except Exception:
+                    pass
+                self.ws = None
+            elif err_msg.startswith("Engine API error:"):
+                category = "engine_api_error"
+                hint = "Qlik Engine rejected the request (bad expression, missing field, etc)."
+            elif isinstance(e, ConnectionError):
+                category = "connection_error"
+                hint = "WebSocket connection problem (server unreachable, SSL, auth)."
+            else:
+                category = "unexpected"
+                hint = "Unexpected error — see traceback."
+
+            tb = _tb.format_exc()
+            logger.error(
+                "create_hypercube FAILED on step '%s' after %.2fs: %s: %s\n%s",
+                step, elapsed, err_type, err_msg, tb,
+            )
+            return {
+                "error": err_msg,
+                "error_type": err_type,
+                "error_category": category,
+                "failed_step": step,
+                "elapsed_seconds": round(elapsed, 2),
+                "ws_operation_timeout": self.ws_operation_timeout,
+                "hint": hint,
+                "traceback": tb,
+                "details": "Error in create_hypercube method",
+            }
 
     def get_hypercube_data(
         self,
@@ -1198,15 +1576,205 @@ class QlikEngineAPI:
             except Exception as cleanup_error:
                 field_info["cleanup_warning"] = str(cleanup_error)
 
+            # Fallback: ListObject sometimes returns empty qMatrix for fields
+            # in fact tables (no state for high-cardinality keys). Try a
+            # one-dimension hypercube instead — it always materializes values.
+            if not values_data:
+                logger.info(
+                    "get_field_values: ListObject returned empty for '%s', "
+                    "falling back to single-dimension hypercube",
+                    field_name,
+                )
+                fallback = self._get_field_values_via_hypercube(
+                    app_handle, field_name, max_values
+                )
+                if fallback.get("values"):
+                    fallback["fallback_used"] = "hypercube"
+                    return fallback
+                # Both methods failed — return original empty result with hint
+                field_info["warning"] = (
+                    "Both ListObject and hypercube fallback returned no values. "
+                    "The field may be empty, fully null, or excluded by current "
+                    "selection state. Try get_app_field_statistics with light=True "
+                    "to confirm the field has data, or use engine_create_hypercube "
+                    "with this field as a dimension and a Count() measure."
+                )
+
             return field_info
 
         except Exception as e:
             return {"error": str(e), "details": "Error in get_field_values method"}
 
-    def get_field_statistics(self, app_handle: int, field_name: str) -> Dict[str, Any]:
-        """Get comprehensive statistics for a field."""
+    def _get_field_values_via_hypercube(
+        self, app_handle: int, field_name: str, max_values: int = 100
+    ) -> Dict[str, Any]:
+        """
+        Fallback for `get_field_values`: build a one-dimension hypercube
+        with a Count() measure to materialize distinct field values when
+        ListObject returns empty.
+        """
+        try:
+            obj_id = f"field-values-fb-{field_name}"
+            hypercube_def = {
+                "qDimensions": [
+                    {
+                        "qDef": {
+                            "qFieldDefs": [field_name],
+                            "qSortCriterias": [
+                                {
+                                    "qSortByNumeric": -1,
+                                    "qSortByAscii": 1,
+                                    "qSortByLoadOrder": 1,
+                                    "qSortByExpression": 0,
+                                    "qExpression": {"qv": ""},
+                                }
+                            ],
+                        },
+                        "qNullSuppression": True,
+                        "qIncludeElemValue": True,
+                    }
+                ],
+                "qMeasures": [
+                    {"qDef": {"qDef": f"Count([{field_name}])", "qLabel": "cnt"}}
+                ],
+                "qInitialDataFetch": [
+                    {"qTop": 0, "qLeft": 0, "qHeight": max_values, "qWidth": 2}
+                ],
+                "qSuppressZero": False,
+                "qSuppressMissing": False,
+                "qMode": "S",
+            }
+            obj_def = {
+                "qInfo": {"qId": obj_id, "qType": "HyperCube"},
+                "qHyperCubeDef": hypercube_def,
+            }
+            result = self.send_request(
+                "CreateSessionObject", [obj_def], handle=app_handle,
+                timeout=self.ws_operation_timeout,
+            )
+            if "qReturn" not in result or "qHandle" not in result["qReturn"]:
+                return {"error": "fallback hypercube create failed", "values": []}
+            cube_handle = result["qReturn"]["qHandle"]
+            layout = self.send_request(
+                "GetLayout", [], handle=cube_handle,
+                timeout=self.ws_operation_timeout,
+            )
+            values_data: List[Dict[str, Any]] = []
+            try:
+                hc = layout["qLayout"]["qHyperCube"]
+                for page in hc.get("qDataPages", []):
+                    for row in page.get("qMatrix", []):
+                        if not row:
+                            continue
+                        cell = row[0]
+                        values_data.append({
+                            "value": cell.get("qText", ""),
+                            "state": cell.get("qState", "O"),
+                            "numeric_value": cell.get("qNum", None),
+                            "is_numeric": cell.get("qIsNumeric", False),
+                            "frequency": int(row[1].get("qNum", 0)) if len(row) > 1 else 0,
+                        })
+                total_values = hc.get("qSize", {}).get("qcy", len(values_data))
+            except Exception:
+                total_values = len(values_data)
+            try:
+                self.send_request(
+                    "DestroySessionObject", [obj_id], handle=app_handle
+                )
+            except Exception:
+                pass
+            return {
+                "field_name": field_name,
+                "values": values_data,
+                "total_values": total_values,
+                "returned_count": len(values_data),
+            }
+        except Exception as e:
+            return {"error": str(e), "values": []}
+
+    def get_field_range(self, app_handle: int, field_name: str) -> Dict[str, Any]:
+        """
+        Lightweight bounds query: distinct count + min + max for a single field.
+
+        Builds a measures-only hypercube with 3 expressions, no dimensions.
+        Engine resolves Min/Max from the symbol table without scanning rows,
+        so this runs in seconds even on billion-row tables.
+        """
+        try:
+            exprs = [
+                (f"Count(DISTINCT [{field_name}])", "unique_values"),
+                (f"Min([{field_name}])", "min_value"),
+                (f"Max([{field_name}])", "max_value"),
+            ]
+            hypercube_def = {
+                "qDimensions": [],
+                "qMeasures": [
+                    {"qDef": {"qDef": expr, "qLabel": label}}
+                    for expr, label in exprs
+                ],
+                "qInitialDataFetch": [
+                    {"qTop": 0, "qLeft": 0, "qHeight": 1, "qWidth": len(exprs)}
+                ],
+                "qSuppressZero": False,
+                "qSuppressMissing": False,
+            }
+            obj_def = {
+                "qInfo": {"qId": f"field-range-{field_name}", "qType": "HyperCube"},
+                "qHyperCubeDef": hypercube_def,
+            }
+            result = self.send_request(
+                "CreateSessionObject", [obj_def], handle=app_handle,
+                timeout=self.ws_operation_timeout,
+            )
+            if "qReturn" not in result or "qHandle" not in result["qReturn"]:
+                return {"error": "Failed to create field-range hypercube", "response": result}
+            cube_handle = result["qReturn"]["qHandle"]
+            layout = self.send_request("GetLayout", [], handle=cube_handle,
+                                       timeout=self.ws_operation_timeout)
+            if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
+                return {"error": "No hypercube in layout", "layout": layout}
+            hypercube = layout["qLayout"]["qHyperCube"]
+            stats: Dict[str, Any] = {"field_name": field_name}
+            for page in hypercube.get("qDataPages", []):
+                for row in page.get("qMatrix", []):
+                    for i, cell in enumerate(row):
+                        if i < len(exprs):
+                            label = exprs[i][1]
+                            stats[label] = {
+                                "text": cell.get("qText", ""),
+                                "numeric": (cell.get("qNum", None)
+                                            if cell.get("qNum") != "NaN" else None),
+                                "is_numeric": cell.get("qIsNumeric", False),
+                            }
+            try:
+                self.send_request("DestroySessionObject",
+                                  [f"field-range-{field_name}"], handle=app_handle)
+            except Exception:
+                pass
+            return stats
+        except Exception as e:
+            import traceback
+            return {
+                "error": str(e),
+                "details": "Error in get_field_range method",
+                "traceback": traceback.format_exc(),
+            }
+
+    def get_field_statistics(self, app_handle: int, field_name: str,
+                             light: bool = True) -> Dict[str, Any]:
+        """
+        Compute statistics for a field via a measures-only hypercube.
+
+        Args:
+            app_handle: Open app handle.
+            field_name: Field name (no square brackets).
+            light: When True (default), only compute Count, DISTINCT, non-null,
+                Min, Max — fast on any table size. When False, additionally
+                compute Avg, Sum, Median, Mode, Stdev — these can be VERY slow
+                on big fact tables (>100M rows) and meaningless on dates/text.
+        """
         debug_log = []
-        debug_log.append(f"get_field_statistics called with app_handle={app_handle}, field_name={field_name}")
+        debug_log.append(f"get_field_statistics called with app_handle={app_handle}, field_name={field_name}, light={light}")
         try:
             # Create expressions for statistics
             stats_expressions = [
@@ -1215,12 +1783,15 @@ class QlikEngineAPI:
                 f"Count({{$<[{field_name}]={{'*'}}>}})",  # Non-null count
                 f"Min([{field_name}])",  # Minimum value
                 f"Max([{field_name}])",  # Maximum value
-                f"Avg([{field_name}])",  # Average value
-                f"Sum([{field_name}])",  # Sum (if numeric)
-                f"Median([{field_name}])",  # Median
-                f"Mode([{field_name}])",  # Mode (most frequent)
-                f"Stdev([{field_name}])",  # Standard deviation
             ]
+            if not light:
+                stats_expressions.extend([
+                    f"Avg([{field_name}])",  # Average value
+                    f"Sum([{field_name}])",  # Sum (if numeric)
+                    f"Median([{field_name}])",  # Median
+                    f"Mode([{field_name}])",  # Mode (most frequent)
+                    f"Stdev([{field_name}])",  # Standard deviation
+                ])
             debug_log.append(f"Created {len(stats_expressions)} expressions: {stats_expressions}")
 
             # Create hypercube for statistics calculation
@@ -1250,7 +1821,8 @@ class QlikEngineAPI:
             # Create session object
             debug_log.append(f"Creating session object with obj_def: {obj_def}")
             result = self.send_request(
-                "CreateSessionObject", [obj_def], handle=app_handle
+                "CreateSessionObject", [obj_def], handle=app_handle,
+                timeout=self.ws_operation_timeout,
             )
             debug_log.append(f"CreateSessionObject result: {result}")
 
@@ -1265,7 +1837,8 @@ class QlikEngineAPI:
             cube_handle = result["qReturn"]["qHandle"]
 
             # Get layout with data
-            layout = self.send_request("GetLayout", [], handle=cube_handle)
+            layout = self.send_request("GetLayout", [], handle=cube_handle,
+                                       timeout=self.ws_operation_timeout)
 
             if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
                 try:
@@ -1287,12 +1860,15 @@ class QlikEngineAPI:
                 "non_null_count",
                 "min_value",
                 "max_value",
-                "avg_value",
-                "sum_value",
-                "median_value",
-                "mode_value",
-                "std_deviation",
             ]
+            if not light:
+                stats_labels.extend([
+                    "avg_value",
+                    "sum_value",
+                    "median_value",
+                    "mode_value",
+                    "std_deviation",
+                ])
 
             statistics = {"field_name": field_name}
 
@@ -1837,14 +2413,7 @@ class QlikEngineAPI:
     def get_detailed_app_metadata(self, app_id: str) -> Dict[str, Any]:
         """Get detailed app metadata similar to /api/v1/apps/{app_id}/data/metadata endpoint."""
         try:
-            self.connect()
-
-            # Open the app
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app", "response": app_result}
-
-            app_handle = app_result["qReturn"]["qHandle"]
+            app_handle = self.ensure_app(app_id, no_data=False)
 
             # Get app layout and properties using correct methods
             try:
@@ -1954,8 +2523,6 @@ class QlikEngineAPI:
 
         except Exception as e:
             return {"error": str(e), "details": "Error in get_detailed_app_metadata"}
-        finally:
-            self.disconnect()
 
     def get_app_details(self, app_id: str) -> Dict[str, Any]:
         """
@@ -1972,14 +2539,7 @@ class QlikEngineAPI:
         Returns optimized JSON report for quick app understanding.
         """
         try:
-            self.connect()
-
-            # Open app once and reuse connection
-            app_result = self.open_doc(app_id, no_data=False)
-            if "qReturn" not in app_result or "qHandle" not in app_result["qReturn"]:
-                return {"error": "Failed to open app", "response": app_result}
-
-            app_handle = app_result["qReturn"]["qHandle"]
+            app_handle = self.ensure_app(app_id, no_data=False)
 
             # Get app metadata and layout
             app_metadata = self._get_app_metadata_fast(app_handle)
@@ -2043,8 +2603,6 @@ class QlikEngineAPI:
 
         except Exception as e:
             return {"error": str(e), "details": "Error in get_app_details method"}
-        finally:
-            self.disconnect()
 
     def _get_app_metadata_fast(self, app_handle: int) -> Dict[str, Any]:
         """Get basic app metadata without heavy analysis."""

@@ -1,6 +1,22 @@
+Disclaimer
+
+This project is an independent, community-built integration. It is NOT
+affiliated with, endorsed by, sponsored by, or supported by Qlik
+Technologies Inc., QlikTech International AB, or any other Qlik entity.
+"Qlik", "Qlik Sense", "QlikView", the Qlik logo and all related product
+names are trademarks or registered trademarks of their respective
+owners. All information about Qlik Sense APIs, port allocations, error
+codes, protocol behavior and usage patterns used in this project was
+obtained exclusively from publicly available sources (the Qlik
+Developer Portal at help.qlik.com / qlik.dev, the Qlik Community forums
+and other public documentation). No proprietary, confidential or
+reverse-engineered material is used.
+
+---
+
 MIT License
 
-Copyright (c) 2025 Stanislav Chernov
+Copyright (c) 2025-2026 Stanislav Chernov
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
