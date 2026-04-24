@@ -71,8 +71,11 @@ python tools/qlik_jwt_admin.py issue-token \
 
 `--user-id` and `--user-directory` must match the values Qlik uses for that
 user (usually AD `sAMAccountName` and the domain short name). The defaults
-`--days 365`, `--user-id-claim userId`, and `--user-dir-claim userDirectory`
-match the QMC configuration above.
+`--days 90`, `--user-id-claim userId`, and `--user-dir-claim userDirectory`
+match the QMC configuration above. 90 days is a compromise between
+rotation discipline and operational overhead — bearer JWTs cannot be
+individually revoked, so pick the shortest lifetime you are willing to
+maintain.
 
 The CLI prints a ready-to-paste token plus the `env` block for the analyst's
 MCP config.
@@ -84,7 +87,7 @@ python tools/qlik_jwt_admin.py issue-token \
     --key ./jwt_keys/jwt_private.pem \
     --user-id svc_ai \
     --user-directory COMPANY \
-    --days 3650
+    --days 365
 ```
 
 For scripting:
@@ -160,6 +163,7 @@ something non-standard.
 | `QLIK_JWT_USER_ID_CLAIM` | Name of the payload claim holding the user id | `userId` |
 | `QLIK_JWT_USER_DIR_CLAIM` | Name of the payload claim holding the user directory | `userDirectory` |
 | `QLIK_JWT_SESSION_COOKIE` | Exact name of the VP session cookie | auto-detected from bootstrap response |
+| `QLIK_JWT_SESSION_TTL` | Seconds to cache the bootstrapped session before re-fetching. Lower this if the QMC Proxy `Session inactivity timeout` is below 30 min. | `1500` (25 min) |
 | `QLIK_VERIFY_SSL` | `false` disables TLS verification | `true` |
 | `QLIK_CA_CERT_PATH` | Path to a corporate CA bundle | unset |
 
@@ -271,12 +275,13 @@ each subsequent call.
   power. Keep it on one machine, back it up offline, and rotate it if you
   suspect any compromise.
 - Analysts only ever hold a signed JWT. A stolen JWT lets the attacker act
-  as *that one analyst* until the token expires (default 365 days) or the
+  as *that one analyst* until the token expires (default 90 days) or the
   user account is disabled in Qlik. It does not let them forge tokens for
   other users — they do not have the signing key.
 - Use separate virtual proxies for separate trust domains (e.g. dev vs
   prod). Each VP has its own certificate, so compromising one does not
   affect the other.
-- `--days 3650` exists for convenience but tilts the tradeoff toward
-  availability, not rotation discipline. The conservative default is 365.
-  Pick what matches your policy.
+- `--days 365` or higher exists for service tokens but tilts the tradeoff
+  toward availability over rotation discipline. Pick what matches your
+  policy; the default of 90 is deliberately short because bearer tokens
+  have no individual revocation path.

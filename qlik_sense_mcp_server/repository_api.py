@@ -16,7 +16,7 @@ from .config import (
 )
 from .jwt_session import JwtSession, JwtBootstrapError
 from .utils import generate_xrfkey
-from .exceptions import QlikRepositoryError
+from .exceptions import QlikRepositoryError, QlikConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,14 @@ class QlikRepositoryAPI:
     def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None):
         self.config = config
         self.jwt_session = jwt_session  # required when config.auth_mode == jwt
+
+        # In JWT mode the session holder is required up front — failing here
+        # gives a clear message instead of a confusing 401 on the first call.
+        if self.config.auth_mode == AUTH_MODE_JWT and jwt_session is None:
+            raise QlikConnectionError(
+                "JWT mode requires a JwtSession — pass jwt_session=... to "
+                "QlikRepositoryAPI(). See server._init_clients for the canonical wiring."
+            )
 
         # Setup SSL verification
         if self.config.verify_ssl:

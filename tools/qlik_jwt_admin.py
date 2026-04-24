@@ -203,6 +203,33 @@ def cmd_issue_token(args: argparse.Namespace) -> int:
         # Machine-readable: just the token on stdout, nothing else.
         print(token)
     else:
+        # Warn when printed to an interactive terminal — the token ends up in
+        # the shell scrollback / tmux buffer / terminal logs and should be
+        # treated as a password.
+        if sys.stdout.isatty():
+            sys.stderr.write(
+                "NOTE: the token below is a bearer credential. Your terminal "
+                "is interactive, so the value will be written to shell "
+                "scrollback and any terminal log. Copy it to the analyst via "
+                "a secure channel and clear the scrollback afterwards.\n\n"
+            )
+
+        # Also warn if the admin deviates from the defaults we document — a
+        # silent mismatch with the QMC VP config is the #1 reason tokens are
+        # rejected. This does not prevent the token from being issued.
+        if args.user_id_claim != "userId":
+            sys.stderr.write(
+                f"WARNING: --user-id-claim={args.user_id_claim!r} differs from "
+                f"the documented default 'userId'. Make sure 'JWT attribute for "
+                f"user ID' in QMC matches exactly.\n"
+            )
+        if args.user_dir_claim != "userDirectory":
+            sys.stderr.write(
+                f"WARNING: --user-dir-claim={args.user_dir_claim!r} differs from "
+                f"the documented default 'userDirectory'. Make sure 'JWT attribute "
+                f"for user directory' in QMC matches exactly.\n"
+            )
+
         print()
         print("=" * 72)
         print(f"  JWT for {args.user_directory}\\{args.user_id}")
@@ -260,9 +287,11 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="Qlik userId (e.g. the AD sAMAccountName, 'ivanov')")
     p_issue.add_argument("--user-directory", required=True,
                          help="Qlik userDirectory (e.g. AD domain, 'COMPANY')")
-    p_issue.add_argument("--days", type=int, default=365,
-                         help="Token lifetime in days (default 365). Use a larger value "
-                              "for long-lived service tokens, a smaller one for tighter rotation.")
+    p_issue.add_argument("--days", type=int, default=90,
+                         help="Token lifetime in days (default 90). Bearer JWTs cannot be "
+                              "individually revoked, so prefer the shortest lifetime that is "
+                              "operationally acceptable. Use a larger value (e.g. 365) for "
+                              "service tokens, a smaller one for tighter rotation.")
     p_issue.add_argument("--user-id-claim", default="userId",
                          help="JWT claim name holding user ID — must match 'JWT attribute "
                               "for user ID' in QMC (default userId)")

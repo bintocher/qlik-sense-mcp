@@ -33,6 +33,7 @@ Sources:
 from __future__ import annotations
 
 import logging
+import os
 import ssl
 import threading
 import time
@@ -46,8 +47,31 @@ logger = logging.getLogger(__name__)
 
 
 # Qlik default session idle timeout is 30 minutes. We refresh a little earlier
-# so a borderline request never races the server-side eviction.
+# so a borderline request never races the server-side eviction. Can be
+# overridden by the ``QLIK_JWT_SESSION_TTL`` environment variable for
+# deployments whose QMC session timeout differs from the default 30 minutes.
 DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
+
+
+def _ttl_from_env(default: int = DEFAULT_JWT_SESSION_TTL_SECONDS) -> int:
+    raw = os.getenv("QLIK_JWT_SESSION_TTL")
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        logger.warning(
+            "QLIK_JWT_SESSION_TTL=%r is not an integer, falling back to %d",
+            raw, default,
+        )
+        return default
+    if v <= 0:
+        logger.warning(
+            "QLIK_JWT_SESSION_TTL must be positive, got %d — falling back to %d",
+            v, default,
+        )
+        return default
+    return v
 
 # Names of session cookies to recognize when auto-detecting from Set-Cookie.
 # Any cookie whose name starts with "X-Qlik-Session" is treated as a session
@@ -72,10 +96,11 @@ class JwtSession:
     def __init__(
         self,
         config: QlikSenseConfig,
-        ttl_seconds: int = DEFAULT_JWT_SESSION_TTL_SECONDS,
+        ttl_seconds: Optional[int] = None,
     ) -> None:
         self._config = config
-        self._ttl = ttl_seconds
+        # Explicit arg wins over env, env wins over default.
+        self._ttl = ttl_seconds if ttl_seconds is not None else _ttl_from_env()
         self._lock = threading.Lock()
         self._cookie_name: Optional[str] = config.jwt_session_cookie_override
         self._cookie_value: Optional[str] = None
@@ -83,19 +108,25 @@ class JwtSession:
         self._fetched_at: float = 0.0
 
     # ─── public surface ────────────────────────────────────────────────
+    # Reader properties snapshot the three session fields under the lock
+    # so a concurrent ``invalidate()`` can't surface a half-updated state
+    # (e.g. cookie present but csrf already cleared).
 
     @property
     def cookie_name(self) -> Optional[str]:
         """Last known session cookie name (None until first bootstrap)."""
-        return self._cookie_name
+        with self._lock:
+            return self._cookie_name
 
     @property
     def cookie_value(self) -> Optional[str]:
-        return self._cookie_value
+        with self._lock:
+            return self._cookie_value
 
     @property
     def csrf_token(self) -> Optional[str]:
-        return self._csrf_token
+        with self._lock:
+            return self._csrf_token
 
     def cookie_header(self) -> str:
         """
@@ -104,9 +135,10 @@ class JwtSession:
         Call only after ``ensure()`` — raises if the session has not been
         bootstrapped yet.
         """
-        if not (self._cookie_name and self._cookie_value):
-            raise JwtBootstrapError("JwtSession.cookie_header() called before ensure()")
-        return f"{self._cookie_name}={self._cookie_value}"
+        with self._lock:
+            if not (self._cookie_name and self._cookie_value):
+                raise JwtBootstrapError("JwtSession.cookie_header() called before ensure()")
+            return f"{self._cookie_name}={self._cookie_value}"
 
     def invalidate(self) -> None:
         """Drop the cached session so the next ensure() refetches."""
@@ -241,7 +273,9 @@ class JwtSession:
 
         self._cookie_name = cookie_name
         self._cookie_value = cookie_value
-        self._csrf_token = csrf or ""
+        # Store "missing" as None (not ""); the public csrf_token property
+        # stays Optional[str] and downstream code uses truthiness checks.
+        self._csrf_token = csrf or None
         self._fetched_at = time.time()
         logger.info(
             "JWT session bootstrap OK (cookie=%s, csrf_present=%s)",

@@ -1,9 +1,12 @@
 """Configuration for Qlik Sense MCP Server."""
 
+import logging
 import os
 from typing import Optional
 from urllib.parse import urlparse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 # Default ports
@@ -142,7 +145,7 @@ class QlikSenseConfig(BaseModel):
         ``https://qlik.company.com/jwt``    → ``"jwt"``
         ``https://qlik.company.com``        → ``""``
         ``https://qlik.company.com/a/b``    → ``"a/b"`` (multi-segment is
-        unusual for Qlik VPs but preserved verbatim if someone sets it).
+        unusual for Qlik VPs — ``validate_runtime`` warns when it happens).
         """
         parsed = urlparse(self.server_url)
         return (parsed.path or "").strip("/")
@@ -158,11 +161,30 @@ class QlikSenseConfig(BaseModel):
         if not self.server_url:
             raise ValueError("QLIK_SERVER_URL is required")
 
+        parsed_server = urlparse(self.server_url)
+        if not parsed_server.scheme:
+            raise ValueError(
+                "QLIK_SERVER_URL must include a scheme (e.g. https://qlik.company.com)"
+            )
+        if parsed_server.scheme not in ("https", "http"):
+            raise ValueError(
+                f"QLIK_SERVER_URL scheme must be https or http, got "
+                f"{parsed_server.scheme!r}"
+            )
+
         if self.auth_mode == AUTH_MODE_JWT:
             if not self.virtual_proxy_prefix:
                 raise ValueError(
                     "JWT mode requires a virtual proxy prefix in QLIK_SERVER_URL. "
                     "Example: QLIK_SERVER_URL=https://qlik.company.com/jwt"
+                )
+            if "/" in self.virtual_proxy_prefix:
+                logger.warning(
+                    "QLIK_SERVER_URL has a multi-segment path %r — Qlik virtual "
+                    "proxies use a single-segment prefix. The MCP will pass the "
+                    "full path as-is; expect connection failures if Qlik does "
+                    "not recognize it.",
+                    self.virtual_proxy_prefix,
                 )
             if not self.jwt_token:
                 raise ValueError("JWT mode requires QLIK_JWT_TOKEN")
