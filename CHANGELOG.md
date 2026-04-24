@@ -4,6 +4,67 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.5.0] - 2026-04-24
+
+### Added
+- **JWT authentication mode** via a Qlik Sense JWT virtual proxy. The
+  admin signs a long-lived token per analyst on a private machine; the
+  analyst puts `QLIK_SERVER_URL` and `QLIK_JWT_TOKEN` into their
+  `mcp.json` and nothing else. No client certificates, no private keys,
+  no service account on the analyst side — identity travels in the JWT
+  payload and Qlik applies that user's normal security rules, stream
+  membership and Section Access. Mode switches automatically when
+  `QLIK_JWT_TOKEN` is set in the environment.
+- **`qlik_sense_mcp_server/jwt_session.py`** — lazy, thread-safe holder
+  of the bootstrapped Qlik session material (session cookie plus
+  `qlik-csrf-token`), with a conservative 25-minute TTL (override via
+  `QLIK_JWT_SESSION_TTL`) and transparent re-fetching on 401/403.
+- **`tools/qlik_jwt_admin.py`** — admin CLI with two commands:
+  `init-keys` generates an RSA 2048 keypair plus self-signed X.509
+  certificate for pasting into the QMC JWT virtual proxy;
+  `issue-token` signs an RS256 JWT for a single analyst. Token
+  lifetime defaults to 90 days; bearer JWTs have no individual
+  revocation path, so the default deliberately prefers rotation
+  discipline over long-lived convenience.
+- **`docs/AUTH_JWT.md`** — complete admin + analyst guide covering key
+  generation, QMC virtual proxy configuration (with a multi-node
+  warning about linking to the Central Proxy), token issuance,
+  revocation strategy, operational troubleshooting and the exact
+  two-phase bootstrap the MCP performs under the hood.
+
+### Fixed
+- **Engine WebSocket works on Qlik November 2024+.** Under CSWSH
+  protection the anti-CSRF token must be present as a URL query
+  parameter (`?qlik-csrf-token=<value>`) on the WS upgrade, not just
+  as an HTTP header. Without this the upgrade is rejected with 403.
+  The Engine client now appends the CSRF token to the URL after the
+  JWT session bootstrap and additionally sends it as a header for
+  forward/backward compatibility.
+- **Engine WebSocket self-heals on stale JWT session.** A 401/403 on
+  the WS handshake triggers one re-bootstrap of the JwtSession and a
+  retry of the same endpoint, symmetric to the existing QRS 401
+  retry path.
+- **URL parsing preserves non-standard ports.** `engine_api.connect()`
+  now builds WSS URLs and the `Origin` header from the full `netloc`
+  of `QLIK_SERVER_URL` instead of the bare hostname, so deployments on
+  ports like 8443 work without regression. The `Origin` scheme is also
+  derived from the configured URL rather than hardcoded to `https`.
+
+### Changed
+- **`QlikSenseConfig.validate_runtime()`** is now the single entry
+  point for runtime validation. It rejects `QLIK_SERVER_URL` without a
+  scheme, rejects schemes other than `http`/`https`, and warns on
+  multi-segment virtual proxy prefixes (Qlik VPs are single-segment).
+- **`QlikRepositoryAPI.__init__`** raises `QlikConnectionError` up
+  front when `auth_mode == jwt` but no `JwtSession` was passed,
+  instead of failing with an obscure 401 on the first request.
+- **`qlik_jwt_admin.py issue-token`** warns on stderr when invoked on
+  an interactive TTY — the token ends up in shell scrollback and
+  must be treated as a password. It also warns when
+  `--user-id-claim` or `--user-dir-claim` deviate from the
+  documented defaults, since silent claim-name mismatches with the
+  QMC VP configuration are the number-one cause of rejected tokens.
+
 ## [1.4.1] - 2026-04-07
 
 ### Added
