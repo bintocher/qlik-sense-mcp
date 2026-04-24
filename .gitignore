@@ -165,6 +165,13 @@ certs/
 *.key
 *.crt
 
+# JWT signing keys and analyst token handouts — never commit
+jwt_keys/
+users/
+
+# MCP client artefacts
+.playwright-mcp/
+
 # Local configuration
 .env.local
 config.local.py

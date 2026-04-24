@@ -12,9 +12,11 @@ from .config import (
     DEFAULT_HTTP_TIMEOUT,
     DEFAULT_APPS_LIMIT,
     MAX_APPS_LIMIT,
+    AUTH_MODE_JWT,
 )
+from .jwt_session import JwtSession, JwtBootstrapError
 from .utils import generate_xrfkey
-from .exceptions import QlikRepositoryError
+from .exceptions import QlikRepositoryError, QlikConnectionError
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,17 @@ logger = logging.getLogger(__name__)
 class QlikRepositoryAPI:
     """Client for Qlik Sense Repository API using httpx."""
 
-    def __init__(self, config: QlikSenseConfig):
+    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None):
         self.config = config
+        self.jwt_session = jwt_session  # required when config.auth_mode == jwt
+
+        # In JWT mode the session holder is required up front — failing here
+        # gives a clear message instead of a confusing 401 on the first call.
+        if self.config.auth_mode == AUTH_MODE_JWT and jwt_session is None:
+            raise QlikConnectionError(
+                "JWT mode requires a JwtSession — pass jwt_session=... to "
+                "QlikRepositoryAPI(). See server._init_clients for the canonical wiring."
+            )
 
         # Setup SSL verification
         if self.config.verify_ssl:
@@ -35,11 +46,6 @@ class QlikRepositoryAPI:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
-        # Setup client certificates if provided
-        cert = None
-        if self.config.client_cert_path and self.config.client_key_path:
-            cert = (self.config.client_cert_path, self.config.client_key_path)
-
         # Timeouts from env (seconds)
         http_timeout_env = os.getenv("QLIK_HTTP_TIMEOUT")
         try:
@@ -47,20 +53,39 @@ class QlikRepositoryAPI:
         except ValueError:
             timeout_val = DEFAULT_HTTP_TIMEOUT
 
-        # Create httpx client with certificates and SSL context
+        # Build per-mode client config. JWT mode uses neither client certs
+        # nor X-Qlik-User impersonation — identity comes from the signed
+        # bearer token validated by the VP, and after the first bootstrap
+        # call the cookie jar authenticates the rest.
+        if self.config.auth_mode == AUTH_MODE_JWT:
+            cert = None
+            default_headers = {"Content-Type": "application/json"}
+        else:
+            cert = None
+            if self.config.client_cert_path and self.config.client_key_path:
+                cert = (self.config.client_cert_path, self.config.client_key_path)
+            default_headers = {
+                "X-Qlik-User": f"UserDirectory={self.config.user_directory}; UserId={self.config.user_id}",
+                "Content-Type": "application/json",
+            }
+
         self.client = httpx.Client(
             verify=ssl_context if self.config.verify_ssl else False,
             cert=cert,
             timeout=timeout_val,
-            headers={
-                "X-Qlik-User": f"UserDirectory={self.config.user_directory}; UserId={self.config.user_id}",
-                "Content-Type": "application/json",
-            },
+            headers=default_headers,
         )
 
     def _get_api_url(self, endpoint: str) -> str:
-        """Get full API URL for endpoint."""
-        base_url = f"{self.config.server_url}:{self.config.repository_port}"
+        """
+        Build full QRS URL for an endpoint.
+
+        Certificate mode:  https://host:4242/qrs/<endpoint>      (direct QRS)
+        JWT mode:          https://host/<vp_prefix>/qrs/<endpoint> (via VP, port 443)
+        """
+        if self.config.auth_mode == AUTH_MODE_JWT:
+            return f"{self.config.qlik_base_host}/{self.config.virtual_proxy_prefix}/qrs/{endpoint}"
+        base_url = f"{self.config.qlik_base_host}:{self.config.repository_port}"
         return f"{base_url}/qrs/{endpoint}"
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
@@ -79,9 +104,42 @@ class QlikRepositoryAPI:
             # Add xrfkey header
             headers = kwargs.get('headers', {})
             headers['X-Qlik-Xrfkey'] = xrfkey
+
+            # JWT mode: make sure the session cookie is bootstrapped, then
+            # attach the anti-CSWSH header. Bootstrap Set-Cookie lands in
+            # self.client.cookies automatically because we pass the same
+            # client into ensure().
+            if self.config.auth_mode == AUTH_MODE_JWT and self.jwt_session is not None:
+                try:
+                    self.jwt_session.ensure(self.client)
+                except JwtBootstrapError as bootstrap_exc:
+                    logger.error("JWT bootstrap failed: %s", bootstrap_exc)
+                    return {"error": f"JWT bootstrap failed: {bootstrap_exc}"}
+                if self.jwt_session.csrf_token:
+                    headers["qlik-csrf-token"] = self.jwt_session.csrf_token
+
             kwargs['headers'] = headers
 
             response = self.client.request(method, url, **kwargs)
+
+            # If the session cookie expired mid-flight, invalidate and retry
+            # once — this is cheaper than a proactive per-request check and
+            # covers the case where the server killed the session early.
+            if (response.status_code == 401
+                    and self.config.auth_mode == AUTH_MODE_JWT
+                    and self.jwt_session is not None):
+                logger.info("QRS returned 401, refreshing JWT session and retrying once")
+                self.jwt_session.invalidate()
+                self.client.cookies.clear()
+                try:
+                    self.jwt_session.ensure(self.client)
+                except JwtBootstrapError as bootstrap_exc:
+                    logger.error("JWT re-bootstrap after 401 failed: %s", bootstrap_exc)
+                    return {"error": f"JWT re-bootstrap failed: {bootstrap_exc}"}
+                if self.jwt_session.csrf_token:
+                    headers["qlik-csrf-token"] = self.jwt_session.csrf_token
+                response = self.client.request(method, url, **kwargs)
+
             response.raise_for_status()
 
             if response.headers.get("content-type", "").startswith("application/json"):

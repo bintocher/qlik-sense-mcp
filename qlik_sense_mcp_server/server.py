@@ -30,9 +30,11 @@ from .config import (
     DEFAULT_FIELD_FETCH_SIZE,
     MAX_FIELD_FETCH_SIZE,
     DEFAULT_TICKET_TIMEOUT,
+    AUTH_MODE_JWT,
 )
 from .repository_api import QlikRepositoryAPI
 from .engine_api import QlikEngineAPI
+from .jwt_session import JwtSession
 from .utils import generate_xrfkey
 from . import __version__
 
@@ -61,17 +63,31 @@ logger = logging.getLogger(__name__)
 config: Optional[QlikSenseConfig] = None
 repo_api: Optional[QlikRepositoryAPI] = None
 engine_api: Optional[QlikEngineAPI] = None
+jwt_session: Optional[JwtSession] = None
 
 
 def _init_clients():
-    global config, repo_api, engine_api
+    global config, repo_api, engine_api, jwt_session
     try:
         config = QlikSenseConfig.from_env()
-        if not (config.server_url and config.user_directory and config.user_id):
-            raise ValueError("Missing required config")
-        repo_api = QlikRepositoryAPI(config)
-        engine_api = QlikEngineAPI(config)
-        logger.info("Qlik Sense API clients initialised")
+        config.validate_runtime()
+
+        if config.auth_mode == AUTH_MODE_JWT:
+            jwt_session = JwtSession(config)
+            repo_api = QlikRepositoryAPI(config, jwt_session=jwt_session)
+            engine_api = QlikEngineAPI(config, jwt_session=jwt_session)
+            logger.info(
+                "Qlik Sense API clients initialised (JWT mode via virtual proxy '/%s')",
+                config.virtual_proxy_prefix,
+            )
+        else:
+            jwt_session = None
+            repo_api = QlikRepositoryAPI(config)
+            engine_api = QlikEngineAPI(config)
+            logger.info(
+                "Qlik Sense API clients initialised (certificate mode, user=%s\\%s)",
+                config.user_directory, config.user_id,
+            )
     except Exception as e:
         logger.warning("Failed to init Qlik API clients: %s", e)
 

@@ -12,8 +12,10 @@ from .config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
     MAX_TABLES_AND_KEYS_DIM,
     MAX_TABLES,
+    AUTH_MODE_JWT,
 )
 from .exceptions import QlikConnectionError, QlikEngineError
+from .jwt_session import JwtSession, JwtBootstrapError
 import logging
 import os
 
@@ -23,8 +25,9 @@ logger = logging.getLogger(__name__)
 class QlikEngineAPI:
     """Client for Qlik Sense Engine API using WebSocket."""
 
-    def __init__(self, config: QlikSenseConfig):
+    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None):
         self.config = config
+        self.jwt_session = jwt_session  # required when config.auth_mode == jwt
         self.ws = None
         self.request_id = 0
         # Connection cache
@@ -54,31 +57,80 @@ class QlikEngineAPI:
         """
         Connect to Engine API via WebSocket.
 
+        In certificate mode, connects directly to the Engine port (4747) with
+        an X-Qlik-User impersonation header and a loaded client cert chain.
+
+        In JWT mode, goes through the virtual proxy on 443:
+        ``wss://<host>/<vp_prefix>/app/<app_guid>``. A bootstrap call to
+        ``/qps/csrftoken`` happens first (via ``JwtSession.ensure_standalone``)
+        so the WS upgrade can carry the resulting session cookie, the
+        ``qlik-csrf-token`` anti-CSWSH header, and a valid ``Origin`` — which
+        is what Qlik November 2024+ explicitly requires. We do NOT send
+        ``Authorization: Bearer`` on the upgrade request because CSWSH
+        protection rejects exactly that.
+
         If `app_id` is provided, the per-app endpoint `/app/<app_id>` is tried
         first — this is the Qlik-recommended way that binds the session to a
         specific document immediately and avoids an extra OpenDoc round-trip.
         The global `/app/engineData` endpoint is still tried as a fallback so
         that global calls (GetDocList, etc.) keep working.
         """
-        from urllib.parse import quote
-        # Try different WebSocket endpoints
-        server_host = self.config.server_url.replace("https://", "").replace(
-            "http://", ""
-        )
+        from urllib.parse import quote, urlparse
+        is_jwt = self.config.auth_mode == AUTH_MODE_JWT
+        # For JWT mode we preserve the full netloc (host + optional port) so
+        # deployments on non-standard ports like 8443 keep working.
+        # Certificate mode builds its own host:port below since it always
+        # appends the Engine port explicitly.
+        parsed_url = urlparse(self.config.server_url)
+        server_netloc = parsed_url.netloc or self.config.qlik_hostname
+        server_scheme = parsed_url.scheme or "https"
+        server_host = self.config.qlik_hostname  # bare hostname, used for cert mode
 
-        # Build endpoint list — per-app first if app_id is given
+        # In JWT mode the CSRF token must be appended to the WS URL as a query
+        # parameter — Qlik November 2024+ rejects the upgrade with 403 if the
+        # anti-CSWSH token is only sent as an HTTP header. Bootstrap the
+        # session up-front so we know the token value when building URLs.
+        jwt_csrf_qs = ""
+        if is_jwt:
+            if self.jwt_session is None:
+                raise QlikConnectionError(
+                    "JWT mode requires a JwtSession — check server._init_clients wiring."
+                )
+            try:
+                self.jwt_session.ensure_standalone()
+            except JwtBootstrapError as exc:
+                raise QlikConnectionError(f"JWT session bootstrap failed: {exc}") from exc
+            if self.jwt_session.csrf_token:
+                jwt_csrf_qs = f"?qlik-csrf-token={quote(self.jwt_session.csrf_token, safe='')}"
+
+        # Build endpoint list — per-app first if app_id is given.
         endpoints_all: List[str] = []
-        if app_id:
-            enc = quote(app_id, safe="")
-            endpoints_all.append(
-                f"wss://{server_host}:{self.config.engine_port}/app/{enc}"
-            )
-        endpoints_all.extend([
-            f"wss://{server_host}:{self.config.engine_port}/app/engineData",
-            f"wss://{server_host}:{self.config.engine_port}/app",
-            f"ws://{server_host}:{self.config.engine_port}/app/engineData",
-            f"ws://{server_host}:{self.config.engine_port}/app",
-        ])
+        if is_jwt:
+            # Via virtual proxy on 443 (or the configured non-standard port).
+            # No ws:// fallback — TLS is mandatory because the JWT was minted
+            # against a TLS-protected Host allow list in QMC.
+            prefix = self.config.virtual_proxy_prefix
+            if app_id:
+                enc = quote(app_id, safe="")
+                endpoints_all.append(
+                    f"wss://{server_netloc}/{prefix}/app/{enc}{jwt_csrf_qs}"
+                )
+            endpoints_all.extend([
+                f"wss://{server_netloc}/{prefix}/app/engineData{jwt_csrf_qs}",
+                f"wss://{server_netloc}/{prefix}/app{jwt_csrf_qs}",
+            ])
+        else:
+            if app_id:
+                enc = quote(app_id, safe="")
+                endpoints_all.append(
+                    f"wss://{server_host}:{self.config.engine_port}/app/{enc}"
+                )
+            endpoints_all.extend([
+                f"wss://{server_host}:{self.config.engine_port}/app/engineData",
+                f"wss://{server_host}:{self.config.engine_port}/app",
+                f"ws://{server_host}:{self.config.engine_port}/app/engineData",
+                f"ws://{server_host}:{self.config.engine_port}/app",
+            ])
         # ws_retries controls how many fallback endpoints to try; always at
         # least 1, and if app_id is given we add +1 to include the per-app URL
         # without starving the fallback list.
@@ -91,7 +143,11 @@ class QlikEngineAPI:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
 
-        if self.config.client_cert_path and self.config.client_key_path:
+        # In JWT mode we intentionally do NOT load a client certificate —
+        # auth is handled by the VP via the bearer token + session cookie.
+        if (not is_jwt
+                and self.config.client_cert_path
+                and self.config.client_key_path):
             ssl_context.load_cert_chain(
                 self.config.client_cert_path, self.config.client_key_path
             )
@@ -100,12 +156,35 @@ class QlikEngineAPI:
             ssl_context.load_verify_locations(self.config.ca_cert_path)
 
         # Headers for authentication
-        headers = [
-            f"X-Qlik-User: UserDirectory={self.config.user_directory}; UserId={self.config.user_id}"
-        ]
+        if is_jwt:
+            # jwt_session is already bootstrapped above — we needed the CSRF
+            # token at URL-build time.
+            headers = [
+                f"Cookie: {self.jwt_session.cookie_header()}",
+                # Send qlik-csrf-token both as a header and as a query
+                # parameter (appended to the URL above). Qlik November 2024+
+                # requires the query-parameter form for WebSocket upgrades —
+                # the header alone still 403s under CSWSH protection.
+                *([f"qlik-csrf-token: {self.jwt_session.csrf_token}"]
+                  if self.jwt_session.csrf_token else []),
+                # Origin must match an entry in the VP Host allow list from
+                # QMC. Qlik accepts the bare hostname entry and compares
+                # case-insensitively against the Origin hostname. We reuse
+                # the scheme/netloc from the configured server_url so
+                # non-standard ports are preserved and http vs https is not
+                # hardcoded.
+                f"Origin: {server_scheme}://{server_netloc}",
+            ]
+        else:
+            headers = [
+                f"X-Qlik-User: UserDirectory={self.config.user_directory}; UserId={self.config.user_id}"
+            ]
 
         last_error = None
-        for url in endpoints_to_try:
+        jwt_retried = False  # one re-bootstrap per connect() call
+        i = 0
+        while i < len(endpoints_to_try):
+            url = endpoints_to_try[i]
             try:
                 if url.startswith("wss://"):
                     self.ws = websocket.create_connection(
@@ -119,6 +198,45 @@ class QlikEngineAPI:
                 # initial recv to establish session
                 self.ws.recv()
                 return  # Success
+            except websocket.WebSocketBadStatusException as e:
+                last_error = e
+                if self.ws:
+                    try:
+                        self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
+                # On a stale JWT session we see 401 (cookie expired) or 403
+                # (CSRF stale under CSWSH). Re-bootstrap once and retry the
+                # same URL — symmetric to the QRS 401-retry path. If we are
+                # not in JWT mode or we already retried, fall through to the
+                # next fallback endpoint.
+                if (is_jwt
+                        and not jwt_retried
+                        and self.jwt_session is not None
+                        and getattr(e, "status_code", None) in (401, 403)):
+                    jwt_retried = True
+                    self.jwt_session.invalidate()
+                    try:
+                        self.jwt_session.ensure_standalone()
+                    except JwtBootstrapError as boot_exc:
+                        raise QlikConnectionError(
+                            f"JWT session re-bootstrap after {e.status_code} failed: {boot_exc}"
+                        ) from boot_exc
+                    # Refresh csrf query-param, cookie header, rebuild URL list.
+                    new_csrf = self.jwt_session.csrf_token
+                    new_qs = (f"?qlik-csrf-token={quote(new_csrf, safe='')}"
+                              if new_csrf else "")
+                    endpoints_to_try = [
+                        u.split("?", 1)[0] + new_qs for u in endpoints_to_try
+                    ]
+                    headers = [
+                        f"Cookie: {self.jwt_session.cookie_header()}",
+                        *([f"qlik-csrf-token: {new_csrf}"] if new_csrf else []),
+                        f"Origin: {server_scheme}://{server_netloc}",
+                    ]
+                    continue  # retry same i
+                i += 1
             except Exception as e:
                 last_error = e
                 if self.ws:
@@ -127,9 +245,9 @@ class QlikEngineAPI:
                     except Exception:
                         pass
                     self.ws = None
-                continue
+                i += 1
 
-        raise ConnectionError(
+        raise QlikConnectionError(
             f"Failed to connect to Engine API. Last error: {str(last_error)}"
         )
 
