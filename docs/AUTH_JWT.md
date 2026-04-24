@@ -123,8 +123,8 @@ equivalent for your client):
 {
   "mcpServers": {
     "qlik": {
-      "command": "qlik-sense-mcp-server",
-      "args": ["--stdio"],
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
         "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
@@ -133,6 +133,11 @@ equivalent for your client):
   }
 }
 ```
+
+`uvx` comes with [uv](https://docs.astral.sh/uv/). If the analyst does not
+have it yet, install once: `pip install uv` (or via the OS package
+manager). No global install of `qlik-sense-mcp-server` is required — uvx
+fetches and runs it in an isolated throw-away environment on each start.
 
 Two variables — that is the whole configuration.
 
