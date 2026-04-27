@@ -124,13 +124,17 @@ print('virtual_proxy_prefix  =', cfg.virtual_proxy_prefix)
 print('user_directory        =', cfg.user_directory)
 print('user_id               =', cfg.user_id)
 print('client_cert_path      =', cfg.client_cert_path)
+print('client_key_path       =', cfg.client_key_path)
 print('verify_ssl            =', cfg.verify_ssl)
 print('ca_cert_path          =', cfg.ca_cert_path)
 print('repository_port       =', cfg.repository_port)
+print('proxy_port            =', cfg.proxy_port)
 print('engine_port           =', cfg.engine_port)
+print('http_port             =', cfg.http_port)
 print('jwt_token_set         =', bool(cfg.jwt_token))
 print('jwt_user_id_claim     =', cfg.jwt_user_id_claim)
 print('jwt_user_dir_claim    =', cfg.jwt_user_dir_claim)
+print('jwt_session_cookie    =', cfg.jwt_session_cookie_override)
 "
 ```
 
