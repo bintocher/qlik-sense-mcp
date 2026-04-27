@@ -2,6 +2,8 @@
 
 ## Connection problems
 
+These apply to certificate auth mode. For JWT mode see [JWT authentication problems](#jwt-authentication-problems) below.
+
 ### `SSL: CERTIFICATE_VERIFY_FAILED`
 
 The CA certificate path is wrong, the certificate is expired, or the
@@ -33,6 +35,35 @@ client certificate was rejected. Steps:
 3. Confirm the user has at least the `RootAdmin` or `ContentAdmin`
    role, or the equivalent custom role with read access to apps and
    tasks.
+
+## JWT authentication problems
+
+JWT mode (selected when `QLIK_JWT_TOKEN` is set) has its own failure
+profile because the request flows through a Qlik virtual proxy instead
+of hitting the QRS / Engine ports directly. The most common failures:
+
+- **`csrftoken returned 401` — JWT rejected by the virtual proxy.**
+  Token expired, claim names mismatched with QMC, wrong certificate in
+  QMC, or the user is unknown to Qlik. See
+  [`AUTH_JWT.md` → "csrftoken returned 401"](AUTH_JWT.md#csrftoken-returned-401--jwt-rejected-by-the-virtual-proxy).
+- **`csrftoken returned 400` — VP not linked to Central Proxy.** In a
+  multi-node cluster a prefixed VP that is not linked to the Central
+  Proxy is rejected by every proxy with a styled HTML 400 page. See
+  [`AUTH_JWT.md` → "csrftoken returned 400"](AUTH_JWT.md#csrftoken-returned-400--vp-is-not-linked-to-central-proxy).
+- **`csrftoken returned 403` — VP refused.** Hostname in
+  `QLIK_SERVER_URL` is not in the VP **Host allow list**. See
+  [`AUTH_JWT.md` → "csrftoken returned 403"](AUTH_JWT.md#csrftoken-returned-403--vp-refused-the-request).
+- **WebSocket `Handshake status 403 Forbidden`.** Engine WSS upgrade
+  blocked by Qlik November 2024+ CSWSH protection or by a VP / host
+  allow list issue surfacing on the WS leg. See
+  [`AUTH_JWT.md` → "WebSocket fails with Handshake status 403"](AUTH_JWT.md#websocket-fails-with-handshake-status-403-forbidden).
+- **`JWT mode requires a virtual proxy prefix in QLIK_SERVER_URL`.**
+  `QLIK_JWT_TOKEN` is set but `QLIK_SERVER_URL` has no path. See
+  [`AUTH_JWT.md` → "JWT mode requires a virtual proxy prefix"](AUTH_JWT.md#jwt-mode-requires-a-virtual-proxy-prefix-in-qlik_server_url).
+
+For JWT-specific debug logging (bootstrap URL, auto-detected session
+cookie name, CSRF token presence) see the "Everything looks right but
+requests still fail" entry in `docs/AUTH_JWT.md`.
 
 ## Hypercube errors
 
@@ -78,19 +109,41 @@ field. Common causes:
 
 ## Configuration self-test
 
+Field names below mirror `qlik_sense_mcp_server/config.py`
+(`QlikSenseConfig`). The `auth_mode` property resolves to `"jwt"` when
+`QLIK_JWT_TOKEN` is set, otherwise `"certificate"`.
+
 ```bash
 python -c "
 from qlik_sense_mcp_server.config import QlikSenseConfig
 cfg = QlikSenseConfig.from_env()
-print('server_url        =', cfg.server_url)
-print('user_directory    =', cfg.user_directory)
-print('user_id           =', cfg.user_id)
-print('client_cert_path  =', cfg.client_cert_path)
-print('verify_ssl        =', cfg.verify_ssl)
-print('repository_port   =', cfg.repository_port)
-print('engine_port       =', cfg.engine_port)
+print('auth_mode             =', cfg.auth_mode)
+print('server_url            =', cfg.server_url)
+print('qlik_hostname         =', cfg.qlik_hostname)
+print('virtual_proxy_prefix  =', cfg.virtual_proxy_prefix)
+print('user_directory        =', cfg.user_directory)
+print('user_id               =', cfg.user_id)
+print('client_cert_path      =', cfg.client_cert_path)
+print('client_key_path       =', cfg.client_key_path)
+print('verify_ssl            =', cfg.verify_ssl)
+print('ca_cert_path          =', cfg.ca_cert_path)
+print('repository_port       =', cfg.repository_port)
+print('proxy_port            =', cfg.proxy_port)
+print('engine_port           =', cfg.engine_port)
+print('http_port             =', cfg.http_port)
+print('jwt_token_set         =', bool(cfg.jwt_token))
+print('jwt_user_id_claim     =', cfg.jwt_user_id_claim)
+print('jwt_user_dir_claim    =', cfg.jwt_user_dir_claim)
+print('jwt_session_cookie    =', cfg.jwt_session_cookie_override)
 "
 ```
+
+In JWT mode the runtime values that matter most (auto-detected session
+cookie name, bootstrap URL, CSRF token presence) are not in the config
+object — they are produced during bootstrap. Run the server with
+`LOG_LEVEL=DEBUG` to see them on the first tool call (see "Verbose
+logging" below and the JWT-specific debug guidance in
+[`AUTH_JWT.md`](AUTH_JWT.md#everything-looks-right-but-requests-still-fail)).
 
 ## Verbose logging
 

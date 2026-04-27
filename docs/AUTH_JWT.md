@@ -285,3 +285,16 @@ each subsequent call.
   toward availability over rotation discipline. Pick what matches your
   policy; the default of 90 is deliberately short because bearer tokens
   have no individual revocation path.
+
+---
+
+## Related
+
+- [`docs/installation.md`](installation.md) — general install paths
+  (`uvx`, `pip`, source).
+- [`docs/configuration.md`](configuration.md) — full environment
+  variable index, including the JWT variables documented above.
+- [`docs/troubleshooting.md`](troubleshooting.md) — general
+  troubleshooting; the **JWT authentication problems** section there
+  cross-links back to the deep-dive entries on this page.
+- [`README.md`](../README.md) — project overview and quick start.

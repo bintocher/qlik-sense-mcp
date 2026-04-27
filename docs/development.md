@@ -35,9 +35,9 @@ through `make` targets. Each target bumps the version, commits the
 change and opens a pull request:
 
 ```bash
-make version-patch    # 1.4.0 -> 1.4.1
-make version-minor    # 1.4.0 -> 1.5.0
-make version-major    # 1.4.0 -> 2.0.0
+make version-patch    # 1.5.0 -> 1.5.1
+make version-minor    # 1.5.0 -> 1.6.0
+make version-major    # 1.5.0 -> 2.0.0
 ```
 
 The PyPI package version is read from `pyproject.toml`.
@@ -78,6 +78,22 @@ The PyPI package version is read from `pyproject.toml`.
      structured error envelope.
 4. Update [`docs/tools.md`](tools.md).
 5. Update [`CHANGELOG.md`](../CHANGELOG.md).
+
+New tools normally do not need any JWT-aware code: cert vs JWT auth is
+abstracted inside `QlikRepositoryAPI` / `QlikEngineAPI`, and the
+session bootstrap + cache lives in
+[`jwt_session.py`](../qlik_sense_mcp_server/jwt_session.py). Touch
+those modules only when you change the auth protocol itself.
+
+## Admin tooling
+
+[`tools/qlik_jwt_admin.py`](../tools/qlik_jwt_admin.py) is a standalone
+admin CLI for JWT mode. It generates the RSA keypair + self-signed
+X.509 certificate the Qlik QMC virtual proxy expects (`init-keys`) and
+issues per-analyst JWTs signed with that key (`issue-token`). It does
+not depend on the running MCP server. See
+[`docs/AUTH_JWT.md`](AUTH_JWT.md) for the full setup walkthrough,
+including the QMC fields and the security model.
 
 ## Release checklist
 

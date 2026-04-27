@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.5.1] - 2026-04-27
+
+### Changed
+- **Documentation overhaul.** All `.md` files reviewed for accuracy
+  against the v1.5.0 source: README highlights renamed to v1.5.0
+  with a JWT auth bullet, JWT row added to the documentation index,
+  `docs/configuration.md` gained a complete JWT environment-variable
+  reference (`QLIK_JWT_TOKEN`, `QLIK_JWT_USER_ID_CLAIM`,
+  `QLIK_JWT_USER_DIR_CLAIM`, `QLIK_JWT_SESSION_COOKIE`,
+  `QLIK_JWT_SESSION_TTL`), `docs/installation.md` gained a cert/JWT
+  branching note, `docs/architecture.md` documents the new
+  `JwtSession` component and `tools/qlik_jwt_admin.py` admin CLI,
+  `docs/troubleshooting.md` gained a JWT-authentication problems
+  section that cross-links into `docs/AUTH_JWT.md`, and
+  `docs/AUTH_JWT.md` gained a `Related` index. `COMMANDS.md` was
+  reduced to a true one-page cheatsheet pointing at the deeper
+  docs in `docs/`.
+
+### Fixed
+- **Release hygiene.** `qlik_sense_mcp_server/__init__.py` and
+  `.bumpversion.cfg` were not bumped during the 1.5.0 release and
+  still reported `1.4.1`. Both are brought back in sync with
+  `pyproject.toml` as part of this release.
+
 ## [1.5.0] - 2026-04-24
 
 ### Added
