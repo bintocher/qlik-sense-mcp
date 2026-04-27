@@ -10,7 +10,10 @@ qlik-sense-mcp/
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── engine_api.py     # Engine API (WebSocket) client
+│   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
 │   └── utils.py          # XSRF key generation, helpers
+├── tools/
+│   └── qlik_jwt_admin.py # Admin CLI: RSA keypair + JWT issuance (since v1.5.0)
 ├── docs/                 # All documentation (this folder)
 ├── tests/                # pytest suite
 ├── .env.example          # Configuration template
@@ -28,16 +31,33 @@ and exposes the resulting connection settings. Default ports match the
 standard
 [Qlik Sense Enterprise port allocation](https://help.qlik.com/en-US/sense-admin/Subsystems/DeployAdministerQSE/Content/Sense_DeployAdminister/QSEoW/Deploy_QSEoW/Ports.htm).
 
+### `JwtSession` ([jwt_session.py](../qlik_sense_mcp_server/jwt_session.py))
+
+Lazy, thread-safe holder of the bootstrapped Qlik session material for
+JWT mode. On first use it calls `GET /{vp_prefix}/qps/csrftoken` with
+`Authorization: Bearer <jwt>`, captures the resulting `X-Qlik-Session*`
+cookie and `qlik-csrf-token` header, and caches them for 25 minutes
+(below the 30-minute Qlik idle timeout). On a 401 / 403 from a later
+QRS or Engine call, both API clients invalidate the cache and trigger a
+transparent re-bootstrap. See [AUTH_JWT.md](AUTH_JWT.md) for the
+protocol-level details and the CSWSH rationale.
+
 ### `QlikRepositoryAPI` ([repository_api.py](../qlik_sense_mcp_server/repository_api.py))
 
 HTTP client for the Repository (QRS) API. Implements certificate auth,
 dynamic XSRF key generation, and the metadata, app, task and schedule
-endpoints used by the Repository / task tools.
+endpoints used by the Repository / task tools. Accepts an optional
+`JwtSession` — when present, it injects the bootstrapped session cookie
+plus `qlik-csrf-token` header on every request instead of presenting a
+client certificate.
 
 ### `QlikEngineAPI` ([engine_api.py](../qlik_sense_mcp_server/engine_api.py))
 
 WebSocket client for the Engine API. Speaks JSON-RPC 2.0. Hosts every
-data-side tool: hypercubes, fields, sheets, objects, script.
+data-side tool: hypercubes, fields, sheets, objects, script. Accepts
+the same optional `JwtSession`; in JWT mode the WebSocket handshake
+sends the cookie + csrf header (no `Authorization: Bearer` on the
+upgrade — that triggers Qlik's CSWSH rejection on Nov-2024+ servers).
 
 The two non-obvious parts:
 

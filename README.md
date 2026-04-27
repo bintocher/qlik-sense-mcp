@@ -33,12 +33,17 @@ variables — see [`docs/configuration.md`](docs/configuration.md).
 
 For stdio mode (legacy MCP transport), pass `--stdio`.
 
+Two authentication modes are supported: client certificate (legacy,
+full QRS access) and JWT via virtual proxy (per-analyst, no on-disk
+secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
+
 ## Documentation
 
 | Document | What's inside |
 |----------|---------------|
 | [`docs/installation.md`](docs/installation.md) | Requirements, install via `uvx` / `pip` / source, certificate setup |
 | [`docs/configuration.md`](docs/configuration.md) | All `QLIK_*` environment variables, sample `.env`, MCP client config snippet |
+| [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) | JWT authentication via virtual proxy: key generation, virtual proxy setup, `QLIK_JWT_TOKEN` usage |
 | [`docs/usage.md`](docs/usage.md) | Transports, server start commands, recommended call order, hard limits enforced by this server |
 | [`docs/tools.md`](docs/tools.md) | Inventory of all 24 tools, response/error envelope, error categories |
 | [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
@@ -46,8 +51,14 @@ For stdio mode (legacy MCP transport), pass `--stdio`.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.4.0 line
+## Key facts about the v1.5.0 line
 
+- **JWT authentication via virtual proxy.** Set `QLIK_JWT_TOKEN`
+  instead of certificate paths and the server will authenticate every
+  Repository and Engine call as the analyst encoded in the token. No
+  certificates or private keys live on the host. The legacy
+  certificate mode is unchanged and still required for full QRS access.
+  Setup guide: [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md).
 - **Cached Engine WebSocket connections.** Once an app is opened, every
   subsequent tool call against the same `app_id` reuses the same
   WebSocket and the same open document. Switching `app_id` closes the
