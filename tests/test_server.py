@@ -1,6 +1,8 @@
 """Tests for server module (FastMCP-based since v1.4.0)."""
 
 import json
+import re
+from pathlib import Path
 
 from qlik_sense_mcp_server import __version__
 from qlik_sense_mcp_server import server as srv
@@ -35,8 +37,16 @@ class TestVersion:
         for part in parts:
             assert part.isdigit()
 
-    def test_version_is_1_4_1(self):
-        assert __version__ == "1.4.1"
+    def test_version_matches_pyproject(self):
+        # Single source of truth: __version__ must equal the version in
+        # pyproject.toml. Both are bumped together by bump2version on release
+        # (see .bumpversion.cfg). Avoids a hardcoded literal that silently
+        # breaks CI on every version bump.
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        text = pyproject.read_text(encoding="utf-8")
+        match = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+        assert match is not None, "version not found in pyproject.toml"
+        assert __version__ == match.group(1)
 
 
 class TestFastMCPRegistration:
