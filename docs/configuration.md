@@ -7,13 +7,21 @@ server, or pass them via your MCP client's `env` block.
 
 ## Required variables
 
+Note: `QLIK_USER_DIRECTORY` and `QLIK_USER_ID` are NOT used in JWT mode —
+the user identity travels in the JWT payload. See
+[JWT authentication](#jwt-authentication) below.
+
 | Variable | Description |
 |----------|-------------|
-| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com` |
-| `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`) |
-| `QLIK_USER_ID` | User ID used for authentication |
+| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. |
+| `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode only. |
+| `QLIK_USER_ID` | User ID used for authentication. Cert mode only. |
 
 ## Certificate configuration
+
+This section applies to **cert mode only**. For the JWT alternative see
+[JWT authentication](#jwt-authentication) below and
+[AUTH_JWT.md](AUTH_JWT.md) for the full QMC virtual proxy setup.
 
 Required for production. If `QLIK_CA_CERT_PATH` is not set, SSL
 verification is disabled automatically.
@@ -23,6 +31,27 @@ verification is disabled automatically.
 | `QLIK_CLIENT_CERT_PATH` | Absolute path to the client certificate file (`.pem`) |
 | `QLIK_CLIENT_KEY_PATH` | Absolute path to the client private key file (`.pem`) |
 | `QLIK_CA_CERT_PATH` | Absolute path to the CA certificate file (`.pem`) |
+
+## JWT authentication
+
+JWT mode is selected automatically when `QLIK_JWT_TOKEN` is set. In this
+mode the MCP talks to a Qlik **JWT virtual proxy** over standard HTTPS/WSS
+(port 443) — no client certificates needed on the analyst's machine. See
+[AUTH_JWT.md](AUTH_JWT.md) for the full setup, including admin-side QMC
+virtual proxy configuration and key/token issuance.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QLIK_JWT_TOKEN` | unset | Signed JWT bearer token. Setting this switches the server to JWT mode. |
+| `QLIK_JWT_USER_ID_CLAIM` | `userId` | Name of the JWT payload claim holding the user ID. Must match the QMC virtual proxy's "JWT attribute for user ID". |
+| `QLIK_JWT_USER_DIR_CLAIM` | `userDirectory` | Name of the JWT payload claim holding the user directory. Must match the QMC virtual proxy's "JWT attribute for user directory". |
+| `QLIK_JWT_SESSION_COOKIE` | auto-detected | Override for the virtual proxy session cookie name. By default the MCP picks it up from the bootstrap response `Set-Cookie` header. |
+| `QLIK_JWT_SESSION_TTL` | `1500` | Seconds to cache the bootstrapped session before re-fetching. Lower this if the QMC Proxy "Session inactivity timeout" is below 30 minutes. |
+
+In JWT mode `QLIK_SERVER_URL` MUST include the virtual proxy prefix as
+URL path (e.g. `https://qlik.company.com/jwt`). `QLIK_USER_DIRECTORY`
+and `QLIK_USER_ID` are ignored — Qlik extracts the identity from the
+JWT payload itself.
 
 ## Network configuration
 
@@ -62,9 +91,11 @@ See [`.env.example`](../.env.example) at the repository root for a copy-pasteabl
 
 ## MCP client configuration
 
-The block below is a complete example of registering the server in an
-MCP client config. The example uses Streamable HTTP (the default), so the
+The blocks below are complete examples of registering the server in an
+MCP client config. The examples use Streamable HTTP (the default), so the
 client connects to the long-lived server process you start manually.
+
+### Cert mode
 
 ```jsonc
 {
@@ -94,3 +125,24 @@ client connects to the long-lived server process you start manually.
 ```
 
 A copy is also kept in [`mcp.json.example`](../mcp.json.example).
+
+### JWT mode
+
+Minimal config — two variables are enough. See
+[AUTH_JWT.md](AUTH_JWT.md) for the full version including optional
+overrides.
+
+```jsonc
+{
+  "mcpServers": {
+    "qlik-sense": {
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
+      "env": {
+        "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
+        "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
+      }
+    }
+  }
+}
+```

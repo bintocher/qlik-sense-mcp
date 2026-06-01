@@ -95,3 +95,7 @@ The categories you can see from `engine_create_hypercube`:
 - `engine_api_error` — invalid expression / unknown field. The full
   Engine error is in `error`.
 - `connection_error` — WebSocket connection problem.
+
+See [troubleshooting.md](troubleshooting.md) for remediation steps for
+each error category, including the typical fixes for `socket_timeout`
+and `engine_api_error`.

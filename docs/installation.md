@@ -23,7 +23,7 @@ uvx qlik-sense-mcp-server
 To pin a specific version:
 
 ```bash
-uvx qlik-sense-mcp-server@1.4.0
+uvx qlik-sense-mcp-server@1.5.0
 ```
 
 ## Install from PyPI via pip
@@ -46,6 +46,11 @@ in editable mode together with the optional `dev` extras
 (`build`, `twine`, `bump2version`, `pytest`, `pytest-asyncio`).
 
 ## Setup
+
+Two auth modes are supported. Cert mode (covered below) gives full QRS
+access and is required for admins. JWT mode is recommended for individual
+analysts — see [AUTH_JWT.md](AUTH_JWT.md) for the full setup, then come
+back here only for the install command (Step 1 above).
 
 1. Place certificates somewhere outside the repository:
    ```

@@ -13,6 +13,17 @@ The server speaks the two transports defined by the
   writes them to stdout. Use this when your MCP client wants to spawn the
   server as a subprocess on demand.
 
+## Authentication mode
+
+The server can connect to Qlik Sense Enterprise in one of two mutually
+exclusive modes: **certificate** (default — exported client certificate
++ key on port 4242 / 4747) or **JWT** (single bearer token issued
+through a JWT virtual proxy, no client certificate required). The mode
+is chosen by the env vars in your MCP client config; everything else —
+the tool surface, the Streamable HTTP transport, the connection cache —
+behaves identically. See [AUTH_JWT.md](AUTH_JWT.md) for the JWT setup,
+admin CLI and security model.
+
 ## Starting the server
 
 ```bash
