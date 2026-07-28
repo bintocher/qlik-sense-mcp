@@ -20,7 +20,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis"
 ]
 dependencies = [
-    "mcp>=1.1.0",
+    # mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp entirely — the whole
+    # FastMCP host this server is built on. Pin below 2.0 until the server is
+    # ported to the new mcp.server.mcpserver API.
+    "mcp>=1.1.0,<2.0.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
