@@ -43,15 +43,32 @@ See `docs/development.md` for tests, lint, and contribution flow.
 ## Release
 
 ```bash
-# Bump version, open PR (current line: 1.5.0)
-make version-patch  # 1.5.0 -> 1.5.1
-make version-minor  # 1.5.0 -> 1.6.0
-make version-major  # 1.5.0 -> 2.0.0
+# Bump version, open PR (current line: 1.6.0)
+make version-patch  # 1.6.0 -> 1.6.1
+make version-minor  # 1.6.0 -> 1.7.0
+make version-major  # 1.6.0 -> 2.0.0
 
 # After PR merge: tag and push — GitHub Actions publishes to PyPI
-git tag v1.5.1
-git push origin v1.5.1
+git tag v1.6.0
+git push origin v1.6.0
 ```
+
+## Query a top-N (the most common analysis call)
+
+```jsonc
+// engine_create_hypercube — GROUP BY + ORDER BY + LIMIT in one call
+{
+  "app_id": "<app guid>",
+  "dimensions": [{"field": "clientid"}],
+  "measures":   [{"expression": "Sum(ggr)", "label": "GGR"}],
+  "sort_by": "GGR",        // measure label, measure expression or dimension field
+  "sort_order": "desc",    // "asc" for bottom-N
+  "limit": 10
+}
+```
+
+Never fan these calls out in parallel — Qlik allows max 5 concurrent
+sessions per user and can lock the account. See `docs/usage.md`.
 
 ## JWT (admin)
 

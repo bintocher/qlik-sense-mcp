@@ -4,6 +4,89 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.6.0] - 2026-07-28
+
+### Added
+- **Real top-N support in `engine_create_hypercube`.** New `sort_by` and
+  `sort_order` parameters order the result by ANY column — a measure
+  label, a measure expression, or a dimension field name (matching
+  ignores case and square brackets). `sort_by` is translated into
+  `qInterColumnSortOrder` with that column first, plus the matching
+  `qSortBy` / `qSortCriterias` direction. Combined with `limit`, this
+  finally answers "the 10 clients with the highest GGR" in one call.
+- **`limit` parameter**, a clearer name for `max_rows`. `max_rows` still
+  works as an alias, so existing callers and saved prompts are
+  unaffected.
+- **`suppress_zero`** to drop rows whose measure is 0 — mainly useful
+  with `sort_order="asc"`, where zero-valued groups would otherwise fill
+  the whole result.
+- **Request echo on every failure.** Any error reply — raised exception
+  or an `{"error": ...}` payload, including timeouts — now carries
+  `tool` and `request` with the exact arguments that produced it. A
+  timeout finally says WHICH query timed out instead of just "timed out
+  after 180s". Implemented once in the `_timed` decorator, so it applies
+  to all tools.
+- **`timings` in the hypercube response**, split into
+  `open_app_seconds` (loading the app into Engine memory, paid only by
+  the first call against an app) and `get_layout_seconds` (the actual
+  computation) — so a slow call can be attributed instead of guessed at.
+- **Usage examples in every tool docstring**, with realistic arguments
+  and a shortened but structurally correct response.
+- **Qlik session-limit warning in the Engine tool docstrings and in
+  `docs/AUTH_JWT.md`**: Qlik permits at most 5 concurrent sessions per
+  user identity and can lock the account beyond that, so tool calls must
+  never be fanned out in parallel. This server deliberately funnels
+  everything through one cached Engine session.
+- `tests/test_hypercube.py` and `tests/test_tool_registration.py` — 52
+  new tests covering sort resolution, the generated `qHyperCubeDef`,
+  guard rails, the request echo and per-mode tool visibility.
+
+### Changed
+- **Reload-task tools are registered in certificate mode only.** They
+  call QRS endpoints that require repository-admin rights, which a JWT
+  analyst does not have, so JWT mode now advertises 12 tools instead of
+  24 rather than offering 12 that can only return 403.
+- **The hypercube response is compact by default.** It now returns
+  `columns` plus `rows` (plain values — numbers stay numbers) together
+  with `grand_total`, instead of the raw `qHyperCube` with its per-cell
+  `qElemNumber`/`qState` metadata. Pass `include_raw_layout=true` to get
+  the full Qlik layout back.
+- **`engine_create_hypercube`'s docstring was rewritten** around a
+  SQL analogy and three worked examples, and no longer recommends
+  `qSortByExpression` for ranking. Measured on a 91M-row table: sorting
+  by the measure column runs in 0.2s where `qSortByExpression` took
+  286s, because the latter makes the Engine compute the same aggregate a
+  second time purely to order rows.
+- **The `socket_timeout` hint now lists fixes in order of impact** and
+  names the correct environment variable (`QLIK_WS_TIMEOUT`; it
+  previously pointed at `QLIK_WS_OPERATION_TIMEOUT`, which does not
+  exist).
+- Truncation warnings distinguish a ranked query (expected: "showing the
+  10 highest rows of 1217") from an unsorted one (a real problem: the
+  returned rows are arbitrary).
+
+### Fixed
+- **Sorting by a measure never worked.** `qInterColumnSortOrder` was
+  hard-coded to `list(range(n_cols))`, so the first dimension always won
+  and the per-measure `qSortBy` was dead configuration. Any "top 10 by
+  revenue" request silently returned 10 alphabetically-first rows —
+  plausible-looking data in the wrong order. Verified against a live
+  91M-row app: the new ordering matches a reference sort computed
+  independently over all 1217 groups.
+- **`create_hypercube` mutated its caller's dictionaries**, injecting
+  default `sort_by` keys into the passed-in `dimensions` / `measures`
+  and then returning them as the "echoed input".
+- **Hypercube session objects were never released.** Each call left its
+  session object alive, pinning the result set in Engine memory for the
+  rest of the session; they are now destroyed after the data is read.
+- `DEFAULT_HYPERCUBE_MAX_ROWS` was imported in `engine_api.py` but
+  unused, while the default was hard-coded to 1000 in the signature.
+- Docstring corrections: `get_apps` documented QRS field names
+  (`modifiedDate`, `lastReloadTime`, `published`, `fileSize`) that the
+  tool does not return — it returns `modified_dttm` / `reload_dttm`;
+  `get_task_executions` documented snake_case keys where QRS returns
+  camelCase with `duration` in milliseconds.
+
 ## [1.5.1] - 2026-04-27
 
 ### Changed

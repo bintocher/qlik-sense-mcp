@@ -100,6 +100,50 @@ cascading the failure for the rest of the session. Now any timeout or
 parse error force-closes the socket via `_kill_socket()`, the cache is
 invalidated, and the next call opens a fresh connection.
 
+#### Hypercube sorting (since v1.6.0)
+
+`create_hypercube` accepts `sort_by` (a measure label, a measure
+expression, or a dimension field name) plus `sort_order`, and translates
+them into two coordinated parts of `qHyperCubeDef`:
+
+1. `qInterColumnSortOrder` is rebuilt with the requested column first.
+   Column indices are fixed by the Engine: dimensions occupy `0..D-1`,
+   measures `D..D+M-1`. This is the only mechanism that makes the Engine
+   order rows by a measure.
+2. The direction is written to that column's own criteria — `qSortBy`
+   (`qSortByNumeric` ±1) for a measure, `qSortCriterias` with both
+   `qSortByNumeric` and `qSortByAscii` for a dimension, so numeric and
+   text fields both sort correctly without the caller knowing the type.
+
+Both halves are required: a measure whose `qSortBy` is left at the Engine
+default ("ascending alphabetic") produces a nonsense order even when it
+leads `qInterColumnSortOrder`.
+
+Before v1.6.0 `qInterColumnSortOrder` was hard-coded to
+`list(range(n_cols))`, so the first dimension always won and per-measure
+sorting was dead configuration — top-N requests silently returned the
+alphabetically first rows.
+
+Ranking this way is also much cheaper than the `qSortByExpression`
+alternative, which makes the Engine evaluate the aggregate a second time
+purely to order rows. Measured against a live 91M-row app: 0.2s versus
+286s.
+
+Unknown `sort_by` / `sort_order` values fail fast with an
+`invalid_sort` error listing `available_columns`, before any Engine call
+— silently ignoring a sort would return plausible rows in the wrong
+order, which is worse than an error.
+
+#### Response shape
+
+The tool returns `columns` + `rows` (plain values, numbers preserved),
+`grand_total`, `sorted_by` / `sort_order`, and `timings` split into
+`open_app_seconds` and `get_layout_seconds`. The raw `qHyperCube` with
+per-cell `qElemNumber`/`qState` is opt-in via `include_raw_layout`,
+because it costs several times more tokens. The session object is
+destroyed once its data has been read, so results are not pinned in
+Engine memory for the rest of the session.
+
 #### Two-tier timeouts
 
 A single `QLIK_WS_TIMEOUT` environment variable (default `180.0s`)
@@ -120,9 +164,28 @@ tool is also wrapped in the local `_timed` decorator, which:
 1. Measures wall-clock time of the call.
 2. Injects `tool_call_seconds` as the **first** key of the JSON
    response.
-3. On exception, returns a structured `{tool_call_seconds, error,
-   error_type, tool}` envelope instead of letting the MCP layer turn
-   the traceback into something opaque.
+3. On failure, returns a structured `{tool_call_seconds, error,
+   error_type, tool, request}` envelope instead of letting the MCP layer
+   turn the traceback into something opaque. `request` is the exact
+   argument set the tool was called with, reconstructed from the
+   function signature via `inspect.signature().bind_partial()`. It is
+   attached both to raised exceptions and to `{"error": ...}` payloads
+   that tools return themselves (timeouts, bad field names, limit
+   violations) — a bare "timed out after 180s" does not tell the caller
+   which query to fix.
+
+#### Per-mode tool registration (since v1.6.0)
+
+Reload-task tools are declared with `@_cert_only_tool()` instead of
+`@mcp.tool()`. That decorator registers the function only when
+`config.auth_mode != jwt`, because QRS task administration
+(`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
+requires repository-admin rights that a JWT analyst identity does not
+have. JWT sessions therefore see 12 tools instead of 24, rather than 12
+that can only return 403.
+
+When the configuration fails to load entirely (`config is None`) every
+tool stays registered — that path serves `--help` and the test suite.
 
 The server runs in
 [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)

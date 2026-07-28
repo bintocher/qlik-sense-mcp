@@ -9,7 +9,8 @@
 Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
 (WebSocket) APIs as **24 MCP tools** so an LLM client can discover apps,
 inspect data models, build hypercubes, and manage reload tasks through
-a single uniform interface.
+a single uniform interface. In JWT mode the 12 reload-task tools are
+hidden, since QRS task administration needs certificate auth.
 
 ## What's in the box
 
@@ -17,9 +18,25 @@ a single uniform interface.
 |------|-------|----------|
 | Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
 | Engine (data & script)       | `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics`, `engine_create_hypercube` | Read load script, list visualizations, query field values, build hypercubes |
-| Reload tasks                 | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule` | Inspect, trigger and manage reload tasks |
+| Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule` | Inspect, trigger and manage reload tasks |
 
 Full list with descriptions: [`docs/tools.md`](docs/tools.md).
+
+The main analysis call maps onto SQL one-to-one — `dimensions` is the
+`GROUP BY`, `measures` are the aggregates, `sort_by` / `sort_order` are
+the `ORDER BY`, `limit` is the `LIMIT`:
+
+```jsonc
+// engine_create_hypercube — "the 10 clients with the highest GGR"
+{
+  "app_id": "<app guid>",
+  "dimensions": [{"field": "clientid"}],
+  "measures":   [{"expression": "Sum(ggr)", "label": "GGR"}],
+  "sort_by": "GGR",
+  "sort_order": "desc",
+  "limit": 10
+}
+```
 
 ## Quick start
 
@@ -51,8 +68,28 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.5.0 line
+## Key facts about the v1.6.0 line
 
+- **Ranked queries (top-N) in one call.** `engine_create_hypercube`
+  takes `sort_by` (a measure label, a measure expression or a dimension
+  field), `sort_order` (`desc` / `asc`) and `limit`, so "the 10 clients
+  with the highest GGR" is a single request. Before v1.6.0 sorting by a
+  measure silently did nothing — `qInterColumnSortOrder` was hard-coded
+  to the dimensions, so the server returned the alphabetically first
+  rows instead of the largest ones.
+- **Compact, LLM-friendly results.** The hypercube response is
+  `columns` + `rows` with real numbers, plus `grand_total` and
+  per-step `timings`. Pass `include_raw_layout=true` for the full Qlik
+  layout.
+- **Failures name the query that failed.** Every error reply, timeouts
+  included, echoes `tool` and `request` with the exact arguments sent.
+- **Fewer useless tools in JWT mode.** Reload-task administration needs
+  QRS admin rights, so those 12 tools are registered only in
+  certificate mode: 24 tools with a certificate, 12 with a JWT.
+- **One Qlik session per server.** Qlik allows max 5 concurrent
+  sessions per user and can lock the account beyond that, so all tool
+  calls share a single cached Engine session — never fan them out in
+  parallel.
 - **JWT authentication via virtual proxy.** Set `QLIK_JWT_TOKEN`
   instead of certificate paths and the server will authenticate every
   Repository and Engine call as the analyst encoded in the token. No
