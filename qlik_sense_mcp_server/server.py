@@ -834,6 +834,7 @@ def engine_create_hypercube(
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     suppress_zero: bool = False,
+    exclude_null_dimensions: bool = True,
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
 ) -> str:
@@ -1019,6 +1020,14 @@ def engine_create_hypercube(
         suppress_zero: Drop rows whose measure is 0. Default False.
             Useful for `sort_order="asc"`, where zero-valued groups
             would otherwise fill the entire result.
+        exclude_null_dimensions: Drop the row whose dimension value is
+            NULL — the one Qlik displays as `"-"`. Default True.
+            Facts that carry no value for the grouping field all pile
+            into that single row, so it frequently holds a large total
+            and wins the ranking, pushing the real values out of a
+            top-N. Pass False when you specifically want to see how much
+            data is unattributed — a large `"-"` row means the grouping
+            field is not linked to those facts in the data model.
         include_raw_layout: Also return the untouched Qlik `qHyperCube`
             (per-cell `qElemNumber`/`qState`, `qDimensionInfo`,
             `qMeasureInfo`). Default False, because it costs several
@@ -1074,6 +1083,7 @@ def engine_create_hypercube(
             sort_order=sort_order,
             suppress_zero=suppress_zero,
             include_raw_layout=include_raw_layout,
+            exclude_null_dimensions=exclude_null_dimensions,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the
