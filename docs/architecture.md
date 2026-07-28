@@ -197,6 +197,21 @@ tool is also wrapped in the local `_timed` decorator, which:
    violations) — a bare "timed out after 180s" does not tell the caller
    which query to fix.
 
+#### Why failures are not flagged as protocol-level errors
+
+Tool failures come back as an ordinary MCP result whose payload contains
+`error`, `error_category`, `hint` and `request` — `isError` stays false.
+This is deliberate. The consumer here is a language model deciding what
+to do next, and the structured payload is what lets it act: the category
+tells it whether to narrow the query or fix a field name, and `request`
+tells it exactly what it sent. Clients that surface `isError` tend to
+collapse the result into a generic failure message and drop that
+payload, which would leave the model with nothing to correct.
+
+The trade-off is that a client keying retries off the protocol-level
+error status will treat a timeout as a success. Such a client should
+branch on the `error` key instead.
+
 #### Per-mode tool registration (since v1.6.0)
 
 Reload-task tools are declared with `@_cert_only_tool()` instead of

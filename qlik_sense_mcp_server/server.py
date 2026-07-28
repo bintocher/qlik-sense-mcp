@@ -1016,19 +1016,22 @@ def engine_create_hypercube(
             no expression. Omit or pass `[]` for a grand-total row.
             Advanced: an optional `"sort_by"` object per dimension maps
             straight onto Qlik `qSortCriterias`
-            (`qSortByNumeric` / `qSortByAscii` / `qSortByExpression` +
-            `qExpression`, each -1 desc / 0 off / 1 asc). The top-level
-            `sort_by` argument overrides it and is what you normally want.
+            (`qSortByNumeric` / `qSortByAscii` / `qSortByExpression`, each
+            -1 desc / 0 off / 1 asc, plus `qExpression`, accepted either
+            as a plain string or in Qlik's native `{"qv": "..."}` form).
+            The top-level `sort_by` argument overrides it and is what you
+            normally want.
         measures: Aggregate expressions. Each item is
             `{"expression": "Sum(Amount)", "label": "Revenue"}`. Always
             give a `label` — it is the column name AND the value you pass
             to `sort_by`. Any Qlik aggregation works: Sum, Count,
             Count(DISTINCT ...), Avg, Min, Max, Only, FirstSortedValue,
             RangeSum.
-        limit: Max rows to return (the SQL LIMIT). Default 1000, hard cap
-            5000. Also capped by `columns * limit <= 9900` (Qlik itself
-            refuses pages over 10000 cells). For ranked queries a small
-            limit (10-50) is both faster and easier to read.
+        limit: Max rows to return (the SQL LIMIT). Default 1000, must be
+            at least 1, hard cap 5000. Also capped by
+            `columns * limit <= 9900` (Qlik itself refuses pages over
+            10000 cells). For ranked queries a small limit (10-50) is
+            both faster and easier to read.
         sort_by: Name of the column to order by — a measure `label`, a
             measure expression, or a dimension field name. Case- and
             bracket-insensitive; a measure wins over a dimension of the
@@ -1074,6 +1077,7 @@ def engine_create_hypercube(
     Errors return `error`, `error_category` and an actionable `hint`:
         `invalid_sort` — `sort_by` matched no column; the response lists
             `available_columns`.
+        `invalid_limit` — `limit` was not a positive integer.
         `limit_exceeded` — limit above 5000.
         `cell_cap_exceeded` — columns * limit above 9900; the hint gives
             a concrete smaller limit.

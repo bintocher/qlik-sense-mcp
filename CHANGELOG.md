@@ -22,9 +22,34 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   here instead of in a user's terminal.
 
 ### Changed
-- **Dependency relaxed to `mcp>=1.1.0,<3.0.0`.** The `<2.0.0` pin from
-  1.6.1 is no longer needed. The upper bound is kept so the next
-  breaking SDK major cannot break installs again.
+- **Dependency is now `mcp>=1.8.0,<3.0.0`.** The `<2.0.0` pin from 1.6.1
+  is no longer needed. The floor was raised from the long-standing (and
+  incorrect) `1.1.0`: `FastMCP.run_streamable_http_async()` — the default
+  transport — first appears in 1.8.0, so 1.2–1.7 would install happily
+  and then die with `AttributeError` on startup, and 1.1 has no
+  `FastMCP` at all. The upper bound keeps the next breaking SDK major
+  from breaking installs again.
+
+### Fixed
+*(found by an automated review of this release)*
+- **Hypercube session objects leaked on every failure after creation.**
+  `DestroySessionObject` ran only on the success path, so a malformed
+  layout or an Engine error left the result set pinned in Engine memory
+  for the rest of the (deliberately long-lived) session. Cleanup moved
+  into a `finally`; it is skipped only when the socket has already been
+  force-closed, where there is nothing left to talk to.
+- **`limit=0` or a negative limit silently returned one row.** The page
+  height was clamped with `max(1, ...)`, so a nonsensical limit produced
+  data instead of an error. Non-positive and non-integer limits now
+  return a structured `invalid_limit` error before any Engine call.
+- **A dimension sort expression given in Qlik's native `{"qv": "..."}`
+  form was double-wrapped** into `{"qv": {"qv": "..."}}` and silently
+  ignored by the Engine. Both that form and a plain string are now
+  accepted.
+- Corrected the comment and docs around the automatic `qSuppressMissing`
+  applied when ranking by a measure: it is a cube-wide flag that drops
+  rows where *any* measure is missing, not only the ranked one. The
+  Engine offers no per-measure equivalent.
 
 ### Verified
 - Both SDK lines were exercised end to end: full test suite on mcp
