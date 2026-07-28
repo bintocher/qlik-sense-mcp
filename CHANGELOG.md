@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.6.1] - 2026-07-28
+
+### Fixed
+- **The NULL dimension row no longer hijacks a ranking.** Facts that
+  carry no value for the grouping field all collapse into a single row
+  that Qlik renders as `"-"`, so that row often holds a very large total
+  and takes first place in a top-N, pushing out every real value.
+  `engine_create_hypercube` now sets `qNullSuppression` on every
+  dimension. Observed on a live app: the `"-"` row held the entire
+  measure total and occupied rank 1 of the result.
+
+### Added
+- **`exclude_null_dimensions`** on `engine_create_hypercube`, default
+  `True`. Pass `False` to keep the `"-"` row — useful precisely when you
+  want to measure how much data is unattributed, since a large `"-"`
+  total means the grouping field is not linked to those facts in the
+  data model.
+
 ## [1.6.0] - 2026-07-28
 
 ### Added

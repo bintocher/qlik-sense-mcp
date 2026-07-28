@@ -1201,6 +1201,7 @@ class QlikEngineAPI:
         sort_order: str = "desc",
         suppress_zero: bool = False,
         include_raw_layout: bool = False,
+        exclude_null_dimensions: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
@@ -1212,6 +1213,13 @@ class QlikEngineAPI:
         computed measure column costs nothing extra, unlike
         `qSortByExpression`, which makes the Engine evaluate the aggregate
         a second time purely for ordering.
+
+        `exclude_null_dimensions` (default True) sets `qNullSuppression`
+        on every dimension, dropping the row whose dimension value is
+        NULL (Qlik renders it as "-"). Unattributed facts often
+        accumulate into that single row, which then wins the ranking and
+        pushes out the real values — a top-10 that starts with "unknown"
+        is rarely what the caller wanted.
         """
         import time
         import traceback as _tb
@@ -1432,7 +1440,7 @@ class QlikEngineAPI:
                                 }
                             ],
                         },
-                        "qNullSuppression": False,
+                        "qNullSuppression": bool(exclude_null_dimensions),
                         "qIncludeElemValue": True,
                     }
                     for dim in converted_dimensions

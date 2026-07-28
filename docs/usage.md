@@ -98,6 +98,14 @@ Engine evaluate the same aggregate a second time just to order rows. On
 a 91M-row app, ranking by the measure column returned in 0.2s where the
 `qSortByExpression` form took 286s.
 
+Rows whose dimension value is NULL — displayed by Qlik as `"-"` — are
+dropped by default (`exclude_null_dimensions`). Facts that carry no
+value for the grouping field all pile into that one row, so it tends to
+hold a large total and win the ranking. Pass
+`"exclude_null_dimensions": false` when you specifically want to see how
+much data is unattributed: a large `"-"` total means the grouping field
+is not linked to those facts in the data model.
+
 ## One session at a time
 
 Qlik Sense allows at most **5 concurrent sessions per user identity**,

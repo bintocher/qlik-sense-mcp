@@ -134,6 +134,13 @@ Unknown `sort_by` / `sort_order` values fail fast with an
 — silently ignoring a sort would return plausible rows in the wrong
 order, which is worse than an error.
 
+Since v1.6.1 every dimension also carries `qNullSuppression` (opt out
+with `exclude_null_dimensions=False`). Facts that carry no value for the
+grouping field collapse into one row that Qlik renders as `"-"`, and
+that row frequently holds a large enough total to win the ranking. On a
+live app it held the entire measure total and took rank 1, hiding every
+real value behind it.
+
 #### Response shape
 
 The tool returns `columns` + `rows` (plain values, numbers preserved),
