@@ -2,6 +2,7 @@
 
 import asyncio
 import functools
+import inspect
 import json
 import ssl
 import sys
@@ -96,11 +97,36 @@ _init_clients()
 
 # ─── FastMCP server ─────────────────────────────────────────────────────────
 
+_mcp_port = int(os.getenv("MCP_PORT", "8000"))
 mcp = FastMCP(
     "qlik-sense-mcp-server",
     host="127.0.0.1",
-    port=8000,
+    port=_mcp_port,
 )
+
+# Reload-task management talks to QRS endpoints (/qrs/reloadtask,
+# /qrs/executionresult, /qrs/reloadtask/{id}/scriptlog) that require
+# repository-admin rights. A JWT analyst reaches QRS through the virtual
+# proxy as an ordinary user and gets 403s there, so advertising those
+# tools in JWT mode only invites the LLM to burn turns on calls that
+# cannot succeed. They are therefore registered in certificate mode only.
+#
+# When the configuration failed to load at all (`config is None`) every
+# tool stays registered — that path is used by `--help` and the tests,
+# and hiding tools there would just be confusing.
+_CERT_ONLY_TOOLS_ENABLED = config is None or config.auth_mode != AUTH_MODE_JWT
+if not _CERT_ONLY_TOOLS_ENABLED:
+    logger.info(
+        "JWT mode: reload-task tools are not registered (QRS task "
+        "administration requires certificate mode)."
+    )
+
+
+def _cert_only_tool():
+    """Register an MCP tool only when running in certificate mode."""
+    def decorator(fn):
+        return mcp.tool()(fn) if _CERT_ONLY_TOOLS_ENABLED else fn
+    return decorator
 
 
 def _err(msg: str, **extra: Any) -> str:
@@ -120,6 +146,25 @@ def _check() -> Optional[str]:
     return None
 
 
+def _describe_call(sig: Optional[inspect.Signature], args, kwargs) -> Dict[str, Any]:
+    """
+    Reconstruct the arguments a tool was called with, for error replies.
+
+    A bare "timed out after 180s" is useless to the caller: the whole
+    point of the echo is that the LLM can see WHICH query it sent, spot
+    the expensive dimension or the missing set-analysis filter, and
+    retry with something cheaper.
+    """
+    if sig is not None:
+        try:
+            bound = sig.bind_partial(*args, **kwargs)
+            bound.apply_defaults()
+            return dict(bound.arguments)
+        except Exception:
+            pass
+    return {"args": list(args), "kwargs": dict(kwargs)}
+
+
 def _timed(func):
     """
     Decorator for MCP tools: measures wall-clock time and injects
@@ -127,7 +172,16 @@ def _timed(func):
 
     Works with tools that return a JSON string (via _ok / _err).
     If the result is not a JSON dict, wraps it into one.
+
+    Any error reply — raised exception or an `{"error": ...}` payload
+    returned by the tool itself — is annotated with the exact request
+    that produced it (`tool` + `request`).
     """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):  # pragma: no cover - builtins only
+        sig = None
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         t0 = time.monotonic()
@@ -142,9 +196,11 @@ def _timed(func):
                     "error": str(ex) or repr(ex),
                     "error_type": type(ex).__name__,
                     "tool": func.__name__,
+                    "request": _describe_call(sig, args, kwargs),
                 },
                 indent=2,
                 ensure_ascii=False,
+                default=str,
             )
         elapsed = round(time.monotonic() - t0, 3)
         if isinstance(result, str):
@@ -159,7 +215,13 @@ def _timed(func):
             if isinstance(parsed, dict):
                 new_dict = {"tool_call_seconds": elapsed}
                 new_dict.update(parsed)
-                return json.dumps(new_dict, indent=2, ensure_ascii=False)
+                if "error" in new_dict:
+                    # Tools report expected failures (timeout, bad field,
+                    # limit exceeded) as a payload rather than an
+                    # exception — echo the request for those too.
+                    new_dict.setdefault("tool", func.__name__)
+                    new_dict.setdefault("request", _describe_call(sig, args, kwargs))
+                return json.dumps(new_dict, indent=2, ensure_ascii=False, default=str)
             return json.dumps(
                 {"tool_call_seconds": elapsed, "result": parsed},
                 indent=2,
@@ -313,6 +375,12 @@ def get_about() -> str:
 
     Returns:
         JSON with fields: buildVersion, buildDate, databaseProvider, nodeType, sharedPersistence, requiresBootstrap.
+    
+    Example:
+        Call: {}
+        Returns: {"tool_call_seconds": 0.21, "buildVersion": "31.56.2.0",
+                  "buildDate": "10/24/2025 09:43:09 AM", "nodeType": 1,
+                  "sharedPersistence": true, "requiresBootstrap": false}
     """
     e = _check()
     if e:
@@ -348,8 +416,27 @@ def get_apps(
             published apps; `"false"` — unpublished; any other value — both.
 
     Returns:
-        JSON with `apps` (list of {guid, name, stream, description, modifiedDate,
-        lastReloadTime, published, fileSize}) and `pagination` metadata.
+        JSON with `apps` (list of {guid, name, description, stream,
+        modified_dttm, reload_dttm}) and `pagination` metadata.
+    
+    Example (find an app by a fragment of its name):
+        Call: {"name": "Sales", "limit": 5}
+        Returns: {"tool_call_seconds": 0.53,
+                  "apps": [{"guid": "a1b2c3d4-1111-2222-3333-444455556666",
+                            "name": "Sales Dashboard", "description": "...",
+                            "stream": "Finance",
+                            "modified_dttm": "2026-07-20T09:15:00.000Z",
+                            "reload_dttm": "2026-07-27T03:00:00.000Z"}],
+                  "pagination": {"limit": 5, "offset": 0, "returned": 1,
+                                 "total_found": 1, "has_more": false,
+                                 "next_offset": null}}
+
+    Example (next page of all published apps):
+        Call: {"limit": 25, "offset": 25}
+        Returns: {"tool_call_seconds": 0.61, "apps": ["...25 items..."],
+                  "pagination": {"limit": 25, "offset": 25, "returned": 25,
+                                 "total_found": 1102, "has_more": true,
+                                 "next_offset": 50}}
     """
     e = _check()
     if e:
@@ -386,6 +473,28 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         non-system, non-hidden field with its table, is_key flag, distinct_values,
         row count, and tags). Use the `fields` list to check field names and
         cardinalities before writing hypercube dimensions.
+    
+    Example:
+        Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 2.84,
+                  "metainfo": {"app_id": "a1b2...", "name": "Sales Dashboard",
+                               "stream": "Finance",
+                               "reload_dttm": "2026-07-27T03:00:00.000Z"},
+                  "warnings": ["Large fact table(s) detected ..."],
+                  "tables": [{"name": "Orders", "fields_count": 12,
+                              "rows": 91028794}],
+                  "fields": [{"name": "Amount", "table": "Orders",
+                              "is_key": false, "distinct_values": 9797173,
+                              "rows": 91028794, "tags": ["$numeric"]}],
+                  "tables_count": 8, "fields_count": 120}
+
+    Read `warnings` first — it tells you which tables are too big to
+    aggregate without a set-analysis filter.
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -557,6 +666,18 @@ def get_app_script(app_id: str) -> str:
     Returns:
         JSON with `qScript` (the full script as a single string),
         `script_length` (character count), and `app_id`.
+    
+    Example:
+        Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 1.12,
+                  "qScript": "SET ThousandSep=' ';\nOrders:\nLOAD ... FROM ...",
+                  "app_id": "a1b2c3d4-1111-2222-3333-444455556666",
+                  "script_length": 14872}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -614,6 +735,28 @@ def get_app_field_statistics(
         max_value, null_percentage, completeness_percentage. If `full=True`,
         also avg_value/sum_value/median_value/mode_value/std_deviation. Each
         stat is `{text, numeric, is_numeric}`.
+    
+    Example (default light mode):
+        Call: {"app_id": "a1b2...", "field_name": "Amount"}
+        Returns: {"tool_call_seconds": 3.4, "field_name": "Amount",
+                  "unique_values": {"text": "9421", "numeric": 9421,
+                                    "is_numeric": true},
+                  "total_count": {"...": "..."},
+                  "non_null_count": {"...": "..."},
+                  "min_value": {"...": "..."}, "max_value": {"...": "..."},
+                  "null_percentage": 0.67, "completeness_percentage": 99.33,
+                  "debug_log": ["..."]}
+
+    Example (full mode — adds avg/sum/median/mode/stdev, slow):
+        Call: {"app_id": "a1b2...", "field_name": "Amount", "full": true}
+        Returns: {"tool_call_seconds": 41.7, "avg_value": {"...": "..."},
+                  "sum_value": {"...": "..."}, "median_value": {"...": "..."},
+                  "mode_value": {"...": "..."}, "std_deviation": {"...": "..."}}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -655,6 +798,21 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
     Returns:
         JSON `{ "field_name": ..., "unique_values": {text,numeric},
         "min_value": {text,numeric}, "max_value": {text,numeric} }`.
+    
+    Example:
+        Call: {"app_id": "a1b2...", "field_name": "OrderDate"}
+        Returns: {"tool_call_seconds": 0.9, "field_name": "OrderDate",
+                  "unique_values": {"text": "939", "numeric": 939,
+                                    "is_numeric": true},
+                  "min_value": {"text": "2024-01-01", "numeric": 45292,
+                                "is_numeric": true},
+                  "max_value": {"text": "2026-07-27", "numeric": 46230,
+                                "is_numeric": true}}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -672,234 +830,257 @@ def engine_create_hypercube(
     app_id: str,
     dimensions: Optional[List[Dict[str, Any]]] = None,
     measures: Optional[List[Dict[str, Any]]] = None,
-    max_rows: int = DEFAULT_HYPERCUBE_MAX_ROWS,
+    limit: int = DEFAULT_HYPERCUBE_MAX_ROWS,
+    sort_by: Optional[str] = None,
+    sort_order: str = "desc",
+    suppress_zero: bool = False,
+    include_raw_layout: bool = False,
+    max_rows: Optional[int] = None,
 ) -> str:
     """
-    Build a Qlik Engine hypercube (grouped aggregation) and return its rows.
-    This is the MAIN data-analysis tool — use it for anything shaped like a
-    SQL `SELECT ... GROUP BY ... ORDER BY`.
+    Run a grouped aggregation against a Qlik app and return the rows.
+    This is the MAIN data-analysis tool. It is the Qlik equivalent of:
 
-    BEFORE CALLING:
-      1. Call `get_app_details` first to learn the exact field names AND
-         `distinct_values` of every field. Field names are case-sensitive
-         and must match the data model. All examples below use generic
-         placeholders `<DimA>`, `<DimB>`, `<MetricX>` — substitute with
-         the REAL field names from `get_app_details`.
-      2. ESTIMATE THE RESULT SIZE BEFORE SENDING THE REQUEST. Multiply
-         the `distinct_values` of every dimension you plan to include.
-         That product is the MAXIMUM possible row count — if it exceeds
-         5000, you MUST either:
-           (a) narrow the scope via set analysis inside the measures
-               (the dimensions themselves can't be filtered this way —
-               see RULE #2 below), OR
-           (b) drop one of the dimensions, OR
-           (c) switch to a top-N pattern (`max_rows=15` +
-               `qSortByExpression` on the ranking), OR
-           (d) split the problem into N separate hypercubes, each
-               slicing by one value of a categorical dimension.
-         Generic example: dims=[<DimA> (10 distinct), <DimB> (5000
-         distinct)] → worst case 10*5000 = 50,000 rows → TOO BIG.
-         Fix: drop <DimB> or filter it via
-         `Sum({<[<DimB>]={'<val1>'}>}<MetricX>)` on the measure side,
-         or run 10 separate cubes (one per value of <DimA>).
-      3. Read `get_app_script` to understand how calendar / derived
-         fields are built in the specific app — it matters for set
-         analysis. NEVER assume field names from examples.
-      4. Use `get_app_variables` to discover named set-analysis
-         shortcuts already defined in the app (e.g. `$(<varName>)`).
+        SELECT <dimensions>, <measures>
+        FROM <app>
+        GROUP BY <dimensions>
+        ORDER BY <sort_by> <sort_order>
+        LIMIT <limit>
 
-    ────────────────────────────────────────────────────────────────────────
-    RULE #1 — ALWAYS USE SET ANALYSIS, NEVER `If()` INSIDE A MEASURE
-    ────────────────────────────────────────────────────────────────────────
-    `If()` inside an aggregate is a per-row scan of the entire fact table.
-    Set analysis `{<Field={values}>}` is an index lookup on the symbol
-    table BEFORE aggregation. On a huge fact table that's the difference
-    between minutes and milliseconds.
+    `dimensions` are the GROUP BY columns, `measures` are the aggregates,
+    `sort_by` + `sort_order` are the ORDER BY, and `limit` is the LIMIT.
 
-    BAD  (DO NOT USE):
-        Sum(If(<DimYear>=2025, <MetricX>))
-        Count(If(<DimPeriod>='<val1>' and <DimYear>=2025, <KeyField>))
-        Sum(If([<DimCat>]='<val1>', <MetricX>))
-    GOOD:
-        Sum({<[<DimYear>]={2025}>}<MetricX>)
-        Count({<[<DimPeriod>]={'<val1>'}, [<DimYear>]={2025}>}<KeyField>)
-        Sum({<[<DimCat>]={'<val1>'}>}<MetricX>)
+    ────────────────────────────────────────────────────────────────────
+    EXAMPLE 1 — TOP-N (the most common request)
+    ────────────────────────────────────────────────────────────────────
+    "Give me the 10 clients with the highest GGR":
 
-    SET ANALYSIS QUICK REFERENCE (substitute field names and values from
-    the real app — do NOT copy these placeholders verbatim):
-      • Numeric ($integer/$numeric) field: no quotes
-          `{<[<DimNum>]={2025}>}`
-      • Text field: single quotes
-          `{<[<DimText>]={'<val1>','<val2>'}>}`
-      • Wildcard search: double quotes
-          `{<[<DimText>]={"*<substring>*"}>}`
-      • Multiple values (OR): comma list
-          `{<[<DimText>]={'<v1>','<v2>','<v3>'}>}`
-      • Multiple fields (AND): comma in modifier
-          `{<[<DimA>]={1},[<DimB>]={'<v>'}>}`
-      • Reset a filter: empty value
-          `{<[<Dim>]=>}` ignores any current selection on <Dim>
-      • Ignore ALL current selections: prefix with `1`
-          `{1<[<Dim>]={<v>}>}`
-      • Range on numeric/date:
-          `{<[<DimDate>]={">=$(=Num(MonthStart(Today())))"}>}`
-      • Combine sets: union `+`, intersect `*`, exclude `-`
-          `Sum({<[<Dim>]={<v1>}>+<[<Dim>]={<v2>}>}<MetricX>)`
-      • P() = "values that have ever satisfied":
-          `{<[<Key>]=P({<[<Flag>]={1}>}[<Key>])>}`
-      • E() = "values that have NEVER satisfied":
-          `{<[<Key>]=E({<[<Flag>]={1}>}[<Key>])>}`
-      • Period-over-period ratio:
-          `Sum({<[<DimYear>]={<Y2>}>}<MetricX>) /
-           Sum({<[<DimYear>]={<Y1>}>}<MetricX>) - 1`
+        {
+          "app_id": "a1b2c3d4-1111-2222-3333-444455556666",
+          "dimensions": [{"field": "clientid"}],
+          "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
+          "sort_by": "GGR",
+          "sort_order": "desc",
+          "limit": 10
+        }
 
-    ────────────────────────────────────────────────────────────────────────
-    RULE #2 — NEVER PUT EXPRESSIONS IN `qFieldDefs` (DIMENSION FIELD)
-    ────────────────────────────────────────────────────────────────────────
-    A dimension's `field` parameter must be a PLAIN FIELD NAME from the
-    data model. If you put an `=expression` there, Qlik evaluates it for
-    EVERY ROW of the underlying table (not for distinct values, not
-    cached) — and it won't use any indexes. On a huge fact table this
-    is a guaranteed timeout.
+    Returns (shortened):
 
-    BAD  (DO NOT USE):
-        {"field": "=Date(<DimDate>)"}            # per-row function call
-        {"field": "=Year(<DimDate>)"}            # per-row function call
-        {"field": "=Month(<DimDate>)"}           # per-row function call
-        {"field": "=If(<MetricX>>0,'A','B')"}    # per-row If() call
-    GOOD:
-        {"field": "<DimDate>"}                   # use the raw field
-        {"field": "<DimYear>"}                   # use a pre-built bucket
-        {"field": "<DimMonth>"}                  # if one exists already
+        {
+          "tool_call_seconds": 4.1,
+          "columns": ["clientid", "GGR"],
+          "rows": [["1042", 918450.5], ["8871", 764300.0]],
+          "total_rows": 5417612,
+          "returned_rows": 10,
+          "sorted_by": "GGR",
+          "sort_order": "desc",
+          "grand_total": [95552568044.93],
+          "timings": {"open_app_seconds": 0.01, "get_layout_seconds": 3.9}
+        }
 
-    HOW TO HANDLE A "MISSING" DERIVED FIELD:
-      If the data model has only a raw date dimension but you need
-      monthly buckets, DO NOT compute a derived value in the dimension.
-      Instead:
-        1. Check `get_app_details` first — there's often already a
-           calendar field (month / year / quarter / week / day-of-week).
-           Use it directly. Names vary per app — READ the field list.
-        2. If genuinely missing, just request the raw date as a
-           dimension and aggregate the resulting 30-365 rows yourself
-           on the client side. That's way cheaper than a per-row
-           expression.
+    `total_rows` is how many groups exist on the server; `returned_rows`
+    is how many came back. For a ranked query that difference is normal
+    and expected — you asked for the top 10 of 5.4 million.
 
-    THE ONE EXCEPTION: `qSortByExpression` is fine — it evaluates the
-    expression per GROUP after aggregation, not per row. That's where
-    you put `Sum({<...>}<MetricX>)` for "sort top-N by metric".
+    For the BOTTOM 10 use `"sort_order": "asc"` (add
+    `"suppress_zero": true` to skip groups whose measure is 0).
 
-    ────────────────────────────────────────────────────────────────────────
-    PERFORMANCE TIPS
-    ────────────────────────────────────────────────────────────────────────
-      - High-cardinality dimensions (>1M distinct values) with
-        `qSortByExpression` force the engine to fully materialize and
-        sort the whole set. On large apps this can take minutes. Keep
-        measures simple, prefer `Sum()` over `Aggr()`, and keep
-        `max_rows` small (15-50) when sorting by expression.
-      - `Aggr()` expressions over high-cardinality dimensions are
-        especially expensive — they build an in-memory pivot per group.
-        Avoid if you can.
-      - Always narrow the period with set analysis before aggregating —
-        a small period filter can cut a billion-row scan by orders of
-        magnitude.
-      - Raise the `QLIK_WS_TIMEOUT` environment variable if you get
-        "WebSocket recv() timed out" on legitimately heavy computations.
+    ────────────────────────────────────────────────────────────────────
+    EXAMPLE 2 — a single total, no grouping
+    ────────────────────────────────────────────────────────────────────
+    "What is the total GGR and the loaded date range?":
+
+        {
+          "app_id": "...",
+          "measures": [
+            {"expression": "Sum(ggr)",       "label": "GGR"},
+            {"expression": "Min(OrderDate)", "label": "FirstDate"},
+            {"expression": "Max(OrderDate)", "label": "LastDate"}
+          ],
+          "limit": 1
+        }
+
+    Omit `dimensions` entirely for a grand-total row. This is the fast,
+    correct way to learn an app's loaded period — never use
+    `get_app_field_statistics` on a date field for that.
+
+    ────────────────────────────────────────────────────────────────────
+    EXAMPLE 3 — filtered breakdown (set analysis)
+    ────────────────────────────────────────────────────────────────────
+    "Revenue by region for 2026 only, biggest first":
+
+        {
+          "app_id": "...",
+          "dimensions": [{"field": "Region"}],
+          "measures": [
+            {"expression": "Sum({<[Year]={2026}>}Amount)", "label": "Revenue2026"}
+          ],
+          "sort_by": "Revenue2026",
+          "sort_order": "desc",
+          "limit": 20
+        }
+
+    ────────────────────────────────────────────────────────────────────
+    HOW TO GET IT RIGHT (and fast)
+    ────────────────────────────────────────────────────────────────────
+    1. Call `get_app_details` FIRST. Field names are case-sensitive and
+       must exist in the data model. It also gives you `distinct_values`
+       per field, which tells you how many rows your query can produce.
+
+    2. FILTER INSIDE MEASURES WITH SET ANALYSIS, NEVER WITH `If()`.
+       `If()` scans every row of the fact table; set analysis is an
+       index lookup done before aggregation. On a 100M-row table that is
+       the difference between minutes and milliseconds.
+           BAD:  Sum(If(Year=2026, Amount))
+           GOOD: Sum({<[Year]={2026}>}Amount)
+       Quick reference (substitute real field names and values):
+         numeric field   {<[Year]={2026}>}
+         text field      {<[Region]={'North','South'}>}
+         wildcard        {<[Region]={"*ampton*"}>}
+         two fields AND  {<[Year]={2026},[Region]={'North'}>}
+         ignore filters  {1<[Region]={'North'}>}
+         ever matched    {<[Client]=P({<[Flag]={1}>}[Client])>}
+         never matched   {<[Client]=E({<[Flag]={1}>}[Client])>}
+
+    3. A DIMENSION `field` MUST BE A PLAIN FIELD NAME — never an
+       expression. `{"field": "=Year(OrderDate)"}` is evaluated for
+       every row of the fact table and will time out. If you need
+       monthly buckets, look for an existing calendar field in
+       `get_app_details`; if there is none, group by the raw date and
+       aggregate the handful of returned rows yourself.
+
+    4. To rank by an aggregate, use `sort_by` — do NOT hand-roll
+       `qSortByExpression` in the dimension. `sort_by` orders by the
+       measure column that was already computed, while
+       `qSortByExpression` makes the Engine compute the same aggregate a
+       SECOND time just for ordering (measured: 66s → 286s on a 91M-row
+       table, and it can silently return a wrong order).
+
+    5. If a call is slow, read `timings` in the response. It splits the
+       time into `open_app_seconds` (loading the app into Engine memory —
+       only the first call against an app pays this) and
+       `get_layout_seconds` (the actual computation). A large
+       `get_layout_seconds` means the query itself is too heavy: add set
+       analysis, drop a dimension, or lower `limit`.
+
+       A well-formed query answers in seconds: grouping by a field that
+       lives in the fact table returns in well under a second even on
+       91M rows. Tens of seconds means the grouping field sits on the far
+       side of a large link table — prefer a dimension closer to the
+       facts, or filter the period with set analysis.
+
+    ────────────────────────────────────────────────────────────────────
+    SESSION LIMIT — NEVER RUN THESE CALLS IN PARALLEL
+    ────────────────────────────────────────────────────────────────────
+    Qlik Sense allows a maximum of **5 concurrent sessions per user
+    identity**, and going over that can get the account LOCKED. This is a
+    Qlik platform limit — no MCP setting can raise it.
+
+    This server deliberately funnels every tool call through ONE cached
+    Engine session, so a whole analysis costs exactly one session. Keep
+    it that way:
+      - issue hypercube calls ONE AT A TIME, never fan them out
+        concurrently to "speed things up" — they are serialised over a
+        single WebSocket anyway, so parallelism buys nothing and risks
+        the lockout;
+      - do not start a second MCP process with the same credentials, and
+        do not run two editors against the same token side by side.
+    When a query is slow, make the query cheaper (see point 5) instead of
+    launching more of them.
 
     Args:
-        app_id: Application GUID. Required.
-        dimensions: List of GROUP BY columns. Each element is an object:
-            ```
-            {
-              "field": "<DimFieldName>",          # real field name, no []
-              "sort_by": {                        # OPTIONAL, default ASCII asc
-                "qSortByNumeric": 0,              # -1 desc, 1 asc, 0 disabled
-                "qSortByAscii": 1,                # -1 desc, 1 asc, 0 disabled
-                "qSortByExpression": -1,          # -1 desc, 1 asc, 0 disabled
-                "qExpression": "Sum({<[<DimYear>]={<Y>}>}<MetricX>)"
-                                                   # required if qSortByExpression != 0
-              }
-            }
-            ```
-            Omit the whole list or pass `[]` for a grand-total row only.
-            Use `qSortByExpression` for "top/bottom N by metric" queries.
-        measures: List of aggregate expressions. Each element is an object:
-            ```
-            {
-              "expression": "Sum({<[<DimYear>]={<Y>}>}<MetricX>)",
-                                              # any valid Qlik expression
-              "label": "<display label>",     # OPTIONAL display name
-              "sort_by": { "qSortByNumeric": -1 }  # OPTIONAL, default desc
-            }
-            ```
-            Set analysis (`{<field={value}>}`) is the ONLY correct way
-            to filter inside a measure — NEVER put filters in dimensions.
-            Use Qlik functions: Sum, Count, Avg, Min, Max, Only,
-            FirstSortedValue, RangeSum, etc. Period-over-period:
-            `"Sum({<[<DimYear>]={<Y2>}>}<MetricX>) /
-              Sum({<[<DimYear>]={<Y1>}>}<MetricX>) - 1"`.
-        max_rows: Maximum rows to return. Default 1000. HARD LIMIT: 5000.
-            The server REJECTS requests with `max_rows > 5000` with a
-            `limit_exceeded` error. The server also REJECTS requests
-            whose `columns * max_rows > 9900` with a `cell_cap_exceeded`
-            error (Qlik's own single-page limit is 10000 cells).
-
-            DO NOT try to work around these limits by bumping max_rows.
-            Instead, narrow the query with set analysis. Correct patterns
-            (substitute the placeholders with real field names from
-            `get_app_details`):
-
-              TOP-N: max_rows=15, qSortByExpression=-1 on the ranking dim,
-                qExpression="Sum({<[<DimPeriod>]={<val>}>}<MetricX>)".
-              PERIOD FILTER: put the period inside every measure —
-                Sum({<[<DimYear>]={<Y>},[<DimPeriod>]={'<v>'}>}<MetricX>).
-              SLICE-BY-CATEGORY: run N small hypercubes, one per category
-                value, each filtered via {<[<DimCat>]={'<v>'}>}. Prefer
-                100 focused queries over 1 giant scan — they're faster
-                AND don't timeout.
-              ESTIMATE BEFORE CALLING: multiply `distinct_values` of your
-                dimensions (from `get_app_details`). If the product
-                exceeds 5000, the query is too broad — add more
-                set-analysis filters or switch to top-N.
+        app_id: Application GUID. Required. From `get_apps`.
+        dimensions: GROUP BY columns. Each item is
+            `{"field": "<FieldName>"}` — a real field name, no brackets,
+            no expression. Omit or pass `[]` for a grand-total row.
+            Advanced: an optional `"sort_by"` object per dimension maps
+            straight onto Qlik `qSortCriterias`
+            (`qSortByNumeric` / `qSortByAscii` / `qSortByExpression` +
+            `qExpression`, each -1 desc / 0 off / 1 asc). The top-level
+            `sort_by` argument overrides it and is what you normally want.
+        measures: Aggregate expressions. Each item is
+            `{"expression": "Sum(Amount)", "label": "Revenue"}`. Always
+            give a `label` — it is the column name AND the value you pass
+            to `sort_by`. Any Qlik aggregation works: Sum, Count,
+            Count(DISTINCT ...), Avg, Min, Max, Only, FirstSortedValue,
+            RangeSum.
+        limit: Max rows to return (the SQL LIMIT). Default 1000, hard cap
+            5000. Also capped by `columns * limit <= 9900` (Qlik itself
+            refuses pages over 10000 cells). For ranked queries a small
+            limit (10-50) is both faster and easier to read.
+        sort_by: Name of the column to order by — a measure `label`, a
+            measure expression, or a dimension field name. Case- and
+            bracket-insensitive; a measure wins over a dimension of the
+            same name. Omit to keep Qlik's default order (ascending by
+            the first dimension) — but then a truncated result contains
+            ARBITRARY rows, not the most important ones.
+        sort_order: `"desc"` (default, largest first — top-N) or `"asc"`
+            (smallest first — bottom-N).
+        suppress_zero: Drop rows whose measure is 0. Default False.
+            Useful for `sort_order="asc"`, where zero-valued groups
+            would otherwise fill the entire result.
+        include_raw_layout: Also return the untouched Qlik `qHyperCube`
+            (per-cell `qElemNumber`/`qState`, `qDimensionInfo`,
+            `qMeasureInfo`). Default False, because it costs several
+            times more tokens than `rows` and is rarely needed.
+        max_rows: Deprecated alias for `limit`, kept so older callers
+            keep working. If both are given, `max_rows` wins.
 
     Returns:
         JSON with:
-          - `total_rows`: full result size on the server (could be huge)
-          - `returned_rows`: how many rows are actually in the matrix
-            below (<= `max_rows`, <= 5000 hard cap)
-          - `hard_max_rows`: 5000 — the enforced upper bound
-          - `truncation_warning`: non-null string if `total_rows >
-            returned_rows`. Tells you the result was truncated and
-            instructs how to narrow the query with set analysis. DO NOT
-            ignore this — retry with a narrower set-analysis filter, or
-            switch to a top-N pattern, or slice the query by category.
-          - `total_columns`: number of dim+measure columns
-          - `dimensions` / `measures`: echoed input
-          - `hypercube_data.qDataPages[0].qMatrix`: the actual cells,
-            each as `{qText, qNum, qElemNumber, qState}`. Read values
-            from `qText` (display) or `qNum` (numeric). `"NaN"` means the
-            cell is empty or contains text.
+          - `columns`: column names, in row order.
+          - `rows`: the data as plain arrays of values — numbers stay
+            numbers, text stays text. Read this, not `hypercube_data`.
+          - `total_rows`: how many groups exist on the server.
+          - `returned_rows`: how many rows are in `rows`.
+          - `sorted_by` / `sort_order`: the sort actually applied
+            (`null` when unsorted).
+          - `grand_total`: totals across ALL groups, per measure —
+            correct even when the rows are truncated.
+          - `truncation_warning`: non-null when `total_rows >
+            returned_rows`. For an unsorted query this means the rows are
+            arbitrary — add `sort_by` or narrow the query.
+          - `timings`: seconds per step (see point 5 above).
 
-    ON ERROR: the response contains `error`, `error_category`, and
-    `hint`. Relevant categories:
-      - `limit_exceeded`: you asked for max_rows > 5000. Redesign the
-        query.
-      - `cell_cap_exceeded`: columns * max_rows > 9900. Either drop
-        columns or reduce max_rows (the hint gives you the exact
-        suggested max_rows).
-      - `socket_timeout`: Qlik is actually computing something slow.
-        Add more set-analysis filters, reduce max_rows, or switch to
-        top-N with qSortByExpression.
-      - `engine_api_error`: invalid expression / unknown field.
+    Errors return `error`, `error_category` and an actionable `hint`:
+        `invalid_sort` — `sort_by` matched no column; the response lists
+            `available_columns`.
+        `limit_exceeded` — limit above 5000.
+        `cell_cap_exceeded` — columns * limit above 9900; the hint gives
+            a concrete smaller limit.
+        `socket_timeout` — the query is genuinely too heavy; the hint
+            lists what to cut, in order of impact.
+        `engine_api_error` — bad expression or unknown field name.
     """
     import traceback as _tb
     e = _check()
     if e:
         return e
+    # `max_rows` is the pre-1.6 name for `limit`. Honour it when supplied
+    # so existing callers and saved prompts keep working unchanged.
+    effective_limit = max_rows if max_rows is not None else limit
     stage = "ensure_app"
+    t_open = time.monotonic()
     try:
         app_handle = engine_api.ensure_app(app_id, no_data=False)
+        open_app_seconds = round(time.monotonic() - t_open, 3)
         stage = "create_hypercube"
-        return _ok(engine_api.create_hypercube(app_handle, dimensions or [], measures or [], max_rows))
+        result = engine_api.create_hypercube(
+            app_handle,
+            dimensions or [],
+            measures or [],
+            effective_limit,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            suppress_zero=suppress_zero,
+            include_raw_layout=include_raw_layout,
+        )
+        # Opening the app dominates the first call against a cold app, so
+        # report it next to the query time instead of hiding it in the
+        # total — otherwise a fast query looks slow.
+        if isinstance(result, dict) and isinstance(result.get("timings"), dict):
+            result["timings"]["open_app_seconds"] = open_app_seconds
+        return _ok(result)
     except Exception as ex:
         logger.exception("engine_create_hypercube failed at stage=%s", stage)
         return _err(
@@ -961,6 +1142,24 @@ def get_app_field(
         JSON `{ "field_values": ["val1", "val2", ...] }` — plain list after
         filtering and pagination. Order is by frequency descending on the
         Qlik side.
+    
+    Example (see what values a dimension holds):
+        Call: {"app_id": "a1b2...", "field_name": "Region", "limit": 5}
+        Returns: {"tool_call_seconds": 0.7,
+                  "field_values": ["North", "South", "West"]}
+
+    Example (wildcard search; `fallback_used` appears when the fast
+    ListObject path returned nothing and a hypercube was used instead):
+        Call: {"app_id": "a1b2...", "field_name": "OrderID",
+               "search_string": "ORD-2026*", "limit": 10}
+        Returns: {"tool_call_seconds": 2.1,
+                  "field_values": ["ORD-2026-000001"],
+                  "fallback_used": "hypercube"}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -1031,6 +1230,23 @@ def get_app_variables(
     Returns:
         JSON `{ "variables_from_script": {name: value, ...}, "variables_from_ui":
         {name: value, ...} }`. Empty group becomes `""` instead of `{}`.
+    
+    Example (default — returns ONLY UI-created variables):
+        Call: {"app_id": "a1b2..."}
+        Returns: {"tool_call_seconds": 0.8, "variables_from_script": "",
+                  "variables_from_ui": {"vSelectedRegion": "North"}}
+
+    Example (script SET/LET variables — you MUST pass "true"):
+        Call: {"app_id": "a1b2...", "created_in_script": "true", "limit": 50}
+        Returns: {"tool_call_seconds": 0.85,
+                  "variables_from_script": {"vCurrentYear": "2026",
+                      "vSetPeriod": "{<[Year]={2026}>}"},
+                  "variables_from_ui": ""}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -1077,6 +1293,18 @@ def get_app_sheets(app_id: str) -> str:
         JSON `{ "app_id": ..., "total_sheets": N, "sheets": [{sheet_id, title,
         description}, ...] }`. Pass `sheet_id` into `get_app_sheet_objects` to
         list the charts/tables on that sheet.
+    
+    Example:
+        Call: {"app_id": "a1b2..."}
+        Returns: {"tool_call_seconds": 1.3, "app_id": "a1b2...",
+                  "total_sheets": 2,
+                  "sheets": [{"sheet_id": "b2c3d4e5-1111-...",
+                              "title": "Overview", "description": "..."}]}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -1113,6 +1341,18 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
         JSON with `objects` array where each element has `object_id`,
         `object_type` (e.g. `"barchart"`, `"table"`, `"kpi"`, `"listbox"`)
         and `object_description` (title). Use `object_id` in `get_app_object`.
+    
+    Example:
+        Call: {"app_id": "a1b2...", "sheet_id": "b2c3d4e5-1111-..."}
+        Returns: {"tool_call_seconds": 1.1, "total_objects": 2,
+                  "objects": [{"object_id": "AbCdEf",
+                               "object_type": "barchart",
+                               "object_description": "Sales by Region"}]}
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -1152,6 +1392,23 @@ def get_app_object(app_id: str, object_id: str) -> str:
         JSON with full `qLayout` of the object. Key fields depend on the
         object type — look for `qHyperCube.qDimensionInfo`, `qMeasureInfo`,
         `qDataPages[0].qMatrix` for charts/tables.
+    
+    Example:
+        Call: {"app_id": "a1b2...", "object_id": "AbCdEf"}
+        Returns: {"tool_call_seconds": 1.4,
+                  "qLayout": {"qInfo": {"qId": "AbCdEf", "qType": "barchart"},
+                              "qMeta": {"title": "Sales by Region"},
+                              "qHyperCube": {"qDimensionInfo": ["..."],
+                                             "qMeasureInfo": ["..."],
+                                             "qDataPages": ["..."]}}}
+
+    Use this to copy an existing chart's expressions into
+    `engine_create_hypercube`.
+
+    Qlik session limit: this server keeps ONE Engine session for all
+    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
+    the account beyond that — never run these calls in parallel or
+    start a second MCP process with the same credentials.
     """
     e = _check()
     if e:
@@ -1175,7 +1432,7 @@ def get_app_object(app_id: str, object_id: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_tasks(
     status_filter: Optional[str] = None,
@@ -1205,6 +1462,23 @@ def get_tasks(
         JSON `{ "tasks": [...], "count": N }`. Each task has id, name,
         app_name, enabled, last_execution_result (status, start_time,
         stop_time, details).
+    
+    Example (everything that is currently broken — fastest path):
+        Call: {"status_filter": "failed"}
+        Returns: {"tool_call_seconds": 0.9, "count": 1,
+                  "tasks": [{"id": "c3d4e5f6-1111-...",
+                             "name": "Reload Sales Dashboard",
+                             "app_name": "Sales Dashboard", "enabled": true,
+                             "last_execution_result": {"status": 8,
+                                 "start_time": "2026-07-28T03:00:00.000Z",
+                                 "stop_time": "2026-07-28T03:04:12.000Z",
+                                 "details": ["..."]}}]}
+
+    Example (wildcard filter on the task name):
+        Call: {"name_filter": "Daily*"}
+        Returns: {"tool_call_seconds": 1.2, "tasks": ["..."], "count": 3}
+
+    QRS status codes: 7 = finished OK, 8 = failed.
     """
     e = _check()
     if e:
@@ -1224,7 +1498,7 @@ def get_tasks(
     return _ok({"tasks": tasks, "count": len(tasks)})
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_task_details(task_id: str) -> str:
     """
@@ -1237,6 +1511,15 @@ def get_task_details(task_id: str) -> str:
     Returns:
         Raw QRS JSON for `/qrs/reloadtask/{id}` — includes enabled, maxRetries,
         taskSessionTimeout, preloadNodes, app reference, tags, privileges, etc.
+    
+    Example:
+        Call: {"task_id": "c3d4e5f6-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 0.4, "id": "c3d4e5f6-1111-...",
+                  "name": "Reload Sales Dashboard", "taskType": 0,
+                  "enabled": true, "taskSessionTimeout": 1440,
+                  "maxRetries": 0,
+                  "app": {"id": "a1b2...", "name": "Sales Dashboard"},
+                  "schemaPath": "ReloadTask"}
     """
     e = _check()
     if e:
@@ -1244,7 +1527,7 @@ def get_task_details(task_id: str) -> str:
     return _ok(repo_api.get_reload_task_by_id(task_id))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def start_task(task_id: str) -> str:
     """
@@ -1260,6 +1543,13 @@ def start_task(task_id: str) -> str:
 
     Returns:
         QRS response to `/qrs/task/{id}/start`.
+    
+    Example (WRITE operation — confirm with the user before calling):
+        Call: {"task_id": "c3d4e5f6-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 0.35, "raw_response": ""}
+
+    QRS answers 204 No Content, so an empty `raw_response` means the task
+    was queued successfully. Poll `get_task_executions` for progress.
     """
     e = _check()
     if e:
@@ -1267,7 +1557,7 @@ def start_task(task_id: str) -> str:
     return _ok(repo_api.start_task(task_id))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def create_task(app_id: str, task_name: str, enabled: bool = True) -> str:
     """
@@ -1284,6 +1574,15 @@ def create_task(app_id: str, task_name: str, enabled: bool = True) -> str:
 
     Returns:
         Created QRS task object, including the new task `id`.
+    
+    Example (WRITE operation — confirm with the user before calling):
+        Call: {"app_id": "a1b2...", "task_name": "Reload Sales (nightly)",
+               "enabled": true}
+        Returns: {"tool_call_seconds": 0.6, "id": "c3d4e5f6-1111-...",
+                  "name": "Reload Sales (nightly)", "enabled": true,
+                  "app": {"id": "a1b2..."}}
+
+    The new task has NO schedule — attach one with `create_task_schedule`.
     """
     e = _check()
     if e:
@@ -1291,7 +1590,7 @@ def create_task(app_id: str, task_name: str, enabled: bool = True) -> str:
     return _ok(repo_api.create_reload_task(app_id, task_name, enabled))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def update_task(task_id: str, name: Optional[str] = None, enabled: Optional[bool] = None) -> str:
     """
@@ -1304,6 +1603,12 @@ def update_task(task_id: str, name: Optional[str] = None, enabled: Optional[bool
 
     Returns:
         Updated QRS task object.
+    
+    Example (WRITE operation — confirm with the user before calling):
+        Call: {"task_id": "c3d4e5f6-1111-...", "enabled": false}
+        Returns: {"tool_call_seconds": 0.7, "id": "c3d4e5f6-1111-...",
+                  "name": "Reload Sales Dashboard", "enabled": false,
+                  "modifiedDate": "2026-07-28T10:00:00.000Z"}
     """
     e = _check()
     if e:
@@ -1316,7 +1621,7 @@ def update_task(task_id: str, name: Optional[str] = None, enabled: Optional[bool
     return _ok(repo_api.update_reload_task(task_id, updates))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def delete_task(task_id: str) -> str:
     """
@@ -1328,6 +1633,10 @@ def delete_task(task_id: str) -> str:
 
     Returns:
         QRS delete response.
+    
+    Example (DESTRUCTIVE — never call without explicit user confirmation):
+        Call: {"task_id": "c3d4e5f6-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 0.4, "raw_response": ""}
     """
     e = _check()
     if e:
@@ -1335,7 +1644,7 @@ def delete_task(task_id: str) -> str:
     return _ok(repo_api.delete_reload_task(task_id))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_task_schedule(task_id: str) -> str:
     """
@@ -1348,6 +1657,16 @@ def get_task_schedule(task_id: str) -> str:
         JSON `{ "task_id": ..., "triggers": [...], "count": N }`. Each trigger
         describes its repetition rule (daily/hourly/etc.), start time, time
         zone, and enabled state.
+    
+    Example:
+        Call: {"task_id": "c3d4e5f6-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 0.5, "task_id": "c3d4e5f6-1111-...",
+                  "count": 1,
+                  "triggers": [{"id": "e5f6a7b8-1111-...",
+                                "name": "Nightly 03:00", "enabled": true,
+                                "timeZone": "Europe/Moscow",
+                                "startDate": "2026-04-01T00:00:00.000Z",
+                                "incrementDescription": "0 0 1440 0"}]}
     """
     e = _check()
     if e:
@@ -1356,7 +1675,7 @@ def get_task_schedule(task_id: str) -> str:
     return _ok({"task_id": task_id, "triggers": triggers, "count": len(triggers)})
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def create_task_schedule(
     task_id: str,
@@ -1387,6 +1706,16 @@ def create_task_schedule(
 
     Returns:
         QRS response with the created schema event/trigger object.
+    
+    Example (WRITE operation — confirm with the user; always set
+    start_date to a real future time instead of keeping the default):
+        Call: {"task_id": "c3d4e5f6-1111-...", "name": "Nightly 03:00",
+               "repeat": "daily", "interval_minutes": 1440,
+               "start_date": "2026-08-01T03:00:00.000Z",
+               "time_zone": "Europe/Moscow", "enabled": true}
+        Returns: {"tool_call_seconds": 0.6, "id": "e5f6a7b8-1111-...",
+                  "name": "Nightly 03:00", "enabled": true,
+                  "startDate": "2026-08-01T03:00:00.000Z"}
     """
     e = _check()
     if e:
@@ -1396,7 +1725,7 @@ def create_task_schedule(
     return _ok(repo_api.create_schema_trigger(task_id, name, time_zone, start_date, repeat_opt, interval_minutes, enabled))
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_task_executions(task_id: str, top: int = 10) -> str:
     """
@@ -1410,9 +1739,20 @@ def get_task_executions(task_id: str, top: int = 10) -> str:
         top: How many most-recent executions to return. Default 10.
 
     Returns:
-        JSON `{ "task_id": ..., "executions": [...], "count": N }`. Each
-        entry: status, start_time, stop_time, duration, details (script log
-        tail on failure), execution_host.
+        JSON `{ "task_id": ..., "executions": [...], "count": N }`. Entries
+        are raw QRS objects in camelCase: status (7 = OK, 8 = failed),
+        startTime, stopTime, duration (MILLISECONDS), executingNodeName,
+        scriptLogAvailable, details.
+    
+    Example (raw QRS objects, newest first — note the camelCase keys and
+    that `duration` is in MILLISECONDS):
+        Call: {"task_id": "c3d4e5f6-1111-...", "top": 2}
+        Returns: {"tool_call_seconds": 0.6, "count": 2,
+                  "executions": [{"id": "d4e5f6a7-1111-...", "status": 7,
+                      "startTime": "2026-07-28T03:00:00.000Z",
+                      "stopTime": "2026-07-28T03:04:12.000Z",
+                      "duration": 252000, "executingNodeName": "Central",
+                      "scriptLogAvailable": true, "details": ["..."]}]}
     """
     e = _check()
     if e:
@@ -1421,7 +1761,7 @@ def get_task_executions(task_id: str, top: int = 10) -> str:
     return _ok({"task_id": task_id, "executions": results, "count": len(results)})
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_task_script_log(task_id: str) -> str:
     """
@@ -1437,6 +1777,12 @@ def get_task_script_log(task_id: str) -> str:
 
     Returns:
         Raw log text (not JSON).
+    
+    Example (returns PLAIN TEXT, not JSON — it arrives wrapped in the
+    "result" key and can be several MB):
+        Call: {"task_id": "c3d4e5f6-1111-2222-3333-444455556666"}
+        Returns: {"tool_call_seconds": 1.85,
+                  "result": "2026-07-28 03:00:01 Execution started.\n..."}
     """
     e = _check()
     if e:
@@ -1445,7 +1791,7 @@ def get_task_script_log(task_id: str) -> str:
     return log_text
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_failed_tasks_with_logs() -> str:
     """
@@ -1460,6 +1806,17 @@ def get_failed_tasks_with_logs() -> str:
     Returns:
         JSON `{ "failed_tasks": [{task_id, task_name, app_name, last_start,
         last_stop, details, log_tail}, ...], "count": N }`.
+    
+    Example:
+        Call: {}
+        Returns: {"tool_call_seconds": 4.2, "count": 1,
+                  "failed_tasks": [{"task_id": "c3d4e5f6-1111-...",
+                      "task_name": "Reload Sales Dashboard",
+                      "app_name": "Sales Dashboard",
+                      "last_start": "2026-07-28T03:00:00.000Z",
+                      "last_stop": "2026-07-28T03:04:12.000Z",
+                      "details": ["..."],
+                      "log_tail": "...Error: Field 'AmountX' not found..."}]}
     """
     e = _check()
     if e:
@@ -1484,7 +1841,7 @@ def get_failed_tasks_with_logs() -> str:
     return _ok({"failed_tasks": results, "count": len(results)})
 
 
-@mcp.tool()
+@_cert_only_tool()
 @_timed
 def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
     """
@@ -1507,6 +1864,25 @@ def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
     Returns:
         JSON `{ "root_task_id": ..., "direction": ..., "dependencies":
         [{id, name, depth}, ...], "count": N }`.
+    
+    Example (downstream — what runs after this task succeeds):
+        Call: {"task_id": "c3d4e5f6-1111-..."}
+        Returns: {"tool_call_seconds": 1.0,
+                  "root_task_id": "c3d4e5f6-1111-...",
+                  "direction": "downstream", "count": 2,
+                  "dependencies": [{"id": "c3d4...67",
+                                    "name": "Reload Finance Mart",
+                                    "depth": 1},
+                                   {"id": "c3d4...68",
+                                    "name": "Reload Finance Dashboard",
+                                    "depth": 2}]}
+
+    Example (upstream — what must finish before this task can start):
+        Call: {"task_id": "c3d4...68", "direction": "upstream"}
+        Returns: {"tool_call_seconds": 1.0, "direction": "upstream",
+                  "dependencies": [{"id": "c3d4...67",
+                                    "name": "Reload Finance Mart",
+                                    "depth": 1}], "count": 1}
     """
     e = _check()
     if e:
@@ -1560,7 +1936,7 @@ def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
 
 async def async_main():
     """Async main entry point — runs streamable HTTP transport."""
-    logger.info("Starting qlik-sense-mcp-server v%s (streamable-http on :8000/mcp)", __version__)
+    logger.info("Starting qlik-sense-mcp-server v%s (streamable-http on :%d/mcp)", __version__, _mcp_port)
     await mcp.run_streamable_http_async()
 
 
@@ -1595,14 +1971,17 @@ USAGE:
     qlik-sense-mcp-server --help       Show this help
     qlik-sense-mcp-server --version    Show version
 
-TOOLS ({len(mcp._tool_manager._tools)} total):
+TOOLS ({len(mcp._tool_manager._tools)} registered in the current auth mode):
     Repository: get_about, get_apps, get_app_details
-    Engine:     get_app_script, get_app_field_statistics, engine_create_hypercube,
-                get_app_field, get_app_variables, get_app_sheets,
-                get_app_sheet_objects, get_app_object
-    Tasks:      get_tasks, get_task_details, start_task, create_task, update_task,
-                delete_task, get_task_schedule, create_task_schedule,
-                get_task_executions, get_task_script_log, get_failed_tasks_with_logs
+    Engine:     get_app_script, get_app_field_statistics, engine_get_field_range,
+                engine_create_hypercube, get_app_field, get_app_variables,
+                get_app_sheets, get_app_sheet_objects, get_app_object
+    Tasks:      get_tasks, get_task_details, get_task_dependencies, start_task,
+                create_task, update_task, delete_task, get_task_schedule,
+                create_task_schedule, get_task_executions, get_task_script_log,
+                get_failed_tasks_with_logs
+                (certificate mode only — QRS task administration is not
+                 available to a JWT analyst identity)
 
 GitHub: https://github.com/bintocher/qlik-sense-mcp
 """)

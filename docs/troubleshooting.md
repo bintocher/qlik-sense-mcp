@@ -71,16 +71,27 @@ requests still fail" entry in `docs/AUTH_JWT.md`.
 
 Engine is genuinely computing something slow. Order of fixes:
 
+The error reply echoes `request` — the exact arguments you sent — so
+start by reading which query actually timed out, then apply the fixes in
+this order:
+
 1. **Add a set-analysis filter** inside every measure. Narrowing the
    period or category by even one value usually cuts the cost by
    orders of magnitude on a wide fact table.
-2. **Reduce `max_rows`.** The hard server cap is 5000, but for top-N
+2. **Reduce `limit`.** The hard server cap is 5000, but for top-N
    queries you almost always want 15-50.
-3. **Drop a high-cardinality dimension** if you have one. Sorting a
-   dimension with one million distinct values by a measure expression
-   forces a full materialization. Use the SLICE-BY-CATEGORY pattern
-   from the `engine_create_hypercube` docstring instead.
-4. As a last resort, raise `QLIK_WS_TIMEOUT` (e.g. to `300.0`) to
+3. **Rank with `sort_by`, not `qSortByExpression`.** Passing
+   `sort_by="<measure label>"` orders by the already-computed measure
+   column. Hand-rolling `qSortByExpression` on the dimension makes the
+   Engine evaluate the same aggregate a second time purely to sort:
+   measured on a 91M-row app, 0.2s versus 286s.
+4. **Group by a field closer to the facts.** Check `timings` in the
+   response — if `get_layout_seconds` is tens of seconds while
+   `open_app_seconds` is small, the grouping field is usually on the far
+   side of a large link table. A dimension inside the fact table itself
+   returns in well under a second even at 91M rows.
+5. **Drop a high-cardinality dimension** if you have one.
+6. As a last resort, raise `QLIK_WS_TIMEOUT` (e.g. to `300.0`) to
    give the Engine more time. Do not raise it for the entire MCP
    session — most of the time the right answer is to redesign the
    query.

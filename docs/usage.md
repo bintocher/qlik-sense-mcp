@@ -73,10 +73,45 @@ The intended call order for any analysis session is:
    the dimension-expression antipattern, and the hard 5000-row /
    9900-cell limits the server enforces.
 
+## Ranking (top-N / bottom-N)
+
+`engine_create_hypercube` maps onto SQL one-to-one: `dimensions` is the
+`GROUP BY`, `measures` are the aggregates, `sort_by` + `sort_order` are
+the `ORDER BY`, and `limit` is the `LIMIT`. "The 10 clients with the
+highest GGR" is one call:
+
+```jsonc
+{
+  "app_id": "…",
+  "dimensions": [{"field": "clientid"}],
+  "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
+  "sort_by": "GGR",          // measure label, measure expression or dimension field
+  "sort_order": "desc",      // "asc" for bottom-N
+  "limit": 10
+}
+```
+
+`sort_by` puts that column first in Qlik's `qInterColumnSortOrder`,
+which is the only way the Engine orders rows by a measure. Do **not**
+hand-roll `qSortByExpression` on the dimension for ranking: it makes the
+Engine evaluate the same aggregate a second time just to order rows. On
+a 91M-row app, ranking by the measure column returned in 0.2s where the
+`qSortByExpression` form took 286s.
+
+## One session at a time
+
+Qlik Sense allows at most **5 concurrent sessions per user identity**,
+and exceeding that can get the account **locked** — a platform limit no
+MCP setting can raise. This server funnels every tool call through a
+single cached Engine session, so an entire analysis costs one session.
+Keep it that way: never fan out tool calls in parallel (they are
+serialised over one WebSocket anyway), and do not run a second MCP
+process or a second editor against the same credentials.
+
 ## Hard limits enforced by this server
 
-- `engine_create_hypercube`: `max_rows` is capped at **5000**, and the
-  total `columns * max_rows` is capped at **9900** (Qlik Engine itself
+- `engine_create_hypercube`: `limit` (alias `max_rows`) is capped at
+  **5000**, and the total `columns * limit` is capped at **9900** (Qlik Engine itself
   refuses pages over 10000 cells per `GetHyperCubeData` call —
   [error 7009 `calc-pages-too-large`](https://help.qlik.com/en-US/sense-developer/November2025/Subsystems/EngineJSONAPI/Content/service-genericobject-gethypercubedata.htm)).
   Requests over the limits are rejected immediately with a
@@ -100,9 +135,22 @@ standard MCP `tools/list` response.
 
 ## Diagnostics
 
-Every tool response now starts with a `tool_call_seconds` field —
+Every tool response starts with a `tool_call_seconds` field —
 wall-clock time of the call rounded to milliseconds. Use it to spot the
 slow tools in a session.
+
+`engine_create_hypercube` additionally returns `timings`, which splits
+that number into `open_app_seconds` (loading the app into Engine memory
+— only the first call against an app pays it) and
+`get_layout_seconds` (the computation itself). A large
+`get_layout_seconds` means the query is genuinely heavy: add set
+analysis, drop a dimension, or group by a field that sits closer to the
+fact table. A well-formed query answers in seconds — grouping by a field
+inside a 91M-row fact table returns in well under a second.
+
+Every failed call — including timeouts — echoes back `tool` and
+`request` with the exact arguments that produced it, so you can see
+which query failed and retry with a cheaper one instead of guessing.
 
 For deeper diagnosis, set `LOG_LEVEL=DEBUG` in your env block. Each
 hypercube call then logs `CreateSessionObject`, `GetLayout` and any

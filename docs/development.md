@@ -28,6 +28,19 @@ Pytest discovers everything under [`tests/`](../tests/):
 pytest
 ```
 
+The suite is offline — no Qlik server is required. Engine behaviour is
+covered by driving `create_hypercube` against a fake `send_request` and
+asserting on the generated `qHyperCubeDef`
+([`tests/test_hypercube.py`](../tests/test_hypercube.py)), which is how
+the sorting contract (`qInterColumnSortOrder`, per-column direction) is
+pinned down. Tool visibility per authentication mode is covered by
+re-importing `server.py` under different environments
+([`tests/test_tool_registration.py`](../tests/test_tool_registration.py)).
+
+Changes to Engine query building should still be smoke-tested against a
+real app before release — the offline tests verify the request we send,
+not what Qlik does with it.
+
 ## Versioning
 
 The project uses [bump2version](https://pypi.org/project/bump2version/)
@@ -73,11 +86,22 @@ The PyPI package version is read from `pyproject.toml`.
            return _err(str(ex))
    ```
 3. Both decorators are required:
-   - `@mcp.tool()` registers the function with FastMCP.
+   - `@mcp.tool()` registers the function with FastMCP. Use
+     `@_cert_only_tool()` instead if the tool needs QRS admin rights
+     (reload-task administration) — it registers the tool in
+     certificate mode only, so JWT analysts are not offered calls that
+     can only return 403.
    - `@_timed` wraps the response with `tool_call_seconds` and a
-     structured error envelope.
-4. Update [`docs/tools.md`](tools.md).
-5. Update [`CHANGELOG.md`](../CHANGELOG.md).
+     structured error envelope, and echoes the failing `request` back
+     to the caller. You get both for free; do not hand-roll them.
+4. Write the docstring for an LLM, not for a human reader. Every tool
+   ends with an `Example:` block showing a realistic `Call:` and a
+   shortened but structurally correct `Returns:`. Document the actual
+   response keys — a docstring that promises keys the tool does not
+   return is worse than no docstring, because the model will build its
+   next call around them.
+5. Update [`docs/tools.md`](tools.md).
+6. Update [`CHANGELOG.md`](../CHANGELOG.md).
 
 New tools normally do not need any JWT-aware code: cert vs JWT auth is
 abstracted inside `QlikRepositoryAPI` / `QlikEngineAPI`, and the

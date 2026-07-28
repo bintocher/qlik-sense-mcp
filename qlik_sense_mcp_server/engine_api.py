@@ -1073,18 +1073,151 @@ class QlikEngineAPI:
         result = self.send_request("GetField", params, handle=app_handle)
         return result
 
+    # Sort-direction aliases accepted from LLM callers. Qlik encodes the
+    # direction as -1 (descending) / 1 (ascending) / 0 (criterion disabled).
+    _SORT_ORDER_ALIASES = {
+        "desc": -1, "descending": -1, "down": -1, "high": -1,
+        "highest": -1, "top": -1, "-1": -1,
+        "asc": 1, "ascending": 1, "up": 1, "low": 1,
+        "lowest": 1, "bottom": 1, "1": 1,
+    }
+
+    @staticmethod
+    def _normalize_sort_order(sort_order: Any) -> Optional[int]:
+        """
+        Map a human/LLM-supplied sort direction onto Qlik's -1 / 1.
+
+        Returns None when the value is not recognised, so the caller can
+        answer with an explicit error instead of silently sorting the
+        wrong way round.
+        """
+        if isinstance(sort_order, bool):
+            return None
+        if isinstance(sort_order, int):
+            return sort_order if sort_order in (-1, 1) else None
+        if isinstance(sort_order, str):
+            return QlikEngineAPI._SORT_ORDER_ALIASES.get(sort_order.strip().lower())
+        return None
+
+    @staticmethod
+    def _column_names(
+        converted_dimensions: List[Dict[str, Any]],
+        converted_measures: List[Dict[str, Any]],
+    ) -> List[str]:
+        """
+        Human-readable column names in hypercube column order.
+
+        Column order is fixed by the Engine API: every dimension first
+        (0..D-1, in declaration order), then every measure (D..D+M-1).
+        """
+        names = [str(d.get("field", "")) for d in converted_dimensions]
+        for i, m in enumerate(converted_measures):
+            names.append(str(m.get("label") or m.get("expression") or f"Measure_{i}"))
+        return names
+
+    @staticmethod
+    def _matrix_to_rows(
+        data_pages: List[Dict[str, Any]],
+        column_names: List[str],
+    ) -> List[List[Any]]:
+        """
+        Flatten Engine's qMatrix into plain rows of values.
+
+        Each Engine cell is `{qText, qNum, qElemNumber, qState}`; consumers
+        of this tool only ever need the value, and `qNum == "NaN"` is
+        Engine's way of saying "this cell is text or empty". Returning
+        numbers as numbers means an LLM can compare and sum them without
+        first parsing locale-formatted strings like "95 552 568 044,926".
+        """
+        rows: List[List[Any]] = []
+        for page in data_pages or []:
+            for matrix_row in page.get("qMatrix", []) or []:
+                row: List[Any] = []
+                for cell in matrix_row:
+                    num = cell.get("qNum")
+                    row.append(cell.get("qText") if num == "NaN" or num is None else num)
+                rows.append(row)
+        return rows
+
+    @staticmethod
+    def _resolve_sort_column(
+        sort_by: Any,
+        converted_dimensions: List[Dict[str, Any]],
+        converted_measures: List[Dict[str, Any]],
+    ) -> Optional[int]:
+        """
+        Resolve `sort_by` to a hypercube column index, or None if unknown.
+
+        Accepts, in this order of preference:
+          * an int — used directly as a column index;
+          * a measure label, a measure expression, or the auto-generated
+            `Measure_<i>` name;
+          * a dimension field name.
+        Matching is case-insensitive and tolerates surrounding square
+        brackets, because LLMs routinely write `[Sales]` for a field.
+        """
+        n_dims = len(converted_dimensions)
+        n_cols = n_dims + len(converted_measures)
+
+        if isinstance(sort_by, bool):
+            return None
+        if isinstance(sort_by, int):
+            return sort_by if 0 <= sort_by < n_cols else None
+        if not isinstance(sort_by, str):
+            return None
+
+        def _key(value: Any) -> str:
+            return str(value or "").strip().strip("[]").casefold()
+
+        target = _key(sort_by)
+        if not target:
+            return None
+
+        # Measures win over dimensions: "sort by Sales" almost always means
+        # the aggregate, and a measure label may legitimately repeat the
+        # name of the field it aggregates.
+        for i, measure in enumerate(converted_measures):
+            candidates = {
+                _key(measure.get("label")),
+                _key(measure.get("expression")),
+                _key(f"Measure_{i}"),
+            }
+            if target in candidates - {""}:
+                return n_dims + i
+
+        for i, dim in enumerate(converted_dimensions):
+            if target == _key(dim.get("field")):
+                return i
+
+        return None
+
     def create_hypercube(
         self,
         app_handle: int,
         dimensions: List[Dict[str, Any]] = None,
         measures: List[Dict[str, Any]] = None,
-        max_rows: int = 1000,
+        max_rows: int = DEFAULT_HYPERCUBE_MAX_ROWS,
+        sort_by: Optional[Any] = None,
+        sort_order: str = "desc",
+        suppress_zero: bool = False,
+        include_raw_layout: bool = False,
     ) -> Dict[str, Any]:
-        """Create hypercube for data extraction with proper structure."""
+        """
+        Create a hypercube (grouped aggregation) and return its first page.
+
+        `sort_by` names the column that drives the row order — a measure
+        label/expression or a dimension field name. It is translated into
+        `qInterColumnSortOrder` with that column first, which is the only
+        way the Engine sorts rows by a measure. Sorting by an already
+        computed measure column costs nothing extra, unlike
+        `qSortByExpression`, which makes the Engine evaluate the aggregate
+        a second time purely for ordering.
+        """
         import time
         import traceback as _tb
         step = "init"
         t0 = time.monotonic()
+        timings: Dict[str, float] = {}
         try:
             # Handle empty dimensions/measures
             if dimensions is None:
@@ -1092,50 +1225,35 @@ class QlikEngineAPI:
             if measures is None:
                 measures = []
 
-            # Convert old format (list of strings) to new format (list of dicts) for backward compatibility
+            # Normalise both the legacy string form and the dict form into
+            # dicts. Every branch COPIES the caller's dict — mutating the
+            # argument in place would leak our defaults back into the
+            # caller's data and make `dimensions` in the response something
+            # other than the echoed input it claims to be.
             converted_dimensions = []
             for dim in dimensions:
                 if isinstance(dim, str):
-                    # Old format - just field name
-                    converted_dimensions.append({
-                        "field": dim,
-                        "sort_by": {
-                            "qSortByNumeric": 0,
-                            "qSortByAscii": 1,  # Default: ASCII ascending
-                            "qSortByExpression": 0,
-                            "qExpression": ""
-                        }
-                    })
+                    dim = {"field": dim}
                 else:
-                    # New format - dict with field and sort options
-                    # Set defaults if not specified
-                    if "sort_by" not in dim:
-                        dim["sort_by"] = {
-                            "qSortByNumeric": 0,
-                            "qSortByAscii": 1,  # Default: ASCII ascending
-                            "qSortByExpression": 0,
-                            "qExpression": ""
-                        }
-                    converted_dimensions.append(dim)
+                    dim = dict(dim)
+                dim.setdefault("sort_by", {
+                    "qSortByNumeric": 0,
+                    "qSortByAscii": 1,  # Default: ASCII ascending
+                    "qSortByExpression": 0,
+                    "qExpression": "",
+                })
+                converted_dimensions.append(dim)
 
             converted_measures = []
             for measure in measures:
                 if isinstance(measure, str):
-                    # Old format - just expression
-                    converted_measures.append({
-                        "expression": measure,
-                        "sort_by": {
-                            "qSortByNumeric": -1  # Default: numeric descending
-                        }
-                    })
+                    measure = {"expression": measure}
                 else:
-                    # New format - dict with expression and sort options
-                    # Set defaults if not specified
-                    if "sort_by" not in measure:
-                        measure["sort_by"] = {
-                            "qSortByNumeric": -1  # Default: numeric descending
-                        }
-                    converted_measures.append(measure)
+                    measure = dict(measure)
+                # Default: numeric descending. Only takes effect once this
+                # measure is the leading column of qInterColumnSortOrder.
+                measure.setdefault("sort_by", {"qSortByNumeric": -1})
+                converted_measures.append(measure)
 
             # Hard limits enforced in our layer — NOT in Qlik Engine.
             # The intent is to force the LLM to design narrow, focused
@@ -1146,6 +1264,55 @@ class QlikEngineAPI:
             HARD_MAX_ROWS = 5000
             HARD_MAX_CELLS = 9900  # Qlik's own cell cap per NxPage is 10k
             n_cols = len(converted_dimensions) + len(converted_measures)
+            n_dims = len(converted_dimensions)
+            column_names = self._column_names(converted_dimensions, converted_measures)
+
+            # ── Resolve the requested sort ────────────────────────────────
+            # Both failures below are caller mistakes, so they are reported
+            # as structured `plan` errors listing the valid options rather
+            # than being silently ignored — a silently ignored sort returns
+            # plausible-looking rows in the wrong order, which is worse
+            # than an error.
+            step = "plan"
+            sort_column_index: Optional[int] = None
+            sort_direction: Optional[int] = None
+            if sort_by is not None and n_cols > 0:
+                sort_direction = self._normalize_sort_order(sort_order)
+                if sort_direction is None:
+                    return {
+                        "error": (
+                            f"sort_order={sort_order!r} is not a valid sort "
+                            f"direction."
+                        ),
+                        "error_category": "invalid_sort",
+                        "failed_step": "plan",
+                        "hint": (
+                            "Use sort_order=\"desc\" for largest-first "
+                            "(top-N) or sort_order=\"asc\" for "
+                            "smallest-first (bottom-N)."
+                        ),
+                    }
+                sort_column_index = self._resolve_sort_column(
+                    sort_by, converted_dimensions, converted_measures
+                )
+                if sort_column_index is None:
+                    return {
+                        "error": (
+                            f"sort_by={sort_by!r} does not match any column "
+                            f"of this hypercube."
+                        ),
+                        "error_category": "invalid_sort",
+                        "failed_step": "plan",
+                        "available_columns": column_names,
+                        "hint": (
+                            "sort_by must name one of the columns listed in "
+                            "`available_columns` — a measure label, a "
+                            "measure expression, or a dimension field name "
+                            "(matching ignores case and square brackets). "
+                            "To rank by an aggregate, give the measure a "
+                            "`label` and pass that same label as sort_by."
+                        ),
+                    }
 
             # Reject max_rows over the hard cap.
             if max_rows > HARD_MAX_ROWS:
@@ -1212,6 +1379,41 @@ class QlikEngineAPI:
                 n_cols * first_page_height, HARD_MAX_CELLS,
             )
 
+            # ── Apply the resolved sort ───────────────────────────────────
+            # qInterColumnSortOrder decides WHICH column drives the row
+            # order; the column's own criteria decide the DIRECTION. Both
+            # halves are required: a measure whose qSortBy is left at the
+            # Engine default ("ascending alphabetic") produces a nonsense
+            # order even when it leads qInterColumnSortOrder.
+            inter_column_sort_order = list(range(n_cols))
+            suppress_missing = False
+            if sort_column_index is not None and sort_direction is not None:
+                inter_column_sort_order = (
+                    [sort_column_index]
+                    + [i for i in range(n_cols) if i != sort_column_index]
+                )
+                if sort_column_index >= n_dims:
+                    # Sorting by a measure: order by its computed numeric value.
+                    converted_measures[sort_column_index - n_dims]["sort_by"] = {
+                        "qSortByNumeric": sort_direction,
+                    }
+                    # Rows where the measure is NULL carry no ranking
+                    # information and would otherwise pollute the top/bottom
+                    # of the result.
+                    suppress_missing = True
+                else:
+                    # Sorting by a dimension: set both numeric and ASCII in
+                    # the same direction. Qlik applies numeric ordering to
+                    # numeric fields and alphabetical ordering to text
+                    # fields, so this single pair covers both without the
+                    # caller having to know the field's type.
+                    converted_dimensions[sort_column_index]["sort_by"] = {
+                        "qSortByNumeric": sort_direction,
+                        "qSortByAscii": sort_direction,
+                        "qSortByExpression": 0,
+                        "qExpression": "",
+                    }
+
             # Create correct hypercube structure
             hypercube_def = {
                 "qDimensions": [
@@ -1250,10 +1452,10 @@ class QlikEngineAPI:
                         "qWidth": n_cols,
                     }
                 ],
-                "qSuppressZero": False,
-                "qSuppressMissing": False,
+                "qSuppressZero": bool(suppress_zero),
+                "qSuppressMissing": suppress_missing,
                 "qMode": "S",
-                "qInterColumnSortOrder": list(range(n_cols)),
+                "qInterColumnSortOrder": inter_column_sort_order,
             }
 
             obj_def = {
@@ -1275,8 +1477,9 @@ class QlikEngineAPI:
                 "CreateSessionObject", [obj_def], handle=app_handle,
                 timeout=self.ws_operation_timeout,
             )
+            timings["create_session_object_seconds"] = round(time.monotonic() - t_step, 3)
             logger.info("create_hypercube: %s done in %.2fs",
-                        step, time.monotonic() - t_step)
+                        step, timings["create_session_object_seconds"])
 
             if "qReturn" not in result or "qHandle" not in result["qReturn"]:
                 return {
@@ -1293,8 +1496,9 @@ class QlikEngineAPI:
             t_step = time.monotonic()
             layout = self.send_request("GetLayout", [], handle=cube_handle,
                                        timeout=self.ws_operation_timeout)
+            timings["get_layout_seconds"] = round(time.monotonic() - t_step, 3)
             logger.info("create_hypercube: %s done in %.2fs",
-                        step, time.monotonic() - t_step)
+                        step, timings["get_layout_seconds"])
 
             if "qLayout" not in layout or "qHyperCube" not in layout["qLayout"]:
                 return {
@@ -1318,31 +1522,79 @@ class QlikEngineAPI:
             # analysis and re-run it.
             truncation_warning: Optional[str] = None
             if total_rows_on_server > rows_fetched:
-                truncation_warning = (
-                    f"TRUNCATED: server has {total_rows_on_server} rows, "
-                    f"returned only {rows_fetched} (max_rows={max_rows}, "
-                    f"HARD_LIMIT={HARD_MAX_ROWS}). "
-                    f"Narrow the query instead of asking for more rows:\n"
-                    f"  - add set-analysis filters inside measures: "
-                    f"{{<[<DimPeriod>]={{<val>}}>}} — substitute real "
-                    f"field and value\n"
-                    f"  - use qSortByExpression for top-N ranking and "
-                    f"set max_rows small (15-50)\n"
-                    f"  - split into multiple focused queries (one per "
-                    f"category/period) rather than a giant dump"
-                )
+                if sort_column_index is not None:
+                    # Already a ranked query: the truncation is intended,
+                    # the caller asked for the top/bottom N of a bigger set.
+                    truncation_warning = (
+                        f"Showing the {rows_fetched} "
+                        f"{'highest' if sort_direction == -1 else 'lowest'} "
+                        f"rows by '{column_names[sort_column_index]}' out of "
+                        f"{total_rows_on_server} total rows on the server. "
+                        f"This is expected for a ranked query — raise `limit` "
+                        f"only if you genuinely need more of the ranking."
+                    )
+                else:
+                    truncation_warning = (
+                        f"TRUNCATED: server has {total_rows_on_server} rows, "
+                        f"returned only {rows_fetched} (limit={max_rows}, "
+                        f"HARD_LIMIT={HARD_MAX_ROWS}), and NO sort was "
+                        f"requested — so these are arbitrary rows, not the "
+                        f"most important ones.\n"
+                        f"  - to rank: pass sort_by=\"<measure label>\" with "
+                        f"sort_order=\"desc\" (top-N) or \"asc\" (bottom-N)\n"
+                        f"  - to narrow: add set-analysis filters inside the "
+                        f"measures, e.g. {{<[<DimPeriod>]={{<val>}}>}}\n"
+                        f"  - to split: run one focused query per category "
+                        f"instead of one giant dump"
+                    )
 
-            return {
-                "hypercube_handle": cube_handle,
-                "hypercube_data": hypercube,
-                "dimensions": converted_dimensions,
-                "measures": converted_measures,
+            # Release the session object — the cube has been fully read into
+            # `hypercube`, and leaving it alive pins its result set in Engine
+            # memory for the rest of the session.
+            step = "DestroySessionObject"
+            try:
+                self.send_request(
+                    "DestroySessionObject", [obj_def["qInfo"]["qId"]],
+                    handle=app_handle, timeout=self.ws_operation_timeout,
+                )
+            except Exception as cleanup_exc:
+                # Never fail a successful query because cleanup failed.
+                logger.warning("create_hypercube: DestroySessionObject failed: %s",
+                               cleanup_exc)
+
+            timings["total_seconds"] = round(time.monotonic() - t0, 3)
+
+            response: Dict[str, Any] = {
+                "columns": column_names,
+                "rows": self._matrix_to_rows(initial_pages, column_names),
                 "total_rows": total_rows_on_server,
                 "returned_rows": rows_fetched,
                 "total_columns": total_cols,
+                "sorted_by": (
+                    column_names[sort_column_index]
+                    if sort_column_index is not None else None
+                ),
+                "sort_order": (
+                    ("desc" if sort_direction == -1 else "asc")
+                    if sort_column_index is not None else None
+                ),
+                "grand_total": [
+                    cell.get("qNum") if cell.get("qNum") != "NaN" else cell.get("qText")
+                    for cell in hypercube.get("qGrandTotalRow", []) or []
+                ],
                 "hard_max_rows": HARD_MAX_ROWS,
                 "truncation_warning": truncation_warning,
+                "timings": timings,
+                "dimensions": converted_dimensions,
+                "measures": converted_measures,
             }
+            if include_raw_layout:
+                # Opt-in: the full qHyperCube (qDimensionInfo, qMeasureInfo,
+                # qDataPages with qElemNumber/qState per cell). Costs several
+                # times more tokens than `rows`, so it is off by default.
+                response["hypercube_handle"] = cube_handle
+                response["hypercube_data"] = hypercube
+            return response
 
         except Exception as e:
             elapsed = time.monotonic() - t0
@@ -1353,9 +1605,18 @@ class QlikEngineAPI:
             if isinstance(e, (_socket.timeout, TimeoutError)):
                 category = "socket_timeout"
                 hint = (
-                    f"WebSocket recv() timed out after ~{self.ws_operation_timeout:.0f}s on step '{step}'. "
-                    f"Increase QLIK_WS_OPERATION_TIMEOUT or simplify the hypercube "
-                    f"(fewer dimensions/measures, smaller max_rows, lighter expressions)."
+                    f"Qlik Engine did not answer within ~{self.ws_operation_timeout:.0f}s "
+                    f"on step '{step}'. Make the query cheaper before making the "
+                    f"timeout longer:\n"
+                    f"  1. Narrow every measure with set analysis, e.g. "
+                    f"Sum({{<[Year]={{2026}}>}}Amount) — this is the single "
+                    f"biggest win on large fact tables.\n"
+                    f"  2. Drop high-cardinality dimensions; rank with "
+                    f"sort_by + a small limit instead of returning every group.\n"
+                    f"  3. Never put an expression in a dimension `field` — it "
+                    f"is evaluated per row of the fact table.\n"
+                    f"  4. Only then raise QLIK_WS_TIMEOUT (currently "
+                    f"{self.ws_operation_timeout:.0f}s)."
                 )
                 # Timeout on recv leaves the socket in an inconsistent state —
                 # invalidate cache so the next call opens a fresh connection.
@@ -1388,6 +1649,7 @@ class QlikEngineAPI:
                 "failed_step": step,
                 "elapsed_seconds": round(elapsed, 2),
                 "ws_operation_timeout": self.ws_operation_timeout,
+                "timings": timings,
                 "hint": hint,
                 "traceback": tb,
                 "details": "Error in create_hypercube method",

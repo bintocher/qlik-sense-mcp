@@ -167,6 +167,32 @@ something non-standard.
 | `QLIK_VERIFY_SSL` | `false` disables TLS verification | `true` |
 | `QLIK_CA_CERT_PATH` | Path to a corporate CA bundle | unset |
 
+### 2.4 Session limit — run ONE session per token
+
+**Qlik allows at most 5 concurrent sessions per user identity.** Every
+JWT is issued for one analyst, so all of that analyst's MCP activity
+shares the same 5-session budget. Exceeding it does not simply queue —
+Qlik treats it as abuse and can **lock the account**.
+
+Practical rules:
+
+- Run **one** MCP server process per token, and keep it running. The
+  server reuses a single Engine WebSocket and a single bootstrapped
+  session for every tool call, so a long-running process costs exactly
+  one session no matter how many queries you send through it.
+- Do **not** start the same `mcp.json` entry from several editors at
+  once (Cursor + Claude Code + Claude Desktop side by side), and do not
+  hand the same token to two people.
+- Do not run parallel MCP clients "to make things faster" — the tools
+  are serialised over one socket anyway, so extra sessions buy nothing
+  and risk the lockout.
+- If an analyst is locked out, wait for the sessions to expire (default
+  Qlik idle timeout is 30 minutes) or have an admin drop them in the
+  QMC session monitor.
+
+This is a Qlik Sense platform limit, not something this MCP server can
+raise or work around.
+
 ---
 
 ## How it works under the hood
