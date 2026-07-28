@@ -1,4 +1,8 @@
-"""Main MCP Server for Qlik Sense APIs – rewritten with FastMCP."""
+"""Main MCP Server for Qlik Sense APIs.
+
+Runs on either MCP SDK line: 1.x (`FastMCP`) or 2.x (`MCPServer`). The
+host object is selected at import time — see `MCP_SDK_MAJOR` below.
+"""
 
 import asyncio
 import functools
@@ -19,7 +23,22 @@ if sys.platform == "win32":
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
 
-from mcp.server.fastmcp import FastMCP
+# MCP SDK 2.0 (released 2026-07-28) removed `mcp.server.fastmcp` and
+# replaced the FastMCP host with `MCPServer`. The two are compatible where
+# it matters to us — same `@tool()` decorator, same `run_stdio_async()` /
+# `run_streamable_http_async()` — but 2.x takes the bind address in
+# `run_streamable_http_async()` instead of the constructor.
+#
+# Both SDK lines are supported so that existing installs pinned to 1.x
+# keep working and fresh installs get 2.x.
+try:
+    from mcp.server.mcpserver import MCPServer as _McpHost
+
+    MCP_SDK_MAJOR = 2
+except ImportError:  # mcp < 2.0
+    from mcp.server.fastmcp import FastMCP as _McpHost
+
+    MCP_SDK_MAJOR = 1
 
 from .config import (
     QlikSenseConfig,
@@ -95,14 +114,15 @@ def _init_clients():
 
 _init_clients()
 
-# ─── FastMCP server ─────────────────────────────────────────────────────────
+# ─── MCP server host ────────────────────────────────────────────────────────
 
+_mcp_host = "127.0.0.1"
 _mcp_port = int(os.getenv("MCP_PORT", "8000"))
-mcp = FastMCP(
-    "qlik-sense-mcp-server",
-    host="127.0.0.1",
-    port=_mcp_port,
-)
+if MCP_SDK_MAJOR >= 2:
+    # 2.x takes the bind address in run_streamable_http_async(), not here.
+    mcp = _McpHost("qlik-sense-mcp-server")
+else:
+    mcp = _McpHost("qlik-sense-mcp-server", host=_mcp_host, port=_mcp_port)
 
 # Reload-task management talks to QRS endpoints (/qrs/reloadtask,
 # /qrs/executionresult, /qrs/reloadtask/{id}/scriptlog) that require
@@ -1946,8 +1966,14 @@ def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
 
 async def async_main():
     """Async main entry point — runs streamable HTTP transport."""
-    logger.info("Starting qlik-sense-mcp-server v%s (streamable-http on :%d/mcp)", __version__, _mcp_port)
-    await mcp.run_streamable_http_async()
+    logger.info(
+        "Starting qlik-sense-mcp-server v%s (streamable-http on :%d/mcp, mcp SDK %d.x)",
+        __version__, _mcp_port, MCP_SDK_MAJOR,
+    )
+    if MCP_SDK_MAJOR >= 2:
+        await mcp.run_streamable_http_async(host=_mcp_host, port=_mcp_port)
+    else:
+        await mcp.run_streamable_http_async()
 
 
 def main():

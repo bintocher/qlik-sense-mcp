@@ -68,7 +68,12 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.6.0 line
+## Key facts about the v1.7.0 line
+
+- **Runs on both MCP SDK lines.** SDK 2.0 dropped `FastMCP`; the server
+  now picks `MCPServer` (2.x) or `FastMCP` (1.x) at import time, so
+  `mcp>=1.1.0,<3.0.0` all work. Both lines are covered by the test
+  suite and were verified end to end against a live Qlik app.
 
 - **Ranked queries (top-N) in one call.** `engine_create_hypercube`
   takes `sort_by` (a measure label, a measure expression or a dimension

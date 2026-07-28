@@ -4,6 +4,36 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.7.0] - 2026-07-29
+
+### Added
+- **Support for MCP SDK 2.x.** SDK 2.0 removed `mcp.server.fastmcp` and
+  replaced the FastMCP host with `mcp.server.mcpserver.MCPServer`.
+  `server.py` now selects the host class at import time and exposes the
+  result as `MCP_SDK_MAJOR`, so the same code runs on both SDK lines.
+  The only behavioural difference between them is that 2.x takes the
+  bind address in `run_streamable_http_async()` rather than in the
+  constructor; everything else — the `@tool()` decorator, `stdio`, the
+  tool registry used by `--help` — is identical.
+- `tests/test_sdk_compat.py` — asserts that the selected host matches the
+  installed SDK, that every API the server calls exists on it, and that
+  the published `engine_create_hypercube` schema still carries the
+  ranking parameters and its docstring. A future SDK change now fails
+  here instead of in a user's terminal.
+
+### Changed
+- **Dependency relaxed to `mcp>=1.1.0,<3.0.0`.** The `<2.0.0` pin from
+  1.6.1 is no longer needed. The upper bound is kept so the next
+  breaking SDK major cannot break installs again.
+
+### Verified
+- Both SDK lines were exercised end to end: full test suite on mcp
+  1.29.0 and on mcp 2.0.0 (158 tests each), the streamable-HTTP
+  transport answering a real `initialize` + `tools/list` handshake on
+  both (24 tools published with identical schemas), and a live
+  `tools/call` against a 91M-row Qlik app on 2.0.0 returning a correct
+  top-5 ranking.
+
 ## [1.6.1] - 2026-07-28
 
 ### Fixed

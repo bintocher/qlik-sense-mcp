@@ -163,9 +163,25 @@ limit is per-call, not per-session.
 
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 
-The `mcp` package's
-[`FastMCP`](https://github.com/modelcontextprotocol/python-sdk) host
-registers every `@mcp.tool()`-decorated function as an MCP tool. Each
+The host object comes from the
+[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and
+is chosen at import time, because SDK 2.0 (2026-07-28) removed
+`mcp.server.fastmcp`:
+
+| Installed SDK | Host class | `MCP_SDK_MAJOR` |
+|---|---|---|
+| 1.x | `mcp.server.fastmcp.FastMCP` | `1` |
+| 2.x | `mcp.server.mcpserver.MCPServer` | `2` |
+
+Both expose the same `@tool()` decorator, `run_stdio_async()`,
+`run_streamable_http_async()` and `_tool_manager._tools` registry. The
+only difference the server has to care about is the bind address: 1.x
+takes `host`/`port` in the constructor, 2.x in
+`run_streamable_http_async()`. `tests/test_sdk_compat.py` pins this
+contract down so the next SDK change fails in CI rather than at a user's
+first tool call.
+
+The host registers every `@mcp.tool()`-decorated function as an MCP tool. Each
 tool is also wrapped in the local `_timed` decorator, which:
 
 1. Measures wall-clock time of the call.

@@ -10,6 +10,17 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        # MCP SDK 2.0 removed mcp.server.fastmcp, which every release up to
+        # 1.6.0 imported unconditionally — a fresh install resolved to the new
+        # SDK and died at import. Both lines are exercised so that can never
+        # reach PyPI again. "latest" tracks whatever the resolver picks today.
+        mcp-version: [ "1.x", "2.x", "latest" ]
+
+    name: build-test (mcp ${{ matrix.mcp-version }})
+
     steps:
     - uses: actions/checkout@v4
 
@@ -30,10 +41,20 @@ jobs:
     - name: Build package
       run: uv run python -m build
 
-    - name: Test package installation
+    - name: Install package
+      run: uv pip install dist/*.whl || uv pip install dist/*.tar.gz
+
+    - name: Select MCP SDK version
       run: |
-        uv pip install dist/*.whl || uv pip install dist/*.tar.gz
-        uv run python -c "import qlik_sense_mcp_server; import importlib; importlib.import_module('qlik_sense_mcp_server.server'); print('OK')"
+        case "${{ matrix.mcp-version }}" in
+          1.x) uv pip install "mcp>=1.1.0,<2.0.0" ;;
+          2.x) uv pip install "mcp>=2.0.0,<3.0.0" ;;
+          latest) : ;;
+        esac
+        uv run python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
+
+    - name: Test package installation
+      run: uv run python -c "import qlik_sense_mcp_server; import importlib; importlib.import_module('qlik_sense_mcp_server.server'); print('OK')"
 
     - name: Run tests
       run: uv run pytest tests/ -v
