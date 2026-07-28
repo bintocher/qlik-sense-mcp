@@ -82,6 +82,8 @@ class _FakeEngine(QlikEngineAPI):
         self.sent = []
         self.ws_operation_timeout = 30.0
         self.ws_timeout_seconds = 30.0
+        # Stand-in for a live socket: cleanup is skipped when it is None.
+        self.ws = object()
 
     def send_request(self, method, params=None, handle=-1, timeout=None):
         self.sent.append((method, params))
@@ -128,6 +130,20 @@ class TestHypercubeDefinition:
         criteria = cube["qDimensions"][0]["qDef"]["qSortCriterias"][0]
         assert criteria["qSortByNumeric"] == 1
         assert criteria["qSortByAscii"] == 1
+
+    @pytest.mark.parametrize("expression,expected", [
+        ("Sum(ggr)", "Sum(ggr)"),                      # this tool's documented shape
+        ({"qv": "Sum(ggr)"}, "Sum(ggr)"),              # Qlik's own native shape
+        ("", ""),
+    ])
+    def test_dimension_sort_expression_is_never_double_wrapped(self, expression, expected):
+        """{"qv": ...} used to become {"qv": {"qv": ...}}, which Engine ignores."""
+        eng = _FakeEngine()
+        dims = [{"field": "clientid", "sort_by": {
+            "qSortByExpression": -1, "qExpression": expression}}]
+        eng.create_hypercube(1, dims, MEASURES, 10)
+        criteria = eng.cube_def["qDimensions"][0]["qDef"]["qSortCriterias"][0]
+        assert criteria["qExpression"] == {"qv": expected}
 
     def test_without_sort_by_the_legacy_order_is_preserved(self):
         eng = _FakeEngine()
@@ -199,6 +215,49 @@ class TestHypercubeResponse:
         eng.create_hypercube(1, DIMS, MEASURES, 10)
         assert any(m == "DestroySessionObject" for m, _ in eng.sent)
 
+    def test_session_object_is_destroyed_when_get_layout_raises(self):
+        """A leak here pins the result set in Engine memory for the whole session."""
+        class _Exploding(_FakeEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetLayout":
+                    self.sent.append((method, params))
+                    raise Exception("Engine API error: bad expression")
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _Exploding()
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert result["error_category"] == "engine_api_error"
+        assert any(m == "DestroySessionObject" for m, _ in eng.sent)
+
+    def test_no_cleanup_attempted_once_the_socket_is_dead(self):
+        """After a timeout the socket is force-closed; there is nobody to talk to."""
+        class _TimingOut(_FakeEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetLayout":
+                    self.sent.append((method, params))
+                    raise TimeoutError("WebSocket recv() timed out")
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _TimingOut()
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert result["error_category"] == "socket_timeout"
+        assert eng.ws is None
+        assert not any(m == "DestroySessionObject" for m, _ in eng.sent)
+
+    def test_session_object_is_destroyed_on_malformed_layout(self):
+        class _Malformed(_FakeEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetLayout":
+                    self.sent.append((method, params))
+                    return {"unexpected": "shape"}
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _Malformed()
+        eng.ws = object()
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert result["error"] == "No hypercube in layout"
+        assert any(m == "DestroySessionObject" for m, _ in eng.sent)
+
     def test_ranked_truncation_warning_explains_it_is_expected(self):
         eng = _FakeEngine()
         result = eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
@@ -228,6 +287,14 @@ class TestHypercubeGuardRails:
         eng = _FakeEngine()
         result = eng.create_hypercube(1, DIMS, MEASURES, 5001)
         assert result["error_category"] == "limit_exceeded"
+
+    @pytest.mark.parametrize("bad_limit", [0, -7, 1.5, "10", True, None])
+    def test_non_positive_limit_is_rejected(self, bad_limit):
+        """max(1, ...) used to turn limit=0 into a single silently returned row."""
+        eng = _FakeEngine()
+        result = eng.create_hypercube(1, DIMS, MEASURES, bad_limit)
+        assert result["error_category"] == "invalid_limit"
+        assert not eng.sent, "must fail before touching the Engine"
 
     def test_cell_cap(self):
         eng = _FakeEngine()

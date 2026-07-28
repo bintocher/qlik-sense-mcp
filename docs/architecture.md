@@ -163,9 +163,25 @@ limit is per-call, not per-session.
 
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 
-The `mcp` package's
-[`FastMCP`](https://github.com/modelcontextprotocol/python-sdk) host
-registers every `@mcp.tool()`-decorated function as an MCP tool. Each
+The host object comes from the
+[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and
+is chosen at import time, because SDK 2.0 (2026-07-28) removed
+`mcp.server.fastmcp`:
+
+| Installed SDK | Host class | `MCP_SDK_MAJOR` |
+|---|---|---|
+| 1.x | `mcp.server.fastmcp.FastMCP` | `1` |
+| 2.x | `mcp.server.mcpserver.MCPServer` | `2` |
+
+Both expose the same `@tool()` decorator, `run_stdio_async()`,
+`run_streamable_http_async()` and `_tool_manager._tools` registry. The
+only difference the server has to care about is the bind address: 1.x
+takes `host`/`port` in the constructor, 2.x in
+`run_streamable_http_async()`. `tests/test_sdk_compat.py` pins this
+contract down so the next SDK change fails in CI rather than at a user's
+first tool call.
+
+The host registers every `@mcp.tool()`-decorated function as an MCP tool. Each
 tool is also wrapped in the local `_timed` decorator, which:
 
 1. Measures wall-clock time of the call.
@@ -180,6 +196,21 @@ tool is also wrapped in the local `_timed` decorator, which:
    that tools return themselves (timeouts, bad field names, limit
    violations) — a bare "timed out after 180s" does not tell the caller
    which query to fix.
+
+#### Why failures are not flagged as protocol-level errors
+
+Tool failures come back as an ordinary MCP result whose payload contains
+`error`, `error_category`, `hint` and `request` — `isError` stays false.
+This is deliberate. The consumer here is a language model deciding what
+to do next, and the structured payload is what lets it act: the category
+tells it whether to narrow the query or fix a field name, and `request`
+tells it exactly what it sent. Clients that surface `isError` tend to
+collapse the result into a generic failure message and drop that
+payload, which would leave the model with nothing to correct.
+
+The trade-off is that a client keying retries off the protocol-level
+error status will treat a timeout as a success. Such a client should
+branch on the `error` key instead.
 
 #### Per-mode tool registration (since v1.6.0)
 

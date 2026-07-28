@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.7.0] - 2026-07-29
+
+### Added
+- **Support for MCP SDK 2.x.** SDK 2.0 removed `mcp.server.fastmcp` and
+  replaced the FastMCP host with `mcp.server.mcpserver.MCPServer`.
+  `server.py` now selects the host class at import time and exposes the
+  result as `MCP_SDK_MAJOR`, so the same code runs on both SDK lines.
+  The only behavioural difference between them is that 2.x takes the
+  bind address in `run_streamable_http_async()` rather than in the
+  constructor; everything else — the `@tool()` decorator, `stdio`, the
+  tool registry used by `--help` — is identical.
+- `tests/test_sdk_compat.py` — asserts that the selected host matches the
+  installed SDK, that every API the server calls exists on it, and that
+  the published `engine_create_hypercube` schema still carries the
+  ranking parameters and its docstring. A future SDK change now fails
+  here instead of in a user's terminal.
+
+### Changed
+- **Dependency is now `mcp>=1.8.0,<3.0.0`.** The `<2.0.0` pin from 1.6.1
+  is no longer needed. The floor was raised from the long-standing (and
+  incorrect) `1.1.0`: `FastMCP.run_streamable_http_async()` — the default
+  transport — first appears in 1.8.0, so 1.2–1.7 would install happily
+  and then die with `AttributeError` on startup, and 1.1 has no
+  `FastMCP` at all. The upper bound keeps the next breaking SDK major
+  from breaking installs again.
+
+### Fixed
+*(found by an automated review of this release)*
+- **Hypercube session objects leaked on every failure after creation.**
+  `DestroySessionObject` ran only on the success path, so a malformed
+  layout or an Engine error left the result set pinned in Engine memory
+  for the rest of the (deliberately long-lived) session. Cleanup moved
+  into a `finally`; it is skipped only when the socket has already been
+  force-closed, where there is nothing left to talk to.
+- **`limit=0` or a negative limit silently returned one row.** The page
+  height was clamped with `max(1, ...)`, so a nonsensical limit produced
+  data instead of an error. Non-positive and non-integer limits now
+  return a structured `invalid_limit` error before any Engine call.
+- **A dimension sort expression given in Qlik's native `{"qv": "..."}`
+  form was double-wrapped** into `{"qv": {"qv": "..."}}` and silently
+  ignored by the Engine. Both that form and a plain string are now
+  accepted.
+- Corrected the comment and docs around the automatic `qSuppressMissing`
+  applied when ranking by a measure: it is a cube-wide flag that drops
+  rows where *any* measure is missing, not only the ranked one. The
+  Engine offers no per-measure equivalent.
+
+### Verified
+- Both SDK lines were exercised end to end: full test suite on mcp
+  1.29.0 and on mcp 2.0.0 (158 tests each), the streamable-HTTP
+  transport answering a real `initialize` + `tools/list` handshake on
+  both (24 tools published with identical schemas), and a live
+  `tools/call` against a 91M-row Qlik app on 2.0.0 returning a correct
+  top-5 ranking.
+
 ## [1.6.1] - 2026-07-28
 
 ### Fixed

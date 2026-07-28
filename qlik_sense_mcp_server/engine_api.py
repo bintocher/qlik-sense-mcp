@@ -1116,6 +1116,20 @@ class QlikEngineAPI:
         return names
 
     @staticmethod
+    def _as_value_expr(expression: Any) -> Dict[str, Any]:
+        """
+        Wrap a sort expression into Qlik's ValueExpr shape `{"qv": "..."}`.
+
+        Accepts the bare string this tool documents AND the native Qlik
+        form, which is what a caller reading Qlik's own API docs will
+        write. Without this, `{"qv": "Sum(x)"}` was wrapped a second time
+        into `{"qv": {"qv": "Sum(x)"}}` and the Engine ignored the sort.
+        """
+        if isinstance(expression, dict):
+            return {"qv": expression.get("qv", "")}
+        return {"qv": expression or ""}
+
+    @staticmethod
     def _matrix_to_rows(
         data_pages: List[Dict[str, Any]],
         column_names: List[str],
@@ -1226,6 +1240,7 @@ class QlikEngineAPI:
         step = "init"
         t0 = time.monotonic()
         timings: Dict[str, float] = {}
+        created_object_id: Optional[str] = None
         try:
             # Handle empty dimensions/measures
             if dimensions is None:
@@ -1322,6 +1337,25 @@ class QlikEngineAPI:
                         ),
                     }
 
+            # Reject a limit that asks for no rows at all. Without this the
+            # qHeight clamp below turns limit=0 or limit=-7 into a single
+            # row, quietly returning data the caller did not ask for.
+            if not isinstance(max_rows, int) or isinstance(max_rows, bool) or max_rows < 1:
+                return {
+                    "error": (
+                        f"limit={max_rows!r} is not a positive row count."
+                    ),
+                    "error_category": "invalid_limit",
+                    "failed_step": "plan",
+                    "hard_max_rows": HARD_MAX_ROWS,
+                    "hint": (
+                        f"Pass an integer between 1 and {HARD_MAX_ROWS}. For a "
+                        f"single grand-total row use limit=1 with no "
+                        f"dimensions; for a ranking use a small limit (10-50) "
+                        f"together with sort_by."
+                    ),
+                }
+
             # Reject max_rows over the hard cap.
             if max_rows > HARD_MAX_ROWS:
                 return {
@@ -1405,9 +1439,12 @@ class QlikEngineAPI:
                     converted_measures[sort_column_index - n_dims]["sort_by"] = {
                         "qSortByNumeric": sort_direction,
                     }
-                    # Rows where the measure is NULL carry no ranking
-                    # information and would otherwise pollute the top/bottom
-                    # of the result.
+                    # Rows with no measure value carry no ranking information
+                    # and would otherwise pollute the top/bottom of the
+                    # result. Note that qSuppressMissing is a CUBE-WIDE flag:
+                    # it drops rows where any measure is missing, not only
+                    # the one being ranked on. That is the coarsest tool the
+                    # Engine offers here — there is no per-measure switch.
                     suppress_missing = True
                 else:
                     # Sorting by a dimension: set both numeric and ASCII in
@@ -1436,7 +1473,9 @@ class QlikEngineAPI:
                                     "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
                                     "qSortByLoadOrder": 0,
                                     "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
-                                    "qExpression": {"qv": dim["sort_by"].get("qExpression", "")},
+                                    "qExpression": self._as_value_expr(
+                                        dim["sort_by"].get("qExpression", "")
+                                    ),
                                 }
                             ],
                         },
@@ -1497,6 +1536,11 @@ class QlikEngineAPI:
                 }
 
             cube_handle = result["qReturn"]["qHandle"]
+            # From here on the session object exists on the server and MUST be
+            # released on every path. This connection is deliberately
+            # long-lived, so a leak on an error path pins that result set in
+            # Engine memory for the rest of the session.
+            created_object_id = obj_def["qInfo"]["qId"]
 
             # Get layout with data
             step = "GetLayout"
@@ -1555,20 +1599,6 @@ class QlikEngineAPI:
                         f"  - to split: run one focused query per category "
                         f"instead of one giant dump"
                     )
-
-            # Release the session object — the cube has been fully read into
-            # `hypercube`, and leaving it alive pins its result set in Engine
-            # memory for the rest of the session.
-            step = "DestroySessionObject"
-            try:
-                self.send_request(
-                    "DestroySessionObject", [obj_def["qInfo"]["qId"]],
-                    handle=app_handle, timeout=self.ws_operation_timeout,
-                )
-            except Exception as cleanup_exc:
-                # Never fail a successful query because cleanup failed.
-                logger.warning("create_hypercube: DestroySessionObject failed: %s",
-                               cleanup_exc)
 
             timings["total_seconds"] = round(time.monotonic() - t0, 3)
 
@@ -1662,6 +1692,25 @@ class QlikEngineAPI:
                 "traceback": tb,
                 "details": "Error in create_hypercube method",
             }
+
+        finally:
+            # Runs on every path once the object exists: success, early
+            # return for a malformed layout, and any exception in between.
+            # Skipped when the socket was already killed (timeout handling
+            # above), since there is nothing left to talk to.
+            if created_object_id and self.ws is not None:
+                try:
+                    self.send_request(
+                        "DestroySessionObject", [created_object_id],
+                        handle=app_handle, timeout=self.ws_operation_timeout,
+                    )
+                except Exception as cleanup_exc:
+                    # Never turn a completed query into a failure because
+                    # cleanup did not go through.
+                    logger.warning(
+                        "create_hypercube: DestroySessionObject(%s) failed: %s",
+                        created_object_id, cleanup_exc,
+                    )
 
     def get_hypercube_data(
         self,

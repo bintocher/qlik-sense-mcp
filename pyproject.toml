@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qlik-sense-mcp-server"
-version = "1.6.1"
+version = "1.7.0"
 description = "MCP Server for Qlik Sense Enterprise APIs"
 readme = "README.md"
 license = {text = "MIT"}
@@ -20,10 +20,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis"
 ]
 dependencies = [
-    # mcp 2.0.0 (2026-07-28) removed mcp.server.fastmcp entirely — the whole
-    # FastMCP host this server is built on. Pin below 2.0 until the server is
-    # ported to the new mcp.server.mcpserver API.
-    "mcp>=1.1.0,<2.0.0",
+    # Both SDK lines are supported: 1.x via mcp.server.fastmcp.FastMCP and
+    # 2.x via mcp.server.mcpserver.MCPServer (see server.py). Capped below
+    # 3.0 so the next breaking SDK release cannot break installs again.
+    # Floor is 1.8.0: FastMCP.run_streamable_http_async() — the default
+    # transport — first appears there (1.7.x has FastMCP but no HTTP runner,
+    # and 1.1 has no FastMCP at all).
+    "mcp>=1.8.0,<3.0.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
     "python-dotenv>=1.0.0",
