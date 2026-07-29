@@ -302,16 +302,61 @@ class QlikEngineAPI:
         # Pass app_id so connect() uses the per-app WebSocket endpoint first
         self.connect(app_id=app_id)
 
+        handle, has_data = self._open_doc_verified(app_id, no_data=no_data)
+
+        # If we need data but Qlik joined us to (or kept us on) a no-data
+        # session — e.g. session sharing attached to an existing no-data
+        # session for this user+app — retry once against a fresh connection
+        # before giving up. Trusting the requested `no_data` flag here is
+        # exactly the bug: GetAppLayout/GetAppProperties succeed regardless,
+        # so a stale no-data handle silently yields an empty data model
+        # later (GetTablesAndKeys returns qtr: []) instead of an error.
+        if needs_data and not has_data:
+            logger.warning(
+                "App %s opened without data despite no_data=False; "
+                "retrying with a fresh connection", app_id,
+            )
+            self.disconnect()
+            self.connect(app_id=app_id)
+            handle, has_data = self._open_doc_verified(app_id, no_data=no_data)
+            if not has_data:
+                self.disconnect()
+                raise QlikEngineError(
+                    f"App {app_id} remains opened without data (qIsOpenedWithoutData=True) "
+                    f"after retry — the data model will appear empty. This usually means "
+                    f"the Engine session was shared/attached to an existing no-data session "
+                    f"for this user+app."
+                )
+
+        self._cached_app_id = app_id
+        self._cached_app_handle = handle
+        self._cached_has_data = has_data
+        return handle
+
+    def _open_doc_verified(self, app_id: str, no_data: bool) -> "tuple[int, bool]":
+        """Open the doc and verify the real data state via GetAppLayout.
+
+        Returns (handle, has_data) where has_data reflects Engine's own
+        `qIsOpenedWithoutData` flag rather than the requested `no_data` —
+        the two can disagree when the session is shared/attached.
+        """
         app_result = self.open_doc(app_id, no_data=no_data)
         handle = app_result.get("qReturn", {}).get("qHandle", -1)
         if handle == -1:
             self.disconnect()
             raise Exception(f"Failed to open app {app_id}: {app_result}")
 
-        self._cached_app_id = app_id
-        self._cached_app_handle = handle
-        self._cached_has_data = not no_data
-        return handle
+        try:
+            layout = self.send_request("GetAppLayout", [], handle=handle)
+            opened_without_data = bool(
+                layout.get("qLayout", {}).get("qIsOpenedWithoutData", no_data)
+            )
+        except Exception:
+            # If we can't even verify, fall back to trusting the request —
+            # better than blocking on an unrelated GetAppLayout hiccup.
+            opened_without_data = no_data
+
+        return handle, not opened_without_data
 
     def _set_socket_timeout(self, timeout: float) -> None:
         """Set timeout on the underlying WebSocket socket."""
@@ -931,9 +976,9 @@ class QlikEngineAPI:
                 [
                     {"qcx": 1000, "qcy": 1000},  # Max dimensions
                     {"qcx": 0, "qcy": 0},  # Min dimensions
-                    30,  # Max tables
-                    True,  # Include system tables
-                    False,  # Include hidden fields
+                    30,  # qCellHeight
+                    True,  # qSyntheticMode
+                    False,  # qIncludeSysVars
                 ],
                 handle=app_handle,
             )
@@ -2874,9 +2919,9 @@ class QlikEngineAPI:
                 [
                     {"qcx": 1000, "qcy": 1000},  # Max dimensions
                     {"qcx": 0, "qcy": 0},  # Min dimensions
-                    30,  # Max tables
-                    True,  # Include system tables
-                    False,  # Include hidden fields
+                    30,  # qCellHeight
+                    True,  # qSyntheticMode
+                    False,  # qIncludeSysVars
                 ],
                 handle=app_handle,
             )
@@ -3081,9 +3126,9 @@ class QlikEngineAPI:
                 [
                     {"qcx": 1000, "qcy": 1000},  # Max dimensions
                     {"qcx": 0, "qcy": 0},  # Min dimensions
-                    50,  # Max tables
-                    False,  # Include system tables
-                    False,  # Include hidden fields
+                    50,  # qCellHeight
+                    False,  # qSyntheticMode
+                    False,  # qIncludeSysVars
                 ],
                 handle=app_handle,
             )
