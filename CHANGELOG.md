@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.7.1] - 2026-07-29
+
+### Fixed
+- **`ensure_app()` could cache a handle as "has data" when Engine actually
+  opened it without data.** The cached-connection reuse logic trusted the
+  requested `no_data` flag rather than checking what Engine actually did.
+  If a WebSocket session got shared/attached to an existing no-data
+  session for the same user+app, `GetAppLayout`/`GetAppProperties` still
+  succeeded, but `GetTablesAndKeys` silently returned `qtr: []` — an app
+  looked fully readable while its data model came back empty, with no
+  error surfaced. `ensure_app()` now reads Engine's own
+  `qIsOpenedWithoutData` from `GetAppLayout` right after `OpenDoc`,
+  retries once on a fresh connection if data was requested but not
+  granted, and raises `QlikEngineError` instead of returning a handle
+  that would later produce a silently empty data model.
+- Corrected misleading inline comments on `GetTablesAndKeys` positional
+  arguments (`qCellHeight` / `qSyntheticMode` / `qIncludeSysVars`) in
+  three call sites — the values were already correct, only the comments
+  describing them were wrong.
+
 ## [1.7.0] - 2026-07-29
 
 ### Added
