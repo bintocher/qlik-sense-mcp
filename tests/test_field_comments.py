@@ -8,6 +8,7 @@ meant from its name.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,45 +97,55 @@ class TestGetFieldDescription:
         assert api.get_field_description(1, "nope") == {}
 
 
+FIELDS_PAYLOAD = {
+    "fields": [
+        {
+            "field_name": "Amount",
+            "table_name": "Orders",
+            "comment": "Order amount, net of refunds",
+            "table_comment": "Order facts",
+            "rows_count": 2,
+            "distinct_values": 2,
+            "tags": ["$numeric"],
+        },
+        {
+            "field_name": "OrderId",
+            "table_name": "Orders",
+            "comment": "",
+            "table_comment": "Order facts",
+            "rows_count": 2,
+            "distinct_values": 2,
+            "tags": ["$integer"],
+        },
+    ]
+}
+
+
 class TestAppDetailsPayload:
     """`get_app_details` emits `comment` only where the script set one."""
 
     @pytest.fixture(autouse=True)
     def _stub_apis(self, monkeypatch):
+        # Without Qlik env vars the module-level clients are None (that is
+        # how CI runs), so replace the whole client objects rather than
+        # patching attributes on them.
         monkeypatch.setattr(srv, "_check", lambda: None)
         monkeypatch.setattr(
-            srv.repo_api,
-            "get_app_by_id",
-            lambda app_id: {"id": app_id, "name": "App", "published": False},
-            raising=False,
+            srv,
+            "repo_api",
+            SimpleNamespace(
+                get_app_by_id=lambda app_id: {
+                    "id": app_id, "name": "App", "published": False
+                }
+            ),
         )
-        monkeypatch.setattr(srv.engine_api, "ensure_app", lambda *a, **kw: 1, raising=False)
         monkeypatch.setattr(
-            srv.engine_api,
-            "get_fields",
-            lambda handle: {
-                "fields": [
-                    {
-                        "field_name": "Amount",
-                        "table_name": "Orders",
-                        "comment": "Order amount, net of refunds",
-                        "table_comment": "Order facts",
-                        "rows_count": 2,
-                        "distinct_values": 2,
-                        "tags": ["$numeric"],
-                    },
-                    {
-                        "field_name": "OrderId",
-                        "table_name": "Orders",
-                        "comment": "",
-                        "table_comment": "Order facts",
-                        "rows_count": 2,
-                        "distinct_values": 2,
-                        "tags": ["$integer"],
-                    },
-                ]
-            },
-            raising=False,
+            srv,
+            "engine_api",
+            SimpleNamespace(
+                ensure_app=lambda *a, **kw: 1,
+                get_fields=lambda handle: FIELDS_PAYLOAD,
+            ),
         )
 
     def _details(self):
