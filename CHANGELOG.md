@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.7.2] - 2026-07-31
+
+### Added
+- **Field and table comments are now returned.** Qlik keeps the business
+  description of a column in `qComment`, set by `COMMENT FIELD x WITH
+  '...'` / `COMMENT TABLE t WITH '...'` in the load script, and hands it
+  out in `GetTablesAndKeys` for every field and table. The server used to
+  drop it — `get_app_details` reported a hard-coded empty comment — so an
+  LLM had to infer a column's meaning from its name alone. Now
+  `get_app_details` puts a `comment` key on every table and field that
+  carries one, and `get_app_field` returns `field_comment` for the field
+  it lists. The key is omitted when the script sets no comment, so apps
+  without comments pay nothing in context size.
+- `QlikEngineAPI.get_field_description()` — thin wrapper over the Engine
+  `GetFieldDescription` method: name, comment, source tables, cardinality,
+  byte size for a single field, with no data page and no hypercube.
+  Returns `{}` for a field the model does not know.
+- `tests/test_field_comments.py` — covers comment propagation through
+  `get_fields`, `get_field_description` and the `get_app_details` payload,
+  including the "no comment set" case that must not emit the key.
+
 ## [1.7.1] - 2026-07-29
 
 ### Fixed

@@ -70,6 +70,12 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 
 ## Key facts about the v1.7.0 line
 
+- **Column meanings, not just column names.** Fields and tables commented
+  in the load script (`COMMENT FIELD` / `COMMENT TABLE`) carry that text
+  into `get_app_details` as `comment`, and into `get_app_field` as
+  `field_comment`, so the model reads what a column means instead of
+  guessing from its name. Added in 1.7.2.
+
 - **Runs on both MCP SDK lines.** SDK 2.0 dropped `FastMCP`; the server
   now picks `MCPServer` (2.x) or `FastMCP` (1.x) at import time, so
   `mcp>=1.1.0,<3.0.0` all work. Both lines are covered by the test

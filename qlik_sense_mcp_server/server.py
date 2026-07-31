@@ -491,9 +491,12 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         JSON with `metainfo` (app_id, name, description, stream, modified_dttm,
         reload_dttm), `tables` (summary of each table), and `fields` (every
         non-system, non-hidden field with its table, is_key flag, distinct_values,
-        row count, and tags). Use the `fields` list to check field names and
-        cardinalities before writing hypercube dimensions.
-    
+        row count, and tags). Tables and fields carrying a `COMMENT TABLE` /
+        `COMMENT FIELD` text from the load script also get a `comment` key —
+        that is the business description of the column, so read it before
+        guessing a field's meaning from its name. The key is absent when the
+        script sets no comment.
+
     Example:
         Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
         Returns: {"tool_call_seconds": 2.84,
@@ -502,10 +505,11 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
                                "reload_dttm": "2026-07-27T03:00:00.000Z"},
                   "warnings": ["Large fact table(s) detected ..."],
                   "tables": [{"name": "Orders", "fields_count": 12,
-                              "rows": 91028794}],
+                              "rows": 91028794, "comment": "Order facts"}],
                   "fields": [{"name": "Amount", "table": "Orders",
                               "is_key": false, "distinct_values": 9797173,
-                              "rows": 91028794, "tags": ["$numeric"]}],
+                              "rows": 91028794, "tags": ["$numeric"],
+                              "comment": "Order amount, net of refunds"}],
                   "tables_count": 8, "fields_count": 120}
 
     Read `warnings` first — it tells you which tables are too big to
@@ -569,21 +573,31 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
                 continue
             tname = f.get("table_name", "")
             table_map.setdefault(tname, []).append(f)
-            fields.append({
+            entry = {
                 "name": f.get("field_name", ""),
                 "table": tname,
                 "is_key": f.get("is_key", False),
                 "distinct_values": f.get("distinct_values", 0),
                 "rows": f.get("rows_count", 0),
                 "tags": f.get("tags", []),
-            })
+            }
+            # COMMENT FIELD text, when the load script sets one. Emitted only
+            # when non-empty: most apps comment a handful of fields, and an
+            # empty key on every field is pure noise in the LLM context.
+            if f.get("comment"):
+                entry["comment"] = f["comment"]
+            fields.append(entry)
         for tname, tfields in table_map.items():
             rows = max((f.get("rows_count", 0) for f in tfields), default=0)
-            tables.append({
+            entry = {
                 "name": tname,
                 "fields_count": len(tfields),
                 "rows": rows,
-            })
+            }
+            comment = next((f.get("table_comment") for f in tfields if f.get("table_comment")), "")
+            if comment:
+                entry["comment"] = comment
+            tables.append(entry)
 
     # Build performance warnings: huge tables / high-cardinality keys are
     # the main source of hypercube timeouts on this app. Surface them so
@@ -1175,12 +1189,15 @@ def get_app_field(
     Returns:
         JSON `{ "field_values": ["val1", "val2", ...] }` — plain list after
         filtering and pagination. Order is by frequency descending on the
-        Qlik side.
-    
+        Qlik side. When the load script attached a `COMMENT FIELD` text to
+        this field, the response also carries `field_comment` with that
+        business description.
+
     Example (see what values a dimension holds):
         Call: {"app_id": "a1b2...", "field_name": "Region", "limit": 5}
         Returns: {"tool_call_seconds": 0.7,
-                  "field_values": ["North", "South", "West"]}
+                  "field_values": ["North", "South", "West"],
+                  "field_comment": "Sales region of the client"}
 
     Example (wildcard search; `fallback_used` appears when the fast
     ListObject path returned nothing and a hypercube was used instead):
@@ -1218,6 +1235,11 @@ def get_app_field(
                     filtered.append(cell_text)
             values = filtered
         out: Dict[str, Any] = {"field_values": values[off:off + lim]}
+        # COMMENT FIELD text of this very field, when the script sets one —
+        # one cheap GetFieldDescription call, no data page involved.
+        comment = engine_api.get_field_description(app_handle, field_name).get("comment")
+        if comment:
+            out["field_comment"] = comment
         # Surface internal hints from get_field_values so the LLM knows
         # whether the result came from the fast ListObject path or from the
         # heavier hypercube fallback, and whether anything looked off.

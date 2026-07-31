@@ -28,7 +28,7 @@ categories. The lists below are a quick map only.
 |------|---------|
 | `get_about` | Qlik Sense server info: version, build, node type. Use to verify connectivity. |
 | `get_apps` | List apps with filters (`name`, `stream`, `published`) and pagination. `limit` capped at 50. |
-| `get_app_details` | App overview: metadata, full table list with row counts, full field list with `distinct_values`, plus a `warnings` array that flags huge fact tables and high-cardinality fields. Always call this before building a hypercube. |
+| `get_app_details` | App overview: metadata, full table list with row counts, full field list with `distinct_values`, plus a `warnings` array that flags huge fact tables and high-cardinality fields. Tables and fields that carry a `COMMENT TABLE` / `COMMENT FIELD` text from the load script also get a `comment` key — the business meaning of the column, absent when the script sets none. Always call this before building a hypercube. |
 
 ## Engine API
 
@@ -39,7 +39,7 @@ categories. The lists below are a quick map only.
 | `get_app_sheets` | List of sheets in the app, with title and description. |
 | `get_app_sheet_objects` | List of objects on a specific sheet, with `object_id`, `object_type`, `object_description`. |
 | `get_app_object` | Full layout of one specific object via `GetObject` + `GetLayout`. Reverse-engineers an existing chart. |
-| `get_app_field` | Distinct values of one field with pagination and wildcard search. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. |
+| `get_app_field` | Distinct values of one field with pagination and wildcard search. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. Adds `field_comment` when the load script commented that field. |
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |
 | `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, count, non-null count, min, max, null %, completeness). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
 | `engine_create_hypercube` | Build an arbitrary `GROUP BY` hypercube — the main data-analysis tool. Supports ranking directly: `sort_by` (measure label / measure expression / dimension field) + `sort_order` (`desc` / `asc`) + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are dropped by default — pass `exclude_null_dimensions=false` to keep them. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. Read the full docstring — it covers set-analysis patterns, the no-expression-in-dimension rule and the session limit. |
