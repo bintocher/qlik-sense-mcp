@@ -989,12 +989,18 @@ class QlikEngineAPI:
             if "qtr" in result:
                 for table in result["qtr"]:
                     table_name = table.get("qName", "Unknown")
+                    table_comment = table.get("qComment", "")
 
                     if "qFields" in table:
                         for field in table["qFields"]:
                             field_info = {
                                 "field_name": field.get("qName", ""),
                                 "table_name": table_name,
+                                # COMMENT FIELD / COMMENT TABLE from the load
+                                # script — the only human description a field
+                                # carries in the data model.
+                                "comment": field.get("qComment", ""),
+                                "table_comment": table_comment,
                                 "data_type": field.get("qType", ""),
                                 "is_key": field.get("qIsKey", False),
                                 "is_system": field.get("qIsSystem", False),
@@ -1950,6 +1956,33 @@ class QlikEngineAPI:
 
         except Exception as e:
             return {"error": str(e), "details": "Error in get_table_data method"}
+
+    def get_field_description(self, app_handle: int, field_name: str) -> Dict[str, Any]:
+        """Describe one field via `GetFieldDescription`.
+
+        The only Engine call that returns a single field's `COMMENT FIELD`
+        text without walking the whole data model. Cheap — no hypercube, no
+        data page. Returns `{}` when the field is unknown to the model
+        (Engine answers "Invalid parameters" in that case).
+        """
+        try:
+            result = self.send_request(
+                "GetFieldDescription", [field_name], handle=app_handle
+            )
+            info = result.get("qReturn", {}) or {}
+            return {
+                "name": info.get("qName", field_name),
+                "comment": info.get("qComment", ""),
+                "src_tables": info.get("qSrcTables", []),
+                "cardinal": info.get("qCardinal", 0),
+                "total_count": info.get("qTotalCount", 0),
+                "is_numeric": info.get("qIsNumeric", False),
+                "tags": info.get("qTags", []),
+                "byte_size": info.get("qByteSize", 0),
+            }
+        except Exception as e:
+            logger.debug("GetFieldDescription(%s) failed: %s", field_name, e)
+            return {}
 
     def get_field_values(
         self,
@@ -2942,7 +2975,7 @@ class QlikEngineAPI:
                         "is_locked": False,
                         "always_one_selected": False,
                         "is_numeric": "numeric" in field.get("tags", []),
-                        "comment": "",
+                        "comment": field.get("comment", ""),
                         "tags": field.get("tags", []),
                         "byte_size": 0,  # Not available via Engine API
                         "hash": "",  # Not available via Engine API
@@ -3141,6 +3174,7 @@ class QlikEngineAPI:
                 for field in table.get("qFields", []):
                     field_info = {
                         "name": field.get("qName", ""),
+                        "comment": field.get("qComment", ""),
                         "data_type": self._determine_data_type(field.get("qTags", [])),
                         "total_rows": field.get("qnRows", 0),
                         "distinct_values": field.get("qnTotalDistinctValues", 0),
@@ -3155,6 +3189,7 @@ class QlikEngineAPI:
 
                 table_info = {
                     "name": table_name,
+                    "comment": table.get("qComment", ""),
                     "total_rows": table.get("qNoOfRows", 0),
                     "field_count": len(table_fields),
                     "fields": table_fields,
