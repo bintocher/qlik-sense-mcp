@@ -1,6 +1,7 @@
 """Qlik Sense Engine API client."""
 
 import json
+import uuid
 import websocket
 import ssl
 from typing import Dict, List, Any, Optional, Union
@@ -268,14 +269,35 @@ class QlikEngineAPI:
         self._cached_has_data = False
 
     def _is_connected(self) -> bool:
-        """Check if WebSocket connection is alive."""
+        """Check if WebSocket connection is alive.
+
+        Sending a ping alone is not sufficient: websocket-client's
+        `ping()` only writes the frame to the socket and returns, it does
+        not wait for or verify a pong. A silently-dropped connection
+        (proxy/firewall/idle timeout killed it without a TCP RST) still
+        accepts the write, so a send-only check reports "alive" on a dead
+        socket. The caller then trusts the cache, reuses it for a real
+        request, and blocks for the full QLIK_WS_TIMEOUT (~180s) waiting
+        for a reply that will never come.
+
+        Fix: use a short health-check timeout and require an actual pong
+        frame back before declaring the connection alive. The full
+        QLIK_WS_TIMEOUT is restored afterward for real requests.
+        """
         if not self.ws or not self.ws.connected:
             return False
         try:
+            self.ws.settimeout(3)
             self.ws.ping()
-            return True
+            opcode, _ = self.ws.recv_data()
+            return opcode == websocket.ABNF.OPCODE_PONG
         except Exception:
             return False
+        finally:
+            try:
+                self.ws.settimeout(self.ws_timeout_seconds)
+            except Exception:
+                pass
 
     def ensure_app(self, app_id: str, no_data: bool = False) -> int:
         """
@@ -1556,9 +1578,16 @@ class QlikEngineAPI:
                 "qInterColumnSortOrder": inter_column_sort_order,
             }
 
+            # qId MUST be unique per call, not just per shape (dims/measures
+            # count) — reusing a qId that was recently destroyed in the same
+            # Engine session can make CreateSessionObject return a stale
+            # cached calculation instead of evaluating the new qDef (caught
+            # live 10.08.2026: three consecutive calls with different set
+            # analysis, same "hypercube-1d-1m" qId, returned byte-identical
+            # results including for a deliberately non-matching filter).
             obj_def = {
                 "qInfo": {
-                    "qId": f"hypercube-{len(converted_dimensions)}d-{len(converted_measures)}m",
+                    "qId": f"hypercube-{len(converted_dimensions)}d-{len(converted_measures)}m-{uuid.uuid4().hex[:12]}",
                     "qType": "HyperCube",
                 },
                 "qHyperCubeDef": hypercube_def,
@@ -1878,8 +1907,12 @@ class QlikEngineAPI:
                 "qMode": "S",
             }
 
+            # Unique per call — see the comment on the same pattern in
+            # create_hypercube (a static qId can make Engine return a stale
+            # cached result instead of evaluating this call's own qDef).
+            obj_id = f"table-data-{table_name}-{uuid.uuid4().hex[:12]}"
             obj_def = {
-                "qInfo": {"qId": f"table-data-{table_name}", "qType": "HyperCube"},
+                "qInfo": {"qId": obj_id, "qType": "HyperCube"},
                 "qHyperCubeDef": hypercube_def,
             }
 
@@ -1901,7 +1934,7 @@ class QlikEngineAPI:
                 try:
                     self.send_request(
                         "DestroySessionObject",
-                        [f"table-data-{table_name}"],
+                        [obj_id],
                         handle=app_handle,
                     )
                 except Exception:
@@ -1946,7 +1979,7 @@ class QlikEngineAPI:
             try:
                 self.send_request(
                     "DestroySessionObject",
-                    [f"table-data-{table_name}"],
+                    [obj_id],
                     handle=app_handle,
                 )
             except Exception as cleanup_error:
@@ -1993,9 +2026,11 @@ class QlikEngineAPI:
     ) -> Dict[str, Any]:
         """Get field values with frequency information using ListObject."""
         try:
-            # Use correct structure
+            # Use correct structure. qId unique per call — see the comment
+            # on the same pattern in create_hypercube.
+            obj_id = f"field-values-{field_name}-{uuid.uuid4().hex[:12]}"
             list_def = {
-                "qInfo": {"qId": f"field-values-{field_name}", "qType": "ListObject"},
+                "qInfo": {"qId": obj_id, "qType": "ListObject"},
                 "qListObjectDef": {
                     "qStateName": "$",
                     "qLibraryId": "",
@@ -2038,7 +2073,7 @@ class QlikEngineAPI:
                 try:
                     self.send_request(
                         "DestroySessionObject",
-                        [f"field-values-{field_name}"],
+                        [obj_id],
                         handle=app_handle,
                     )
                 except Exception:
@@ -2085,7 +2120,7 @@ class QlikEngineAPI:
             try:
                 self.send_request(
                     "DestroySessionObject",
-                    [f"field-values-{field_name}"],
+                    [obj_id],
                     handle=app_handle,
                 )
             except Exception as cleanup_error:
@@ -2129,7 +2164,7 @@ class QlikEngineAPI:
         ListObject returns empty.
         """
         try:
-            obj_id = f"field-values-fb-{field_name}"
+            obj_id = f"field-values-fb-{field_name}-{uuid.uuid4().hex[:12]}"
             hypercube_def = {
                 "qDimensions": [
                     {
@@ -2233,8 +2268,9 @@ class QlikEngineAPI:
                 "qSuppressZero": False,
                 "qSuppressMissing": False,
             }
+            obj_id = f"field-range-{field_name}-{uuid.uuid4().hex[:12]}"
             obj_def = {
-                "qInfo": {"qId": f"field-range-{field_name}", "qType": "HyperCube"},
+                "qInfo": {"qId": obj_id, "qType": "HyperCube"},
                 "qHyperCubeDef": hypercube_def,
             }
             result = self.send_request(
@@ -2263,7 +2299,7 @@ class QlikEngineAPI:
                             }
             try:
                 self.send_request("DestroySessionObject",
-                                  [f"field-range-{field_name}"], handle=app_handle)
+                                  [obj_id], handle=app_handle)
             except Exception:
                 pass
             return stats
@@ -2328,8 +2364,9 @@ class QlikEngineAPI:
                 "qSuppressMissing": False,
             }
 
+            obj_id = f"field-stats-{field_name}-{uuid.uuid4().hex[:12]}"
             obj_def = {
-                "qInfo": {"qId": f"field-stats-{field_name}", "qType": "HyperCube"},
+                "qInfo": {"qId": obj_id, "qType": "HyperCube"},
                 "qHyperCubeDef": hypercube_def,
             }
 
@@ -2359,7 +2396,7 @@ class QlikEngineAPI:
                 try:
                     self.send_request(
                         "DestroySessionObject",
-                        [f"field-stats-{field_name}"],
+                        [obj_id],
                         handle=app_handle,
                     )
                 except Exception:
@@ -2431,7 +2468,7 @@ class QlikEngineAPI:
             try:
                 self.send_request(
                     "DestroySessionObject",
-                    [f"field-stats-{field_name}"],
+                    [obj_id],
                     handle=app_handle,
                 )
             except Exception as cleanup_error:
@@ -2721,9 +2758,10 @@ class QlikEngineAPI:
                             dim["qDef"]["qFieldDefs"] = [filter_expr]
                             break
 
+            obj_id = f"data-export-{table_name or 'custom'}-{uuid.uuid4().hex[:12]}"
             obj_def = {
                 "qInfo": {
-                    "qId": f"data-export-{table_name or 'custom'}",
+                    "qId": obj_id,
                     "qType": "HyperCube",
                 },
                 "qHyperCubeDef": hypercube_def,
@@ -2749,7 +2787,7 @@ class QlikEngineAPI:
                 try:
                     self.send_request(
                         "DestroySessionObject",
-                        [f"data-export-{table_name or 'custom'}"],
+                        [obj_id],
                         handle=app_handle,
                     )
                 except Exception:
@@ -2817,7 +2855,7 @@ class QlikEngineAPI:
             try:
                 self.send_request(
                     "DestroySessionObject",
-                    [f"data-export-{table_name or 'custom'}"],
+                    [obj_id],
                     handle=app_handle,
                 )
             except Exception as cleanup_error:
