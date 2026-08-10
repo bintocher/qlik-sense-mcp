@@ -39,9 +39,9 @@ categories. The lists below are a quick map only.
 | `get_app_sheets` | List of sheets in the app, with title and description. |
 | `get_app_sheet_objects` | List of objects on a specific sheet, with `object_id`, `object_type`, `object_description`. |
 | `get_app_object` | Full layout of one specific object via `GetObject` + `GetLayout`. Reverse-engineers an existing chart. |
-| `get_app_field` | Distinct values of one field with pagination and wildcard search. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. Adds `field_comment` when the load script commented that field. |
+| `get_app_field` | Distinct values of one field with pagination and wildcard search, both applied by Engine over the whole field rather than over a prefetched prefix. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. Adds `field_comment` when the load script commented that field. |
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |
-| `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, count, non-null count, min, max, null %, completeness). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
+| `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, non-null count, null count, total count, min, max, null %, completeness — the null share comes from `NullCount()`, not from subtracting one non-null count from another). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
 | `engine_create_hypercube` | Build an arbitrary `GROUP BY` hypercube — the main data-analysis tool. Supports ranking directly: `sort_by` (measure label / measure expression / dimension field) + `sort_order` (`desc` / `asc`) + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are dropped by default — pass `exclude_null_dimensions=false` to keep them. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. Read the full docstring — it covers set-analysis patterns, the no-expression-in-dimension rule and the session limit. |
 
 ## Task management (Repository API)
@@ -59,7 +59,9 @@ categories. The lists below are a quick map only.
 | `create_task` | Create a new reload task for an application. **Write operation.** |
 | `update_task` | Update task properties (`name`, `enabled`). **Write operation.** |
 | `delete_task` | Permanently delete a reload task. **Destructive write operation.** |
-| `create_task_schedule` | Attach a new schedule trigger to a task. **Write operation.** |
+| `create_task_schedule` | Attach a new schedule trigger to a task: `repeat` (`once`/`hourly`/`daily`/`weekly`/`monthly`) plus `interval_minutes` say how often, the optional 8-position `time_window` says when firing is allowed. **Write operation.** |
+| `update_task_schedule` | Change one schedule trigger — retime it or turn just that trigger off, without disabling the whole task. **Write operation.** |
+| `delete_task_schedule` | Remove one schedule trigger, leaving the task and its other triggers alone. **Write operation.** |
 
 Write operations are clearly flagged in the docstrings; ask for explicit
 user confirmation in the calling client before invoking them.

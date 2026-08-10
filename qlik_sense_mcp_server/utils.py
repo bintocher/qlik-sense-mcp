@@ -1,11 +1,10 @@
 """Utility functions for the MCP server."""
 
 import re
-import json
 import random
 import string
-from typing import Any, Dict, List, Optional, Union
-from datetime import datetime, timedelta
+from typing import Any, Dict, List, Union
+from datetime import datetime
 
 
 def format_bytes(size_bytes: int) -> str:

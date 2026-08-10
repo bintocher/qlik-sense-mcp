@@ -6,10 +6,23 @@
 qlik-sense-mcp/
 ├── qlik_sense_mcp_server/
 │   ├── __init__.py
-│   ├── server.py         # FastMCP server, tool registration, request routing
+│   ├── server.py         # Entry points; imports the tools, which registers them
+│   ├── tools/            # MCP tools, grouped by the API they talk to
+│   │   ├── context.py    #   MCP host + API clients shared by every tool
+│   │   ├── helpers.py    #   Response envelope, timing, argument coercion
+│   │   ├── repository.py #   get_about, get_apps, get_app_details
+│   │   ├── engine.py     #   script, fields, sheets, hypercubes
+│   │   └── tasks.py      #   reload tasks (certificate mode only)
+│   ├── engine/           # Engine API client, split by responsibility
+│   │   ├── api.py        #   QlikEngineAPI: assembles the mixins below
+│   │   ├── connection.py #   WebSocket, greeting, liveness, JSON-RPC
+│   │   ├── hypercube.py  #   Sorting, limits, page completion
+│   │   ├── fields.py     #   Values, ranges, statistics, descriptions
+│   │   ├── sheets.py     #   Sheets and their objects
+│   │   └── app_model.py  #   Data model, master items, variables
+│   ├── engine_api.py     # Back-compat import path for QlikEngineAPI
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── repository_api.py # Repository (HTTP/QRS) client
-│   ├── engine_api.py     # Engine API (WebSocket) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
 │   └── utils.py          # XSRF key generation, helpers
 ├── tools/
@@ -84,6 +97,95 @@ This eliminates the per-call connect/open/close cycle that the v1.3.x
 line did. On a typical analysis session that issues 20 tool calls
 against the same app, the savings are significant: one WebSocket
 handshake plus one `OpenDoc` instead of twenty of each.
+
+#### Liveness without ping (since 1.7.3)
+
+Before reusing the cached socket, the client has to decide whether it is
+still alive. It must not do that with a WebSocket ping.
+
+Qlik's Proxy Service does not relay ping/pong to the Engine. Through a
+virtual proxy — that is, in every JWT deployment — the first request after
+a ping is never answered: the call blocks for the whole `QLIK_WS_TIMEOUT`,
+the socket is then force-closed, and the next call reconnects. Every forced
+reconnect costs an Engine session, Qlik allows 5 per user, and a session
+outlives the socket that created it, so a few minutes of ordinary use ends
+with `OnMaxParallelSessionsExceeded` and every tool failing. On a direct
+Engine socket (port 4747, certificate mode) the same ping is harmless,
+which is why the problem only ever appeared in JWT mode.
+
+`_is_connected()` therefore:
+
+1. Trusts a socket that answered a frame less than
+   `QLIK_WS_IDLE_PROBE_AFTER` seconds ago (default 30) — no traffic at all
+   in the common case of back-to-back tool calls.
+2. Probes an idle one with a real `EngineVersion` request bounded by
+   `QLIK_WS_PROBE_TIMEOUT` (default 15s). This proves more than a ping
+   ever did: that the Engine answers, not merely that the socket accepts
+   writes.
+
+#### Greeting frames
+
+A fresh socket is answered with notifications before anything else —
+normally `OnAuthenticationInformation` then `OnConnected`. `connect()`
+reads them up to `OnConnected` (bounded by `QLIK_WS_GREETING_TIMEOUT`),
+which also leaves the receive buffer empty for the first real request.
+
+A greeting can also be fatal. `OnMaxParallelSessionsExceeded` means the
+per-user session quota is exhausted, and Qlik closes the socket right
+after sending it. Treating that frame as "session established" is what
+turned a plain quota error into `Failed to parse WebSocket frame ...
+Expecting value` on the following call. Such frames now raise
+`QlikSessionLimitError` (a `QlikConnectionError`) naming the quota and how
+to clear it, and `connect()` re-raises it immediately instead of trying
+the remaining fallback endpoints — every one of them would be refused the
+same way.
+
+#### Pipelined batches
+
+`send_requests_pipelined()` sends a batch of independent requests
+back-to-back and matches responses by `id`, which is exactly what the
+Engine's numeric request ids are for. `send_request()` is unchanged and
+still used everywhere else.
+
+`_get_sheet_objects_detailed()` is the one caller: it resolves every child
+object's handle in one batch and reads every layout in a second, so a
+sheet with N objects costs 2 round-trips instead of 2N. Measured against a
+live sheet with 16 objects: 0.135s to 0.028s for identical results.
+`raise_on_error=False` keeps per-object isolation — one broken object is
+skipped rather than losing the sheet.
+
+#### One call at a time
+
+The Streamable HTTP transport serves several MCP clients from one
+process, but there is one WebSocket and one open document behind them.
+Overlapping calls interleave frames on that socket: strict id-matching
+makes each discard the other's reply, and `ensure_app` can switch
+documents between one call's `CreateSessionObject` and its `GetLayout`,
+so the second call reads the first app's data believing it is its own.
+
+Engine-backed tools therefore run inside `QlikEngineAPI.transaction()` —
+a reentrant lock held for the whole tool body, applied by the
+`_engine_serialised` decorator in `tools/helpers.py`. The unit that has
+to be atomic is the chain from `ensure_app` to the last request, not an
+individual `send_request`.
+
+Repository-only tools (`get_about`, `get_apps`, the task tools) are
+deliberately left out of it: they never touch the socket, and making
+them wait behind a slow hypercube would cost responsiveness for nothing.
+
+#### Paging: server-side, or not at all
+
+QRS `/{entity}/full` ignores `skip`/`take` and is itself truncated at the
+server's MaxRecordLimit (100 for most types). Slicing that locally — what
+this server used to do — both loses everything past the cap and reports
+the cap as the total, so a client following `has_more` walks off the end
+of the data believing it has seen everything.
+
+Reads that can exceed the cap therefore go through `/{entity}/table`,
+which takes `skip`, `take`, `sortColumn` and `filter`, with the real
+total from `/{entity}/count` under the same filter. `get_apps` fetches
+exactly one page; task listings read through to the last page
+(`_read_all`, with a logged hard cap rather than a silent truncation).
 
 #### Strict id-matching in `send_request`
 

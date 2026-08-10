@@ -78,6 +78,9 @@ Defaults match the standard
 | `QLIK_HTTP_TIMEOUT` | `10.0` | HTTP request timeout in seconds (Repository API). |
 | `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to BOTH the WS handshake AND every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
 | `QLIK_WS_RETRIES` | `2` | Number of WebSocket connection endpoints to try when connecting. |
+| `QLIK_WS_IDLE_PROBE_AFTER` | `30.0` | How long (seconds since the last answered frame) a cached Engine connection is reused without re-checking. Past it, the client spends one cheap `EngineVersion` request proving the Engine still answers. Raising it saves that request at the cost of finding a dead socket later. |
+| `QLIK_WS_PROBE_TIMEOUT` | `15.0` | Timeout for that liveness request on its own — deliberately far below `QLIK_WS_TIMEOUT`, since a health check that needs minutes is a dead connection either way. |
+| `QLIK_WS_GREETING_TIMEOUT` | `15.0` | How long to wait for Engine's greeting frames (`OnConnected`, or a fatal `OnMaxParallelSessionsExceeded`) on a fresh socket. |
 
 ## Logging
 

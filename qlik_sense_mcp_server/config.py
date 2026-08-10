@@ -18,6 +18,18 @@ DEFAULT_ENGINE_PORT = 4747
 DEFAULT_HTTP_TIMEOUT = 10.0
 DEFAULT_WS_TIMEOUT = 180.0
 DEFAULT_TICKET_TIMEOUT = 30.0
+# How long a cached Engine socket is trusted without re-checking after the
+# last frame it answered. Below this age the connection is reused as-is;
+# above it, the client spends one cheap request proving the Engine still
+# answers. Raising it saves that request at the cost of discovering a dead
+# socket later; lowering it does the opposite.
+DEFAULT_WS_IDLE_PROBE_AFTER = 30.0
+# Timeout for that liveness request on its own — short, because an idle
+# socket that needs three minutes to answer is not one worth keeping.
+DEFAULT_WS_PROBE_TIMEOUT = 15.0
+# Window for Engine's greeting frames on a fresh socket. They arrive
+# immediately; waiting longer only delays falling back to another endpoint.
+DEFAULT_WS_GREETING_TIMEOUT = 15.0
 
 # Default retry settings
 DEFAULT_WS_RETRIES = 2

@@ -191,3 +191,7 @@ claude.md
 .mcp.json
 temp/
 uv.lock
+
+# Local Claude Code skills and audit artifacts (not part of the package)
+.claude/
+.audit/
