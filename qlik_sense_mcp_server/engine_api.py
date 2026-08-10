@@ -556,6 +556,178 @@ class QlikEngineAPI:
 
         return response.get("result", {})
 
+    def send_requests_pipelined(
+        self, requests: List[Dict[str, Any]], timeout: float = None,
+        raise_on_error: bool = True,
+    ) -> List[Any]:
+        """
+        Send multiple independent JSON-RPC requests back-to-back, without
+        waiting for each response before sending the next, then collect all
+        responses.
+
+        Why this is safe: the Qlik Engine JSON API requires every request to
+        carry its own numeric `id` specifically so the client can match
+        responses to requests out of order — see "Let's Dissect the Qlik
+        Engine API - Part 1: RPC Basics" (Qlik Community). `send_request()`
+        sends one request and blocks for its matching response before
+        sending the next; for a batch of independent requests (e.g. N
+        sibling objects on a sheet, each needing its own GetObject/GetLayout)
+        that stacks N network round-trips even though nothing in the
+        protocol requires it.
+
+        What this does NOT claim: it does not change whether the Engine
+        computes/queues the N requests concurrently server-side — it only
+        removes client-side round-trip stacking. Whether that yields a real
+        wall-clock win depends on the workload (network RTT vs. per-request
+        server cost) and should be measured for the specific call site
+        before being relied on, not assumed.
+
+        Args:
+            requests: list of {"method": str, "params": list|dict, "handle": int}.
+            timeout: shared socket timeout applied to the whole batch
+                (default: `self.ws_timeout_seconds`, same as send_request).
+            raise_on_error: if True (default), raise a single Exception
+                aggregating every per-request Engine error, matching
+                send_request()'s raise-on-error behavior. If False, failed
+                requests are returned as `Exception` instances in place of
+                their result (mirrors
+                `asyncio.gather(..., return_exceptions=True)`), so the
+                caller can keep the successful items from a batch instead
+                of losing all of them to one bad request — used by
+                `_get_sheet_objects_detailed()` so one broken sheet object
+                doesn't drop every other object on the same sheet.
+
+        Returns:
+            List of `result` dicts (or Exception instances when
+            raise_on_error=False), in the same order as `requests`. Every
+            response for this batch is drained from the socket before
+            returning or raising, even on error, so the connection is never
+            left holding unread frames that a later call could mistake for
+            its own.
+        """
+        import socket as _socket
+        if not self.ws:
+            raise ConnectionError("Not connected to Engine API")
+        if not requests:
+            return []
+
+        effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
+        if timeout is not None:
+            self._set_socket_timeout(timeout)
+
+        # req_id -> index in `requests`, so responses (possibly out of
+        # order) land back in the caller's original order.
+        pending: Dict[int, int] = {}
+        outcomes: List[Any] = [None] * len(requests)
+
+        try:
+            for idx, req in enumerate(requests):
+                req_id = self._get_next_request_id()
+                pending[req_id] = idx
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "handle": req.get("handle", -1),
+                    "method": req["method"],
+                    "params": req.get("params") or [],
+                }
+                try:
+                    self.ws.send(json.dumps(payload))
+                except (_socket.timeout, TimeoutError) as e:
+                    self._kill_socket()
+                    raise TimeoutError(
+                        f"WebSocket send() timed out after {effective_timeout:.1f}s "
+                        f"mid-batch at item {idx} ('{req['method']}')"
+                    ) from e
+                except Exception as e:
+                    self._kill_socket()
+                    raise ConnectionError(
+                        f"WebSocket send() failed mid-batch at item {idx} "
+                        f"('{req['method']}'): {type(e).__name__}: {e}"
+                    ) from e
+
+            stray_frames = 0
+            stray_cap = max(100, 20 * len(requests))
+            while pending:
+                try:
+                    data = self.ws.recv()
+                except (_socket.timeout, TimeoutError) as e:
+                    self._kill_socket()
+                    raise TimeoutError(
+                        f"WebSocket recv() timed out after {effective_timeout:.1f}s "
+                        f"waiting for {len(pending)}/{len(requests)} outstanding "
+                        f"pipelined responses. Increase QLIK_WS_TIMEOUT if the "
+                        f"batch is legitimately heavy."
+                    ) from e
+                except Exception as e:
+                    self._kill_socket()
+                    raise ConnectionError(
+                        f"WebSocket recv() failed mid-batch "
+                        f"({len(pending)}/{len(requests)} still outstanding): "
+                        f"{type(e).__name__}: {e}"
+                    ) from e
+
+                try:
+                    frame = json.loads(data)
+                except Exception as parse_err:
+                    self._kill_socket()
+                    raise ConnectionError(
+                        f"Failed to parse WebSocket frame mid-batch "
+                        f"({len(pending)}/{len(requests)} still outstanding): "
+                        f"{parse_err}"
+                    ) from parse_err
+
+                frame_id = frame.get("id")
+                idx = pending.pop(frame_id, None)
+                if idx is None:
+                    # Notification, or a late reply to an earlier
+                    # timed-out request — same stray-frame handling as
+                    # send_request().
+                    if frame_id is None:
+                        logger.debug(
+                            "send_requests_pipelined: skipping notification: %s",
+                            frame.get("method", "<no-method>"),
+                        )
+                    else:
+                        logger.warning(
+                            "send_requests_pipelined: discarding stale frame "
+                            "with id=%s (not part of this batch)", frame_id,
+                        )
+                    stray_frames += 1
+                    if stray_frames > stray_cap:
+                        self._kill_socket()
+                        raise ConnectionError(
+                            f"send_requests_pipelined: received {stray_frames} "
+                            f"stray frames without matching all {len(requests)} "
+                            f"batch ids, killing connection"
+                        )
+                    continue
+
+                if "error" in frame:
+                    outcomes[idx] = Exception(
+                        f"Engine API error for method "
+                        f"'{requests[idx]['method']}' "
+                        f"(handle={requests[idx].get('handle', -1)}): {frame['error']}"
+                    )
+                else:
+                    outcomes[idx] = frame.get("result", {})
+        finally:
+            if timeout is not None and self.ws is not None:
+                try:
+                    self._set_socket_timeout(self.ws_timeout_seconds)
+                except Exception:
+                    pass
+
+        if raise_on_error:
+            errors = [o for o in outcomes if isinstance(o, Exception)]
+            if errors:
+                raise Exception(
+                    f"send_requests_pipelined: {len(errors)}/{len(requests)} "
+                    f"requests failed: {'; '.join(str(e) for e in errors)}"
+                )
+
+        return outcomes
+
     def get_doc_list(self) -> List[Dict[str, Any]]:
         """Get list of available documents."""
         try:
@@ -896,7 +1068,15 @@ class QlikEngineAPI:
             }
 
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
-        """Get detailed information about objects on a sheet."""
+        """Get detailed information about objects on a sheet.
+
+        Fetches all child objects' handles and layouts in two pipelined
+        batches (see `send_requests_pipelined`) instead of one
+        GetObject+GetLayout round-trip per object — a sheet with N objects
+        used to cost 2N sequential round-trips, now costs 2 regardless of N.
+        Per-object failures are still isolated: one bad object is skipped,
+        the rest of the sheet is unaffected, same as before.
+        """
         try:
             sheet_result = self.send_request("GetObject", {"qId": sheet_id}, handle=app_handle)
             if "qReturn" not in sheet_result or "qHandle" not in sheet_result["qReturn"]:
@@ -910,21 +1090,51 @@ class QlikEngineAPI:
                 return []
 
             child_objects = sheet_layout["qLayout"]["qChildList"]["qItems"]
-            detailed_objects = []
+            child_meta = [
+                (co.get("qInfo", {}).get("qId", ""), co.get("qInfo", {}).get("qType", ""), co)
+                for co in child_objects
+            ]
+            child_meta = [(obj_id, obj_type, co) for obj_id, obj_type, co in child_meta if obj_id]
+            if not child_meta:
+                return []
 
-            for child_obj in child_objects:
-                obj_id = child_obj.get("qInfo", {}).get("qId", "")
-                obj_type = child_obj.get("qInfo", {}).get("qType", "")
-                if not obj_id:
+            # Wave 1: resolve every child object's handle in one pipelined
+            # round-trip instead of N sequential GetObject calls.
+            get_object_outcomes = self.send_requests_pipelined(
+                [{"method": "GetObject", "params": {"qId": obj_id}, "handle": app_handle}
+                 for obj_id, _obj_type, _co in child_meta],
+                raise_on_error=False,
+            )
+
+            obj_handles: List[Optional[int]] = []
+            for outcome in get_object_outcomes:
+                if (isinstance(outcome, Exception)
+                        or "qReturn" not in outcome or "qHandle" not in outcome["qReturn"]):
+                    obj_handles.append(None)
+                else:
+                    obj_handles.append(outcome["qReturn"]["qHandle"])
+
+            # Wave 2: fetch every resolved object's layout in one more
+            # pipelined round-trip instead of N sequential GetLayout calls.
+            layout_indices = [i for i, h in enumerate(obj_handles) if h is not None]
+            layout_outcomes = self.send_requests_pipelined(
+                [{"method": "GetLayout", "params": [], "handle": obj_handles[i]}
+                 for i in layout_indices],
+                raise_on_error=False,
+            ) if layout_indices else []
+            layout_by_index = dict(zip(layout_indices, layout_outcomes))
+
+            detailed_objects = []
+            for i, (obj_id, obj_type, child_obj) in enumerate(child_meta):
+                obj_layout = layout_by_index.get(i)
+                if obj_layout is None:
+                    continue  # GetObject failed for this child — same as the old `continue`
+                if isinstance(obj_layout, Exception):
+                    logger.warning(f"Error processing object {obj_id}: {obj_layout}")
+                    continue
+                if "qLayout" not in obj_layout:
                     continue
                 try:
-                    obj_result = self.send_request("GetObject", {"qId": obj_id}, handle=app_handle)
-                    if "qReturn" not in obj_result or "qHandle" not in obj_result["qReturn"]:
-                        continue
-                    obj_handle = obj_result["qReturn"]["qHandle"]
-                    obj_layout = self.send_request("GetLayout", [], handle=obj_handle)
-                    if "qLayout" not in obj_layout:
-                        continue
                     fields_used = self._extract_fields_from_object(obj_layout["qLayout"])
                     detailed_obj = {
                         "object_id": obj_id,

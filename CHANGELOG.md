@@ -6,6 +6,36 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+- **`QlikEngineAPI.send_requests_pipelined()`** — sends a batch of
+  independent JSON-RPC requests back-to-back without waiting for each
+  response before sending the next, then matches responses back to
+  requests by `id` (the Engine's own protocol contract explicitly
+  supports out-of-order responses for this reason — see "Let's Dissect
+  the Qlik Engine API - Part 1: RPC Basics", Qlik Community). Does not
+  touch `send_request()`, which is unchanged and still used everywhere
+  else. `raise_on_error=False` returns per-item `Exception` instances
+  instead of aborting the whole batch, so a caller can keep the
+  successful results from a batch where one item failed.
+- `_get_sheet_objects_detailed()` now uses two pipelined batches (all
+  `GetObject` calls, then all `GetLayout` calls) instead of one
+  `GetObject`+`GetLayout` round-trip per sheet object — a sheet with N
+  objects used to serialize 2N round-trips, now costs 2 regardless of N.
+  Per-object error isolation is unchanged: one bad object is skipped,
+  not the whole sheet.
+- `tests/test_pipelining.py` — covers out-of-order response matching,
+  per-item error handling (`raise_on_error` both ways), stray-notification
+  frames mid-batch, and that `_get_sheet_objects_detailed()` issues
+  exactly 2 batched calls regardless of child-object count.
+
+**Not yet live-verified against a real Qlik Engine** — only unit-tested
+against a fake socket (187/187 tests pass). Whether this produces a
+measurable wall-clock improvement depends on how much of the observed
+latency is network round-trip vs. Engine-side per-request cost, which
+differs by deployment; a live before/after timing comparison on
+`_get_sheet_objects_detailed()` against a real app is the natural
+follow-up before leaning on this for anything performance-critical.
+
 ### Changed
 - **Cached-connection health check no longer hardcodes a 3s pong wait.**
   `_is_connected()` (added in the cold-start reconnect fix) settimeout()s
