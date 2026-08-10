@@ -150,10 +150,25 @@ class TestHypercubeDefinition:
         eng.create_hypercube(1, DIMS, MEASURES, 10)
         assert eng.cube_def["qInterColumnSortOrder"] == [0, 1]
 
-    def test_measure_sort_suppresses_missing_rows(self):
+    def test_cube_wide_missing_suppression_is_never_used(self):
+        """Measured on Qlik 31.62: qSuppressMissing drops exactly the
+        NULL-dimension row and nothing else — the same row qNullSuppression
+        already handles, but outside the caller's control. Two switches for
+        one behaviour is how an explicit "keep the NULL group" ended up
+        being overridden."""
         eng = _FakeEngine()
         eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
-        assert eng.cube_def["qSuppressMissing"] is True
+        assert eng.cube_def["qSuppressMissing"] is False
+        assert eng.cube_def["qDimensions"][0]["qNullSuppression"] is True
+
+    def test_keeping_null_groups_leaves_every_suppression_off(self):
+        eng = _FakeEngine()
+        eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR",
+                             exclude_null_dimensions=False)
+        assert eng.cube_def["qSuppressMissing"] is False
+        assert eng.cube_def["qDimensions"][0]["qNullSuppression"] is False
+        # The ranking itself must be untouched by that.
+        assert eng.cube_def["qInterColumnSortOrder"] == [1, 0]
 
     def test_suppress_zero_is_opt_in(self):
         eng = _FakeEngine()
@@ -258,16 +273,168 @@ class TestHypercubeResponse:
         assert result["error"] == "No hypercube in layout"
         assert any(m == "DestroySessionObject" for m, _ in eng.sent)
 
+
+
+
+class _PagingEngine(_FakeEngine):
+    """Engine that hands back short pages, as a loaded one does.
+
+    GetLayout is allowed to trim qInitialDataFetch to whatever it feels
+    like; the rest has to be collected with GetHyperCubeData. A client that
+    trusts the first page returns fewer rows than asked for and says
+    nothing about it.
+    """
+
+    def __init__(self, total_rows=10, first_page=2, page_size=3):
+        super().__init__()
+        self.total_rows = total_rows
+        self.first_page = first_page
+        self.page_size = page_size
+        self.page_requests = []
+
+    def _matrix(self, start, count):
+        return [[{"qText": f"row{i}", "qNum": float(i)},
+                 {"qText": str(i * 10), "qNum": float(i * 10)}]
+                for i in range(start, min(start + count, self.total_rows))]
+
+    def send_request(self, method, params=None, handle=-1, timeout=None):
+        self.sent.append((method, params))
+        if method == "CreateSessionObject":
+            return {"qReturn": {"qHandle": 7}}
+        if method == "GetLayout":
+            return {"qLayout": {"qHyperCube": {
+                "qSize": {"qcx": 2, "qcy": self.total_rows},
+                "qDataPages": [{"qMatrix": self._matrix(0, self.first_page)}],
+                "qGrandTotalRow": [{"qText": "1000", "qNum": 1000.0}],
+            }}}
+        if method == "GetHyperCubeData":
+            page = params[1][0]
+            self.page_requests.append((page["qTop"], page["qHeight"]))
+            return {"qDataPages": [
+                {"qMatrix": self._matrix(page["qTop"], min(page["qHeight"], self.page_size))}
+            ]}
+        return {}
+
+
+class TestPageCompletion:
+    def test_missing_rows_are_fetched(self):
+        eng = _PagingEngine(total_rows=10, first_page=2, page_size=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert len(result["rows"]) == 10, "short first page was taken at face value"
+        assert result["returned_rows"] == 10
+
+    def test_rows_stay_in_order(self):
+        eng = _PagingEngine(total_rows=8, first_page=2, page_size=3)
+        rows = eng.create_hypercube(1, DIMS, MEASURES, 8)["rows"]
+        assert [r[0] for r in rows] == [float(i) for i in range(8)]
+
+    def test_paging_starts_after_what_the_layout_returned(self):
+        eng = _PagingEngine(total_rows=10, first_page=2, page_size=3)
+        eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert eng.page_requests[0][0] == 2, "must not re-read rows already in hand"
+
+    def test_never_asks_for_more_than_the_limit(self):
+        eng = _PagingEngine(total_rows=1000, first_page=2, page_size=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 7)
+        assert len(result["rows"]) == 7
+        # No request may reach past the requested limit, however many
+        # rows the server holds.
+        assert all(top + height <= 7 for top, height in eng.page_requests)
+
+    def test_page_height_respects_the_cell_cap(self):
+        """Qlik rejects a page over 10000 cells with error 7009."""
+        eng = _PagingEngine(total_rows=5000, first_page=0, page_size=4000)
+        eng.create_hypercube(1, DIMS, MEASURES, 5000)
+        for _, height in eng.page_requests:
+            assert height * 2 <= QlikEngineAPI.HARD_MAX_CELLS
+
+    def test_no_extra_call_when_the_first_page_is_complete(self):
+        eng = _PagingEngine(total_rows=5, first_page=5, page_size=5)
+        eng.create_hypercube(1, DIMS, MEASURES, 5)
+        assert eng.page_requests == []
+
+    def test_server_having_more_rows_than_the_limit_is_not_paged_past_it(self):
+        eng = _PagingEngine(total_rows=4200, first_page=10, page_size=100)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert eng.page_requests == []
+        assert result["truncation_warning"]
+
+    def test_an_empty_page_stops_the_loop(self):
+        """An Engine that keeps answering with nothing must not spin."""
+        class _Stubborn(_PagingEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetHyperCubeData":
+                    self.page_requests.append((0, 0))
+                    return {"qDataPages": [{"qMatrix": []}]}
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _Stubborn(total_rows=100, first_page=2)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 50)
+        assert len(eng.page_requests) == 1
+        assert len(result["rows"]) == 2
+        assert result["truncation_warning"]
+
+    def test_a_failing_page_keeps_what_was_already_read(self):
+        class _Failing(_PagingEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetHyperCubeData":
+                    raise Exception("Engine API error: calc-pages-too-large")
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _Failing(total_rows=100, first_page=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 50)
+        assert len(result["rows"]) == 3
+        assert "error" not in result
+
+    def test_a_failed_read_is_not_presented_as_a_deliberate_top_n(self):
+        """Partial because Engine refused, and partial because the caller
+        asked for 10 of 4200, must not read the same in the reply."""
+        class _Failing(_PagingEngine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetHyperCubeData":
+                    raise Exception("Engine API error: calc-pages-too-large")
+                return super().send_request(method, params, handle, timeout)
+
+        eng = _Failing(total_rows=100, first_page=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 50, sort_by="GGR")
+        warning = result["truncation_warning"]
+        assert "INCOMPLETE" in warning
+        assert "calc-pages-too-large" in warning
+        assert "highest" not in warning, "a failed read is not a ranking"
+        assert result["timings"]["page_fetch_error"]
+
+    def test_a_complete_ranked_page_says_nothing_about_failure(self):
+        eng = _PagingEngine(total_rows=4200, first_page=10, page_size=10)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
+        assert "INCOMPLETE" not in result["truncation_warning"]
+        assert "highest" in result["truncation_warning"]
+        assert "page_fetch_error" not in result["timings"]
+
+    def test_extra_fetches_are_reported_in_timings(self):
+        eng = _PagingEngine(total_rows=10, first_page=2, page_size=3)
+        timings = eng.create_hypercube(1, DIMS, MEASURES, 10)["timings"]
+        assert timings["extra_page_fetches"] >= 1
+        assert "extra_pages_seconds" in timings
+
     def test_ranked_truncation_warning_explains_it_is_expected(self):
-        eng = _FakeEngine()
+        # A complete page out of a much larger result: the truncation is
+        # what the caller asked for, and the wording must say so.
+        eng = _PagingEngine(total_rows=4200, first_page=10, page_size=10)
         result = eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
         assert "highest" in result["truncation_warning"]
+        assert "INCOMPLETE" not in result["truncation_warning"]
 
     def test_unsorted_truncation_warning_flags_arbitrary_rows(self):
-        eng = _FakeEngine()
+        eng = _PagingEngine(total_rows=4200, first_page=10, page_size=10)
         result = eng.create_hypercube(1, DIMS, MEASURES, 10)
         assert "NO sort was requested" in result["truncation_warning"]
 
+    def test_a_page_that_never_arrives_is_not_a_ranking(self):
+        """Asked for 10, Engine stopped at 1: that is a short read, not a top-N."""
+        eng = _FakeEngine()          # answers one row, then nothing
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
+        assert "INCOMPLETE" in result["truncation_warning"]
+        assert result["timings"]["page_fetch_error"]
 
 class TestHypercubeGuardRails:
     def test_unknown_sort_column_lists_available_columns(self):

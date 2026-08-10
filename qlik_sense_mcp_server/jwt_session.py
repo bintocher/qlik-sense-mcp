@@ -151,6 +151,53 @@ class JwtSession:
             if not self._config.jwt_session_cookie_override:
                 self._cookie_name = None
 
+    def logout(self) -> bool:
+        """Ask the proxy to end this user's Qlik session, and forget it.
+
+        Every bootstrap creates a session that outlives the process:
+        closing the WebSocket does not release it, and the virtual proxy
+        keeps it until its inactivity timeout. Restart an MCP server a few
+        times in quick succession and Qlik starts refusing new sessions
+        with `OnMaxParallelSessionsExceeded`, which looks like an outage
+        and lasts until the timeout expires.
+
+        Not called automatically. `DELETE /{vp}/qps/user` is the only
+        logout a virtual proxy exposes — the per-session endpoint needs
+        admin rights on port 4243 — and it ends every session this user
+        holds *on this virtual proxy*. Measured on Qlik 31.62: sessions
+        the same user has on other virtual proxies, a browser on the
+        default one included, are untouched. Still a group operation, so
+        call it where the prefix belongs to this server (a dedicated JWT
+        proxy, a test run), not on one people also log in through.
+
+        Returns True when the proxy accepted the logout.
+        """
+        with self._lock:
+            if not self._cookie_value:
+                return False
+            client = self._build_bootstrap_client()
+            try:
+                client.cookies.set(self._cookie_name, self._cookie_value)
+                headers = ({"qlik-csrf-token": self._csrf_token}
+                           if self._csrf_token else {})
+                response = client.delete(
+                    f"{self._config.qlik_base_host}/"
+                    f"{self._config.virtual_proxy_prefix}/qps/user",
+                    headers=headers,
+                )
+                accepted = response.status_code in (200, 204)
+                logger.info("JWT session logout: HTTP %s", response.status_code)
+            except Exception as exc:
+                # A session we cannot reach will expire on its own; saying
+                # so is more useful than raising during shutdown.
+                logger.warning("JWT session logout failed: %s", exc)
+                accepted = False
+            finally:
+                client.close()
+
+        self.invalidate()
+        return accepted
+
     def ensure(self, http_client: httpx.Client) -> None:
         """
         Guarantee a valid bootstrapped session, using the given ``httpx.Client``.

@@ -7,9 +7,9 @@
 
 [Model Context Protocol](https://modelcontextprotocol.io/) server for
 Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
-(WebSocket) APIs as **24 MCP tools** so an LLM client can discover apps,
+(WebSocket) APIs as **26 MCP tools** so an LLM client can discover apps,
 inspect data models, build hypercubes, and manage reload tasks through
-a single uniform interface. In JWT mode the 12 reload-task tools are
+a single uniform interface. In JWT mode the 14 reload-task tools are
 hidden, since QRS task administration needs certificate auth.
 
 ## What's in the box
@@ -18,7 +18,7 @@ hidden, since QRS task administration needs certificate auth.
 |------|-------|----------|
 | Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
 | Engine (data & script)       | `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics`, `engine_create_hypercube` | Read load script, list visualizations, query field values, build hypercubes |
-| Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule` | Inspect, trigger and manage reload tasks |
+| Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
 
 Full list with descriptions: [`docs/tools.md`](docs/tools.md).
 
@@ -62,7 +62,7 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/configuration.md`](docs/configuration.md) | All `QLIK_*` environment variables, sample `.env`, MCP client config snippet |
 | [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) | JWT authentication via virtual proxy: key generation, virtual proxy setup, `QLIK_JWT_TOKEN` usage |
 | [`docs/usage.md`](docs/usage.md) | Transports, server start commands, recommended call order, hard limits enforced by this server |
-| [`docs/tools.md`](docs/tools.md) | Inventory of all 24 tools, response/error envelope, error categories |
+| [`docs/tools.md`](docs/tools.md) | Inventory of all 26 tools, response/error envelope, error categories |
 | [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
 | [`docs/development.md`](docs/development.md) | `make` targets, tests, versioning, how to add a new tool |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
@@ -101,7 +101,7 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
   included, echoes `tool` and `request` with the exact arguments sent.
 - **Fewer useless tools in JWT mode.** Reload-task administration needs
   QRS admin rights, so those 12 tools are registered only in
-  certificate mode: 24 tools with a certificate, 12 with a JWT.
+  certificate mode: 26 tools with a certificate, 12 with a JWT.
 - **One Qlik session per server.** Qlik allows max 5 concurrent
   sessions per user and can lock the account beyond that, so all tool
   calls share a single cached Engine session — never fan them out in

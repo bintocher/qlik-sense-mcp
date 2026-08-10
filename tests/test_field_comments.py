@@ -7,6 +7,7 @@ Before v1.7.2 the server dropped it, so an LLM had to guess what a column
 meant from its name.
 """
 
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ import pytest
 
 from qlik_sense_mcp_server.engine_api import QlikEngineAPI
 from qlik_sense_mcp_server import server as srv
+from qlik_sense_mcp_server.tools import context
 
 
 TABLES_AND_KEYS = {
@@ -129,22 +131,20 @@ class TestAppDetailsPayload:
         # Without Qlik env vars the module-level clients are None (that is
         # how CI runs), so replace the whole client objects rather than
         # patching attributes on them.
-        monkeypatch.setattr(srv, "_check", lambda: None)
-        monkeypatch.setattr(
-            srv,
-            "repo_api",
+        monkeypatch.setattr(context, "repo_api",
             SimpleNamespace(
                 get_app_by_id=lambda app_id: {
                     "id": app_id, "name": "App", "published": False
                 }
             ),
         )
-        monkeypatch.setattr(
-            srv,
-            "engine_api",
+        monkeypatch.setattr(context, "engine_api",
             SimpleNamespace(
                 ensure_app=lambda *a, **kw: 1,
                 get_fields=lambda handle: FIELDS_PAYLOAD,
+                # Engine-backed tools run inside the client's transaction,
+                # which serialises them against the shared socket.
+                transaction=contextlib.nullcontext,
             ),
         )
 
