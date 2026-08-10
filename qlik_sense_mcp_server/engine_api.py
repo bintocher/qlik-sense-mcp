@@ -9,6 +9,7 @@ from datetime import datetime
 from .config import (
     QlikSenseConfig,
     DEFAULT_WS_TIMEOUT,
+    DEFAULT_WS_PING_TIMEOUT,
     DEFAULT_WS_RETRIES,
     DEFAULT_HYPERCUBE_MAX_ROWS,
     MAX_TABLES_AND_KEYS_DIM,
@@ -43,6 +44,11 @@ class QlikEngineAPI:
             self.ws_timeout_seconds = DEFAULT_WS_TIMEOUT
         # Single unified timeout — used for both connection and all Engine operations
         self.ws_operation_timeout = self.ws_timeout_seconds
+        ping_timeout_env = os.getenv("QLIK_WS_PING_TIMEOUT")
+        try:
+            self.ws_ping_timeout = float(ping_timeout_env) if ping_timeout_env else DEFAULT_WS_PING_TIMEOUT
+        except ValueError:
+            self.ws_ping_timeout = DEFAULT_WS_PING_TIMEOUT
         retries_env = os.getenv("QLIK_WS_RETRIES")
         try:
             self.ws_retries = int(retries_env) if retries_env else DEFAULT_WS_RETRIES
@@ -283,11 +289,19 @@ class QlikEngineAPI:
         Fix: use a short health-check timeout and require an actual pong
         frame back before declaring the connection alive. The full
         QLIK_WS_TIMEOUT is restored afterward for real requests.
+
+        The health-check timeout (QLIK_WS_PING_TIMEOUT, default 8s) is
+        deliberately more generous than "a ping/pong should be instant":
+        recv_data() blocks for the *first* frame that arrives, and on a
+        loaded proxy/VPN path a live connection's pong can legitimately
+        take a couple of seconds. Too tight a timeout doesn't corrupt
+        anything (ensure_app() just reconnects), but it does defeat the
+        point of caching by forcibly reconnecting healthy connections.
         """
         if not self.ws or not self.ws.connected:
             return False
         try:
-            self.ws.settimeout(3)
+            self.ws.settimeout(self.ws_ping_timeout)
             self.ws.ping()
             opcode, _ = self.ws.recv_data()
             return opcode == websocket.ABNF.OPCODE_PONG
