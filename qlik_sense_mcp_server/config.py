@@ -18,6 +18,11 @@ DEFAULT_ENGINE_PORT = 4747
 DEFAULT_HTTP_TIMEOUT = 10.0
 DEFAULT_WS_TIMEOUT = 180.0
 DEFAULT_TICKET_TIMEOUT = 30.0
+# Health-check ping/pong wait when validating a cached connection. Short
+# enough to avoid trusting a dead socket, but long enough that a live
+# connection with ordinary network latency (VPN/proxy) doesn't get
+# misdiagnosed as dead and needlessly reconnected.
+DEFAULT_WS_PING_TIMEOUT = 8.0
 
 # Default retry settings
 DEFAULT_WS_RETRIES = 2

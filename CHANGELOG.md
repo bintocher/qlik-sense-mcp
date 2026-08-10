@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+- **Cached-connection health check no longer hardcodes a 3s pong wait.**
+  `_is_connected()` (added in the cold-start reconnect fix) settimeout()s
+  to a fixed 3 seconds before sending a ping and waiting for the pong.
+  `recv_data()` blocks for the *first* frame that arrives, so on a
+  loaded proxy/VPN path a live connection's pong can legitimately take
+  longer than that — the health check would then misdiagnose a healthy
+  connection as dead and force a needless reconnect (fail-safe, not
+  fail-silent, but it defeats the point of caching). The wait is now
+  `QLIK_WS_PING_TIMEOUT` (default `8.0`s, tunable via env), separate
+  from `QLIK_WS_TIMEOUT`.
+
 ## [1.7.2] - 2026-07-31
 
 ### Added

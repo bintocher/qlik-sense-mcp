@@ -78,6 +78,7 @@ Defaults match the standard
 | `QLIK_HTTP_TIMEOUT` | `10.0` | HTTP request timeout in seconds (Repository API). |
 | `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to BOTH the WS handshake AND every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
 | `QLIK_WS_RETRIES` | `2` | Number of WebSocket connection endpoints to try when connecting. |
+| `QLIK_WS_PING_TIMEOUT` | `8.0` | Ping/pong timeout (seconds) when health-checking a cached connection before reuse. Too low can mistake a live-but-slow connection (proxy/VPN latency) for a dead one and force a needless reconnect. |
 
 ## Logging
 
@@ -117,6 +118,7 @@ client connects to the long-lived server process you start manually.
         "QLIK_HTTP_TIMEOUT": "10.0",
         "QLIK_WS_TIMEOUT": "180.0",
         "QLIK_WS_RETRIES": "2",
+        "QLIK_WS_PING_TIMEOUT": "8.0",
         "LOG_LEVEL": "INFO"
       }
     }
