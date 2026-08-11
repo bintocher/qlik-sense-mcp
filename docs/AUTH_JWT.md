@@ -146,6 +146,13 @@ Two variables — that is the whole configuration.
 
 - **`QLIK_SERVER_URL`** — the Qlik hostname with the virtual proxy prefix as
   URL path. If the admin used the default prefix `jwt`, the path is `/jwt`.
+  The scheme decides the transport for everything, WebSocket included:
+  `https://host/jwt` connects with `wss://`, `http://host/jwt` with `ws://`.
+  Prefer `https`. `http` is there because Qlik does serve the proxies on
+  port 80, and on a node whose proxy TLS is broken it is the only thing that
+  answers — but the token and the session cookie then travel in clear text,
+  so treat it as a stopgap on a trusted network and expect a warning in the
+  log saying so.
 - **`QLIK_JWT_TOKEN`** — the token string the admin gave you. Treat it like
   a password.
 
@@ -164,7 +171,7 @@ something non-standard.
 | `QLIK_JWT_USER_DIR_CLAIM` | Name of the payload claim holding the user directory | `userDirectory` |
 | `QLIK_JWT_SESSION_COOKIE` | Exact name of the VP session cookie | auto-detected from bootstrap response |
 | `QLIK_JWT_SESSION_TTL` | Seconds to cache the bootstrapped session before re-fetching. Lower this if the QMC Proxy `Session inactivity timeout` is below 30 min. | `1500` (25 min) |
-| `QLIK_VERIFY_SSL` | `false` disables TLS verification | `true` |
+| `QLIK_VERIFY_SSL` | `true` enables TLS verification | `false` |
 | `QLIK_CA_CERT_PATH` | Path to a corporate CA bundle | unset |
 
 ### 2.4 Session limit — run ONE session per token

@@ -173,18 +173,23 @@ class EngineConnectionMixin:
         # Build endpoint list — per-app first if app_id is given.
         endpoints_all: List[str] = []
         if is_jwt:
-            # Via virtual proxy on 443 (or the configured non-standard port).
-            # No ws:// fallback — TLS is mandatory because the JWT was minted
-            # against a TLS-protected Host allow list in QMC.
+            # Via the virtual proxy, following the scheme the operator
+            # configured: `https://host/jwt` connects with wss://,
+            # `http://host/jwt` with ws://. Forcing wss:// regardless — which
+            # this used to do — makes the server unusable on a deployment
+            # whose proxy serves plain HTTP, and that is a real configuration:
+            # Qlik listens on 80 and 443 both, and 443 is the one that breaks
+            # when the proxy certificate is unhappy.
+            ws_scheme = "ws" if server_scheme == "http" else "wss"
             prefix = self.config.virtual_proxy_prefix
             if app_id:
                 enc = quote(app_id, safe="")
                 endpoints_all.append(
-                    f"wss://{server_netloc}/{prefix}/app/{enc}{jwt_csrf_qs}"
+                    f"{ws_scheme}://{server_netloc}/{prefix}/app/{enc}{jwt_csrf_qs}"
                 )
             endpoints_all.extend([
-                f"wss://{server_netloc}/{prefix}/app/engineData{jwt_csrf_qs}",
-                f"wss://{server_netloc}/{prefix}/app{jwt_csrf_qs}",
+                f"{ws_scheme}://{server_netloc}/{prefix}/app/engineData{jwt_csrf_qs}",
+                f"{ws_scheme}://{server_netloc}/{prefix}/app{jwt_csrf_qs}",
             ])
         else:
             if app_id:

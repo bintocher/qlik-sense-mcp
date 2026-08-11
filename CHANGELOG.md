@@ -4,6 +4,44 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.8.1] - 2026-08-11
+
+### Changed
+
+- **The URL scheme decides the transport, including the WebSocket.**
+  `QLIK_SERVER_URL=http://host/jwt` now connects to Engine with `ws://`;
+  before, the scheme was honoured for every HTTP call but the WebSocket
+  was hard-coded to `wss://` on the grounds that TLS is mandatory. That
+  is not the client's decision to make: Qlik serves the virtual proxies
+  on 80 and 443 both, and a node whose proxy TLS has failed answers only
+  on 80 — the case that prompted this, where 443 stopped completing
+  handshakes while `http://host/jwt/qps/csrftoken` returned 204. Both
+  schemes are covered by tests, and the full e2e suite was run over
+  `http://` against a live Qlik. An `http://` URL is logged as a warning,
+  because the JWT and the session cookie then travel in clear text.
+- **TLS verification is off by default.** `QLIK_VERIFY_SSL` now defaults
+  to `false` and must be set to `true` to turn verification on. Qlik
+  Sense Enterprise serves its own self-signed certificate, so a correct
+  installation failed verification and every deployment was switching it
+  off anyway — a default that is wrong for the product it talks to only
+  teaches people to disable the setting without reading it.
+
+### Fixed
+
+- **Filter panes reported no fields.** Engine gives a hypercube a *list*
+  of `qDimensionInfo` and a list object exactly one; the extractor
+  iterated both as lists, so on a list object it walked the dict's keys
+  and raised `'str' object has no attribute 'get'`. A catch-all turned
+  that into a log warning and an empty field list, and filter panes are
+  precisely the objects that say which fields a sheet can be sliced by.
+- **`Sum(Sales)` now reports `Sales`.** Field extraction matched only
+  bracketed names, so any expression written without brackets — most of
+  them — contributed nothing to "which fields does this object use".
+  Names are now taken structurally: an identifier followed by `(` is a
+  function, string literals are values, everything else that is not a
+  keyword is a field. Calculated dimensions (`=Year(OrderDate)`) are read
+  the same way instead of being skipped.
+
 ## [1.8.0] - 2026-08-11
 
 ### Added

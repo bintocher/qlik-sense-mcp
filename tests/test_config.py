@@ -85,7 +85,25 @@ class TestQlikSenseConfig:
         assert config.client_key_path is None
         assert config.ca_cert_path is None
         assert config.http_port is None
-        assert config.verify_ssl is True
+        # Off by default: Qlik Sense Enterprise serves its own self-signed
+        # certificate, so verification fails on a correct installation and
+        # every operator was turning it off anyway.
+        assert config.verify_ssl is False
+
+    def test_verification_is_opt_in_from_the_environment(self):
+        with patch.dict(os.environ, {
+            "QLIK_SERVER_URL": "https://qlik.example.com",
+            "QLIK_USER_DIRECTORY": "DOMAIN",
+            "QLIK_USER_ID": "admin",
+        }, clear=True):
+            assert QlikSenseConfig.from_env().verify_ssl is False
+        with patch.dict(os.environ, {
+            "QLIK_SERVER_URL": "https://qlik.example.com",
+            "QLIK_USER_DIRECTORY": "DOMAIN",
+            "QLIK_USER_ID": "admin",
+            "QLIK_VERIFY_SSL": "true",
+        }, clear=True):
+            assert QlikSenseConfig.from_env().verify_ssl is True
 
     def test_custom_ports(self):
         config = QlikSenseConfig(

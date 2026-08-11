@@ -7,6 +7,19 @@ from ..exceptions import QlikEngineError
 
 logger = logging.getLogger(__name__)
 
+# Words that appear where a field name could, but never name a field:
+# operators, set-analysis syntax, constants, and the aggregation modifiers
+# that are written without parentheses.
+_EXPRESSION_KEYWORDS = frozenset("""
+    and or not xor like precedes follows
+    if then else elseif end
+    total distinct all aggr
+    null true false
+    as in when
+    intervalmatch resident inline autogenerate
+    e pi
+""".split())
+
 
 class EngineSheetsMixin:
     def get_script(self, app_handle: int) -> str:
@@ -143,30 +156,48 @@ class EngineSheetsMixin:
             raise
 
     def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
-        """Extract field names used in an object layout."""
-        fields = set()
-        try:
-            if "qHyperCube" in obj_layout:
-                hypercube = obj_layout["qHyperCube"]
-                for dim_info in hypercube.get("qDimensionInfo", []):
-                    field_defs = dim_info.get("qGroupFieldDefs", [])
-                    for field_def in field_defs:
-                        field_name = self._extract_field_name_from_expression(field_def)
-                        if field_name:
-                            fields.add(field_name)
-                for measure_info in hypercube.get("qMeasureInfo", []):
-                    measure_def = measure_info.get("qDef", "")
-                    extracted_fields = self._extract_fields_from_expression(measure_def)
-                    fields.update(extracted_fields)
+        """Extract field names used in an object layout.
 
-            if "qListObject" in obj_layout:
-                list_obj = obj_layout["qListObject"]
-                for dim_info in list_obj.get("qDimensionInfo", []):
-                    field_defs = dim_info.get("qGroupFieldDefs", [])
-                    for field_def in field_defs:
-                        field_name = self._extract_field_name_from_expression(field_def)
-                        if field_name:
-                            fields.add(field_name)
+        A hypercube carries a *list* of qDimensionInfo, a list object exactly
+        one — Engine's own shapes, not a quirk of some charts. Iterating the
+        list object's as a list walked the dict's keys and raised
+        `'str' object has no attribute 'get'`, which the catch-all below
+        turned into a warning and an empty field list. Filter panes are the
+        objects built on list objects, so every filter on every sheet came
+        back as "uses no fields".
+        """
+        fields = set()
+
+        def add_dimension(dim_info: Any) -> None:
+            if not isinstance(dim_info, dict):
+                return
+            for field_def in dim_info.get("qGroupFieldDefs", []):
+                field_name = self._extract_field_name_from_expression(field_def)
+                if field_name:
+                    fields.add(field_name)
+                else:
+                    # A calculated dimension, e.g. "=Year(OrderDate)": the
+                    # simple form finds nothing, but the fields inside it are
+                    # exactly what the caller asked about.
+                    fields.update(self._extract_fields_from_expression(field_def))
+
+        try:
+            hypercube = obj_layout.get("qHyperCube")
+            if isinstance(hypercube, dict):
+                for dim_info in hypercube.get("qDimensionInfo", []):
+                    add_dimension(dim_info)
+                for measure_info in hypercube.get("qMeasureInfo", []):
+                    if isinstance(measure_info, dict):
+                        fields.update(
+                            self._extract_fields_from_expression(measure_info.get("qDef", ""))
+                        )
+
+            list_obj = obj_layout.get("qListObject")
+            if isinstance(list_obj, dict):
+                dim_info = list_obj.get("qDimensionInfo")
+                # Tolerate a list too: some object types nest several.
+                for entry in (dim_info if isinstance(dim_info, list) else [dim_info]):
+                    add_dimension(entry)
 
         except Exception as e:
             logger.warning(f"Error extracting fields from object: {e}")
@@ -185,12 +216,36 @@ class EngineSheetsMixin:
         return None
 
     def _extract_fields_from_expression(self, expression: str) -> List[str]:
-        """Extract field names from a complex expression."""
+        """Extract field names from a Qlik expression.
+
+        Bracketed names are unambiguous. Bare ones are not, so the rule is
+        structural: an identifier followed by `(` is a function call, and
+        everything else that is not a keyword is taken as a field. Matching
+        only `[...]` — as this did — meant `Sum(Sales)` reported no fields at
+        all, and most real measures are written without brackets.
+
+        This is a lexical guess, not a parser: an unusual function name would
+        be reported as a field. That is the tolerable direction of error for
+        "which fields does this object touch".
+        """
         import re
-        fields = []
+
         if not expression:
-            return fields
-        bracket_fields = re.findall(r'\[([^\]]+)\]', expression)
-        fields.extend(bracket_fields)
-        return list(set(fields))
+            return []
+
+        fields = set(re.findall(r"\[([^\]]+)\]", expression))
+
+        # Drop string literals first — 'Sales' inside a set expression is a
+        # value, not a field.
+        without_literals = re.sub(r"'[^']*'", " ", expression)
+        # And bracketed names, already collected above.
+        without_literals = re.sub(r"\[[^\]]*\]", " ", without_literals)
+
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*(\()?", without_literals):
+            name, is_call = match.group(1), match.group(2)
+            if is_call or name.lower() in _EXPRESSION_KEYWORDS:
+                continue
+            fields.add(name)
+
+        return sorted(fields)
 

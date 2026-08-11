@@ -86,7 +86,11 @@ class QlikSenseConfig(BaseModel):
                                              "'https://qlik.company.com/jwt'.")
     user_directory: str = Field("", description="User directory for X-Qlik-User (certificate mode)")
     user_id: str = Field("", description="User ID for X-Qlik-User (certificate mode)")
-    verify_ssl: bool = Field(True, description="Verify SSL certificates")
+    verify_ssl: bool = Field(False, description="Verify TLS certificates. Off by default: a "
+                                                "Qlik Sense Enterprise deployment normally serves "
+                                                "its own self-signed certificate, so verification "
+                                                "fails on a correct installation. Set "
+                                                "QLIK_VERIFY_SSL=true to turn it on.")
     ca_cert_path: Optional[str] = Field(None, description="Path to CA certificate (optional, both modes)")
 
     # Certificate mode
@@ -184,6 +188,24 @@ class QlikSenseConfig(BaseModel):
                 f"{parsed_server.scheme!r}"
             )
 
+        if parsed_server.scheme == "http":
+            # Not refused: Qlik does serve the hub and the virtual proxies on
+            # plain HTTP, and on a deployment whose proxy certificate is
+            # broken it is the only thing that answers. But the JWT and the
+            # session cookie then travel in clear text, which the operator
+            # should be choosing deliberately rather than by a typo.
+            logger.warning(
+                "QLIK_SERVER_URL uses http:// — the JWT and the Qlik session "
+                "cookie will be sent unencrypted. Use https:// unless this is "
+                "a trusted network or the proxy's TLS is unavailable."
+            )
+        elif self.verify_ssl is False:
+            logger.info(
+                "TLS certificate verification is off (the default). "
+                "Set QLIK_VERIFY_SSL=true once Qlik serves a certificate "
+                "your machine trusts."
+            )
+
         if self.auth_mode == AUTH_MODE_JWT:
             if not self.virtual_proxy_prefix:
                 raise ValueError(
@@ -230,7 +252,7 @@ class QlikSenseConfig(BaseModel):
             proxy_port=int(os.getenv("QLIK_PROXY_PORT", str(DEFAULT_PROXY_PORT))),
             engine_port=int(os.getenv("QLIK_ENGINE_PORT", str(DEFAULT_ENGINE_PORT))),
             http_port=int(os.getenv("QLIK_HTTP_PORT")) if os.getenv("QLIK_HTTP_PORT") else None,
-            verify_ssl=os.getenv("QLIK_VERIFY_SSL", "true").lower() == "true",
+            verify_ssl=os.getenv("QLIK_VERIFY_SSL", "false").lower() == "true",
             jwt_token=os.getenv("QLIK_JWT_TOKEN") or None,
             jwt_user_id_claim=os.getenv("QLIK_JWT_USER_ID_CLAIM", DEFAULT_JWT_USER_ID_CLAIM),
             jwt_user_dir_claim=os.getenv("QLIK_JWT_USER_DIR_CLAIM", DEFAULT_JWT_USER_DIR_CLAIM),

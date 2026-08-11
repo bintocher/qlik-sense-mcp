@@ -13,8 +13,9 @@ hostname does not match. Steps:
    sign the Qlik Sense node certificate.
 2. Confirm the cert hasn't expired:
    `openssl x509 -in /path/to/root.pem -noout -dates`.
-3. As a temporary workaround for self-signed dev clusters, set
-   `QLIK_VERIFY_SSL=false`. Do not use this in production.
+3. Verification is off by default, so this error means it was turned
+   on deliberately (`QLIK_VERIFY_SSL=true`). Either point
+   `QLIK_CA_CERT_PATH` at the signing CA or drop the variable.
 
 ### `ConnectionError: Failed to connect to Engine API`
 
