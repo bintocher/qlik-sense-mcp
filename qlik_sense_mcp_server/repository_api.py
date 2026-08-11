@@ -342,6 +342,23 @@ class QlikRepositoryAPI:
     # 14 DistributionRunning — a task in any of these is still working.
     RUNNING_EXECUTION_STATUSES = (1, 2, 3, 13, 14)
 
+    # The whole enum, so a reply can say what a status means. `status: 8`
+    # is not something a reader should have to look up, and the two codes
+    # that matter most — 8 FinishedFail and 6 Aborted — look nothing alike
+    # as numbers while meaning almost the same thing to an operator.
+    EXECUTION_STATUS_NAMES = {
+        0: "NeverStarted", 1: "Triggered", 2: "Started", 3: "Queued",
+        4: "AbortInitiated", 5: "Aborting", 6: "Aborted",
+        7: "FinishedSuccess", 8: "FinishedFail", 9: "Skipped",
+        10: "Retry", 11: "Error", 12: "Reset",
+        13: "DistributionQueue", 14: "DistributionRunning",
+    }
+
+    @classmethod
+    def execution_status_name(cls, status: Any) -> str:
+        """Human-readable name for a QRS TaskExecutionStatus code."""
+        return cls.EXECUTION_STATUS_NAMES.get(status, f"Unknown({status})")
+
     _TASK_COLUMNS = [
         ("id", "id"),
         ("name", "name"),
