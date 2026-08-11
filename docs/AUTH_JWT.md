@@ -174,6 +174,17 @@ JWT is issued for one analyst, so all of that analyst's MCP activity
 shares the same 5-session budget. Exceeding it does not simply queue —
 Qlik treats it as abuse and can **lock the account**.
 
+What counts against that budget is the **proxy session**, not the
+WebSocket. Measured on 31.62: the `/qps/csrftoken` bootstrap creates a
+session on its own, before any socket exists — six bootstraps produce six
+sessions and the next WebSocket is refused with
+`OnMaxParallelSessionsExceeded`, even though nothing was connected.
+Sockets sharing one bootstrapped cookie are free: sixteen at once, and
+seven of them holding seven different apps open, all still counted as one
+session. So the cost is in how often the session is bootstrapped —
+restarting the server in a loop — and not in how many queries or apps go
+through it.
+
 Practical rules:
 
 - Run **one** MCP server process per token, and keep it running. The

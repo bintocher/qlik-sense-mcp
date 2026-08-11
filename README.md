@@ -68,7 +68,19 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.7.0 line
+## Key facts about the v1.8.0 line
+
+- **Paging is done by Qlik, not after it.** App and task listings read
+  `/{entity}/table` with `skip`/`take` and take the total from
+  `/{entity}/count`, so nothing past the QRS record limit goes missing
+  and `total_found` is the real total. Field search and field paging
+  likewise happen in Engine — verified on a field with 200,000 distinct
+  values, where the old local scan simply could not see a match.
+- **A failure is never an empty answer.** A QRS 500, a refused
+  connection or an Engine error used to arrive as `[]`, `""` or "no
+  schedule", which reads as a tidy, empty Qlik. Every such path now
+  returns an `error_category` and the original cause.
+
 
 - **Column meanings, not just column names.** Fields and tables commented
   in the load script (`COMMENT FIELD` / `COMMENT TABLE`) carry that text
@@ -100,12 +112,13 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 - **Failures name the query that failed.** Every error reply, timeouts
   included, echoes `tool` and `request` with the exact arguments sent.
 - **Fewer useless tools in JWT mode.** Reload-task administration needs
-  QRS admin rights, so those 12 tools are registered only in
+  QRS admin rights, so those 14 tools are registered only in
   certificate mode: 26 tools with a certificate, 12 with a JWT.
-- **One Qlik session per server.** Qlik allows max 5 concurrent
-  sessions per user and can lock the account beyond that, so all tool
-  calls share a single cached Engine session — never fan them out in
-  parallel.
+- **One Qlik session per server.** Qlik's per-user limit (5 by default)
+  counts proxy sessions, and in JWT mode one is created by the session
+  bootstrap itself — before any WebSocket. The server therefore
+  bootstraps once and reuses that session for every call; restarting it
+  in a loop is what exhausts the quota, not the number of queries.
 - **JWT authentication via virtual proxy.** Set `QLIK_JWT_TOKEN`
   instead of certificate paths and the server will authenticate every
   Repository and Engine call as the analyst encoded in the token. No

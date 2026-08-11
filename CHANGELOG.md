@@ -4,9 +4,79 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [1.8.0] - 2026-08-11
+
+### Added
+
+- **`update_task_schedule` and `delete_task_schedule`** — a task can have
+  several triggers, and until now the only way to stop one through this
+  server was `update_task(enabled=False)`, which stops the task and every
+  other trigger with it. Both verified end to end against a live Qlik:
+  disable one trigger, retime it, give it a window, delete it.
+- `update_reload_task` refuses fields that must not travel in a PUT
+  (`id`, `createdDate`, the operational section) and reports a QRS 409 as
+  `error_category: conflict` — someone else changed the task between the
+  read and the write, which the caller answers by re-reading, not by
+  retrying blindly.
+- **`QlikEngineAPI.send_requests_pipelined()`** — sends a batch of
+  independent JSON-RPC requests back-to-back and matches responses by
+  `id`, which the Engine protocol supports precisely so replies can come
+  back out of order. `send_request()` is untouched. `raise_on_error=False`
+  returns per-item exceptions so one bad item does not lose the batch.
+  (from PR #29)
+- `_get_sheet_objects_detailed()` uses two pipelined batches instead of
+  one `GetObject`+`GetLayout` round-trip per object: 2 round-trips
+  instead of 2N. Measured on a live sheet with 16 objects: 0.135s to
+  0.028s, identical results. (from PR #29)
+- `QLIK_WS_IDLE_PROBE_AFTER` (default 30s), `QLIK_WS_PROBE_TIMEOUT`
+  (15s) and `QLIK_WS_GREETING_TIMEOUT` (15s) — liveness and handshake
+  budgets, separate from `QLIK_WS_TIMEOUT`, because a real query may
+  legitimately take minutes while a health check never should.
+  (adapted from PR #28)
+- **End-to-end test suite** (`tests/test_e2e_*.py`, marker `e2e`) that
+  runs the tools against a real Qlik and asserts on real values: ranking
+  actually ordered by the measure, pagination actually moving, NULL
+  groups actually dropped, the connection actually reused. Skipped
+  unless `QLIK_E2E_*` names a server. `tests/test_e2e_large_app.py`
+  additionally needs an app with 10M+ rows — none of the defects fixed
+  in this release could be reproduced by a fake socket.
+
+### Changed
+
+- **`get_app_variables` returns objects, always.** An empty group came
+  back as `""` instead of `{}`, so the field's type depended on whether it
+  had data. It also dropped script variables unless `created_in_script`
+  was passed explicitly, which left `variables_from_script` permanently
+  empty on the default call — half the reply was structurally dead. The
+  default now returns both sources, and the reply carries `count` and
+  `total_found`.
+- **`qSuppressMissing` is never set.** Measured on Qlik 31.62: it drops
+  exactly one row — the NULL-dimension group — and leaves rows with a NULL
+  *measure* untouched. That is what `qNullSuppression` per dimension
+  already does, under the caller's control, so the cube-wide flag only
+  ever meant an explicit "keep the NULL group" could be overridden.
+- **`engine_api.py` and `server.py` are split into packages.** The Engine
+  client became `engine/` — transport, hypercubes, fields, sheets and
+  app metadata as separate mixins assembled in `engine/api.py` — and the
+  tools became `tools/`, grouped by the API they talk to, with shared
+  state in `tools/context.py` and the response envelope in
+  `tools/helpers.py`. `from .engine_api import QlikEngineAPI` and
+  `from .server import get_apps` keep working; the largest module went
+  from 3394 lines to 875.
+
+### Removed
+
+- 43 methods that nothing called (~1180 lines): `get_table_data`,
+  `create_data_export`, `get_visualization_data`,
+  `get_detailed_app_metadata`, `get_sheets_with_objects`, bookmark and
+  selection helpers, and the rest of the unreachable surface of
+  `QlikEngineAPI` and `QlikRepositoryAPI`. Among them
+  `get_pivot_table_data`, which raised `NameError` on every call, and a
+  duplicate `get_field_description` shadowed by a later definition —
+  deleting the visible one would have silently reactivated the dead one.
 
 ### Fixed
+
 - **QRS paging is done by the server now.** `get_apps` fetched
   `app/full` — which ignores skip/take and is itself truncated at the
   QRS MaxRecordLimit (100 by default) — and then sliced the result
@@ -82,8 +152,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `get_apps` turned a 500, a 403 or a refused connection into "nothing
   found". They now return `error_category: repository_error` with the
   original cause.
-
-### Fixed (from the review of this release)
 - `/count` replies are accepted in both shapes QRS uses — a bare integer
   and `{"value": N}`. Insisting on the object form would have failed
   every paged read on a server that answers with the number.
@@ -113,8 +181,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   branch of the Engine client and its helpers — two of which called
   methods that do not exist anywhere in the package — plus the unused
   ticket/proxy helpers and a no-op loop over `qChildList`.
-
-### Fixed (third review round)
 - **Wildcards are Qlik's, not Python's.** The case-sensitive filter went
   through `fnmatch`, which also reads `[...]` as a character class — so the
   pattern `Order[12]` matched the value `Order[1]`, a match Qlik would
@@ -138,8 +204,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   rather than in a `finally`.
 - **`_read_all`'s safety cap counts rows, not offsets**, so it no longer
   refuses the last page one row early.
-
-### Fixed (second review round)
 - **Case-sensitive field search kept its wildcards.** The previous fix
   reached for `Match()`, which respects case but does not understand `*`
   or `?` — verified on 31.62, `Match('C000001','C00000*')` is 0. Qlik has
@@ -173,42 +237,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   access; with an Analyzer licence Qlik returns an empty string and no
   error, which is indistinguishable from an app that has no script.
   `get_app_script` now attaches a `note` explaining the difference.
-
-### Added (closing the last open items)
-- **`update_task_schedule` and `delete_task_schedule`** — a task can have
-  several triggers, and until now the only way to stop one through this
-  server was `update_task(enabled=False)`, which stops the task and every
-  other trigger with it. Both verified end to end against a live Qlik:
-  disable one trigger, retime it, give it a window, delete it.
-- `update_reload_task` refuses fields that must not travel in a PUT
-  (`id`, `createdDate`, the operational section) and reports a QRS 409 as
-  `error_category: conflict` — someone else changed the task between the
-  read and the write, which the caller answers by re-reading, not by
-  retrying blindly.
-
-### Changed
-- **`get_app_variables` returns objects, always.** An empty group came
-  back as `""` instead of `{}`, so the field's type depended on whether it
-  had data. It also dropped script variables unless `created_in_script`
-  was passed explicitly, which left `variables_from_script` permanently
-  empty on the default call — half the reply was structurally dead. The
-  default now returns both sources, and the reply carries `count` and
-  `total_found`.
-- **`qSuppressMissing` is never set.** Measured on Qlik 31.62: it drops
-  exactly one row — the NULL-dimension group — and leaves rows with a NULL
-  *measure* untouched. That is what `qNullSuppression` per dimension
-  already does, under the caller's control, so the cube-wide flag only
-  ever meant an explicit "keep the NULL group" could be overridden.
-- **`engine_api.py` and `server.py` are split into packages.** The Engine
-  client became `engine/` — transport, hypercubes, fields, sheets and
-  app metadata as separate mixins assembled in `engine/api.py` — and the
-  tools became `tools/`, grouped by the API they talk to, with shared
-  state in `tools/context.py` and the response envelope in
-  `tools/helpers.py`. `from .engine_api import QlikEngineAPI` and
-  `from .server import get_apps` keep working; the largest module went
-  from 3394 lines to 875.
-
-### Fixed (earlier in this release)
 - **The cached WebSocket is no longer wedged by its own health check.**
   `_is_connected()` sent a WebSocket ping before reusing the connection.
   Qlik's Proxy Service does not relay ping/pong to the Engine: through a
@@ -264,40 +292,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   a stale cached calculation back instead of an evaluation of its own
   `qDef`. Every id now carries a `uuid4` suffix, and the matching
   `DestroySessionObject` uses the generated id. (from PR #27)
-
-### Added
-- **`QlikEngineAPI.send_requests_pipelined()`** — sends a batch of
-  independent JSON-RPC requests back-to-back and matches responses by
-  `id`, which the Engine protocol supports precisely so replies can come
-  back out of order. `send_request()` is untouched. `raise_on_error=False`
-  returns per-item exceptions so one bad item does not lose the batch.
-  (from PR #29)
-- `_get_sheet_objects_detailed()` uses two pipelined batches instead of
-  one `GetObject`+`GetLayout` round-trip per object: 2 round-trips
-  instead of 2N. Measured on a live sheet with 16 objects: 0.135s to
-  0.028s, identical results. (from PR #29)
-- `QLIK_WS_IDLE_PROBE_AFTER` (default 30s), `QLIK_WS_PROBE_TIMEOUT`
-  (15s) and `QLIK_WS_GREETING_TIMEOUT` (15s) — liveness and handshake
-  budgets, separate from `QLIK_WS_TIMEOUT`, because a real query may
-  legitimately take minutes while a health check never should.
-  (adapted from PR #28)
-- **End-to-end test suite** (`tests/test_e2e_*.py`, marker `e2e`) that
-  runs the tools against a real Qlik and asserts on real values: ranking
-  actually ordered by the measure, pagination actually moving, NULL
-  groups actually dropped, the connection actually reused. Skipped
-  unless `QLIK_E2E_*` names a server. `tests/test_e2e_large_app.py`
-  additionally needs an app with 10M+ rows — none of the defects fixed
-  in this release could be reproduced by a fake socket.
-
-### Removed
-- 43 methods that nothing called (~1180 lines): `get_table_data`,
-  `create_data_export`, `get_visualization_data`,
-  `get_detailed_app_metadata`, `get_sheets_with_objects`, bookmark and
-  selection helpers, and the rest of the unreachable surface of
-  `QlikEngineAPI` and `QlikRepositoryAPI`. Among them
-  `get_pivot_table_data`, which raised `NameError` on every call, and a
-  duplicate `get_field_description` shadowed by a later definition —
-  deleting the visible one would have silently reactivated the dead one.
 
 ## [1.7.2] - 2026-07-31
 
