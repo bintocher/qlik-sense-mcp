@@ -28,7 +28,7 @@ categories. The lists below are a quick map only.
 |------|---------|
 | `get_about` | Qlik Sense server info: version, build, node type. Use to verify connectivity. |
 | `get_apps` | List apps with filters (`name`, `stream`, `published`) and pagination. `limit` capped at 50. |
-| `get_app_details` | App overview: metadata, full table list with row counts, full field list with `distinct_values`, plus a `warnings` array that flags huge fact tables and high-cardinality fields. Tables and fields that carry a `COMMENT TABLE` / `COMMENT FIELD` text from the load script also get a `comment` key — the business meaning of the column, absent when the script sets none. Always call this before building a hypercube. |
+| `get_app_details` | App overview: metadata, full table list with row counts, full field list with `distinct_values`, plus a `warnings` array that flags huge fact tables and high-cardinality fields. Tables and fields that carry a `COMMENT TABLE` / `COMMENT FIELD` text from the load script also get a `comment` key — the business meaning of the column, absent when the script sets none. Fields with 25 or fewer distinct values carry `values` — the actual list — and date fields carry `sample`, a few values in their display format. Both exist so filters are written against what Qlik holds rather than what the caller assumes: `Moskva` is not `Moscow`, and `01.01.2024` is not `45292`. Qlik answers either mistake with zeros, not an error. Always call this before building a hypercube. |
 
 ## Engine API
 

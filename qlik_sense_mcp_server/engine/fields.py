@@ -300,6 +300,81 @@ class EngineFieldsMixin:
         except Exception as e:
             return {"error": str(e), "details": "Error in get_field_values method"}
 
+    def get_field_values_batch(
+        self, app_handle: int, wanted: List[Any]
+    ) -> Dict[str, List[str]]:
+        """Distinct values for several fields in a fixed number of round-trips.
+
+        `wanted` is a list of `(field_name, how_many)`. Reading the fields
+        one at a time would cost three round-trips each — create, read,
+        destroy — which is why the caller used to skip reading them at all
+        and leave the values to be guessed.
+
+        Best-effort by design: a field that fails is simply absent from the
+        result. This feeds a convenience section of a reply, and must never
+        be the reason the reply fails.
+        """
+        if not wanted:
+            return {}
+
+        objects = []
+        for field_name, how_many in wanted:
+            object_id = f"sample-{uuid.uuid4().hex[:12]}"
+            objects.append((field_name, object_id, {
+                "qInfo": {"qId": object_id, "qType": "ListObject"},
+                "qListObjectDef": {
+                    "qDef": {"qFieldDefs": [field_name]},
+                    "qInitialDataFetch": [
+                        {"qTop": 0, "qLeft": 0, "qHeight": how_many, "qWidth": 1}],
+                },
+            }))
+
+        created = self.send_requests_pipelined(
+            [{"method": "CreateSessionObject", "params": [definition], "handle": app_handle}
+             for _name, _oid, definition in objects],
+            raise_on_error=False,
+        )
+        handles = []
+        for outcome in created:
+            if isinstance(outcome, Exception):
+                handles.append(None)
+                continue
+            handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
+
+        live = [i for i, handle in enumerate(handles) if handle is not None]
+        layouts = self.send_requests_pipelined(
+            [{"method": "GetLayout", "params": [], "handle": handles[i]} for i in live],
+            raise_on_error=False,
+        ) if live else []
+
+        values: Dict[str, List[str]] = {}
+        for index, layout in zip(live, layouts):
+            if isinstance(layout, Exception):
+                continue
+            list_object = ((layout or {}).get("qLayout") or {}).get("qListObject") or {}
+            collected = [
+                cell.get("qText", "")
+                for page in list_object.get("qDataPages", []) or []
+                for row in page.get("qMatrix", []) or []
+                for cell in row
+                if cell.get("qText", "") != ""
+            ]
+            if collected:
+                values[objects[index][0]] = collected
+
+        # Session objects hold their result set in Engine memory until they
+        # are destroyed, so clean up even though nothing here failed.
+        try:
+            self.send_requests_pipelined(
+                [{"method": "DestroySessionObject", "params": [objects[i][1]],
+                  "handle": app_handle} for i in live],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.warning("Could not destroy sample list objects: %s", exc)
+
+        return values
+
     def _get_field_values_via_hypercube(
         self, app_handle: int, field_name: str, max_values: int = 100
     ) -> Dict[str, Any]:

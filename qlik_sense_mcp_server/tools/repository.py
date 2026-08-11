@@ -20,6 +20,62 @@ from ..config import (
     MAX_APPS_LIMIT,
 )
 
+logger = context.logger
+
+# A field with few enough distinct values to list them outright. Above this
+# the list stops being an aid and starts being a wall of text.
+SAMPLE_VALUES_MAX_CARDINALITY = 25
+# How many fields to sample in one reply. Sampling is one pipelined batch,
+# but the values still cost context.
+SAMPLE_VALUES_MAX_FIELDS = 20
+
+
+def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None:
+    """Add `values` to low-cardinality fields, and `sample` to date fields.
+
+    Filtering is written against the values Qlik holds, not against the
+    ones a caller assumes — and the two differ constantly: `Moskva` for
+    Moscow, `01.01.2024` for a date that a model will otherwise filter as
+    a serial number. Both mistakes return zeros rather than an error, so
+    the cheapest fix is to put the real values in front of the caller
+    before any expression is written.
+    """
+    candidates = [
+        f for f in fields
+        if 0 < (f.get("distinct_values") or 0) <= SAMPLE_VALUES_MAX_CARDINALITY
+    ]
+    # Dates are the other guessing trap, and they are never low-cardinality;
+    # a couple of values are enough to show the display format.
+    date_fields = [
+        f for f in fields
+        if f not in candidates
+        and any(tag in ("$date", "$timestamp") for tag in (f.get("tags") or []))
+    ]
+    wanted = (candidates + date_fields)[:SAMPLE_VALUES_MAX_FIELDS]
+    if not wanted:
+        return
+
+    try:
+        results = context.engine_api.get_field_values_batch(
+            app_handle,
+            [(f["name"], SAMPLE_VALUES_MAX_CARDINALITY if f in candidates else 3)
+             for f in wanted],
+        )
+    except Exception as exc:
+        # An aid, not the answer: if it cannot be produced, the reply is
+        # still correct without it.
+        logger.debug("Could not sample field values: %s", exc)
+        return
+
+    for field in wanted:
+        values = results.get(field["name"])
+        if not values:
+            continue
+        if field in candidates:
+            field["values"] = values
+        else:
+            field["sample"] = values[:3]
+
 
 @mcp.tool()
 @_timed
@@ -251,6 +307,14 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             if f.get("comment"):
                 entry["comment"] = f["comment"]
             fields.append(entry)
+
+        # Show what the values actually look like. Without this the caller
+        # has to guess them, and Qlik answers a wrong guess with a number
+        # rather than an error: a filter on 'Moscow' where the data says
+        # 'Moskva' returns a clean table of zeros. Measured against a real
+        # LLM, guessing cost ten tool calls and two minutes on a question
+        # that needs two calls once the values are visible.
+        _attach_sample_values(app_handle, fields)
         for tname, tfields in table_map.items():
             rows = max((f.get("rows_count", 0) for f in tfields), default=0)
             entry = {
