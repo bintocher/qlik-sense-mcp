@@ -71,6 +71,13 @@ Defaults match the standard
 |----------|---------|-------------|
 | `QLIK_VERIFY_SSL` | `false` | Verify TLS certificates. Off by default: Qlik Sense Enterprise serves its own self-signed certificate, so a correct installation fails verification. Set to `true` once Qlik presents a certificate your machine trusts (and point `QLIK_CA_CERT_PATH` at the CA if it is a private one). |
 
+## Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `INFO` | Root log level (`DEBUG`, `INFO`, `WARNING`, ...). |
+| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go — stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+
 ## Timeouts and retries
 
 | Variable | Default | Description |

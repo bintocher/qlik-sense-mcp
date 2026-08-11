@@ -73,7 +73,8 @@ Every tool wraps its result in:
 ```jsonc
 {
   "tool_call_seconds": 0.234,   // wall-clock time, milliseconds precision
-  // ...the tool's own JSON payload follows...
+  "count": 18,                  // ...then the tool's own payload
+  "apps": []
 }
 ```
 

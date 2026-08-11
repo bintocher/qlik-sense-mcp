@@ -107,6 +107,12 @@ def _timed(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         t0 = time.monotonic()
+        # Log what was asked, not just what failed. When a model drives
+        # these tools, the arguments are the interesting part — which field
+        # it guessed, how many rows it asked for, what set analysis it
+        # wrote — and without this the only record of a successful call is
+        # a duration.
+        logger.info("tool %s %s", func.__name__, _describe_call(sig, args, kwargs))
         try:
             result = func(*args, **kwargs)
         except Exception as ex:

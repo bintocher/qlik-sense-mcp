@@ -221,3 +221,43 @@ class TestSqlDetectionPrecision:
         """A quoted alias is the form a model writes most often."""
         result = _Engine()._validate_cube_inputs(1, _dims("Region"), [{"expression": expression}])
         assert any("AS <alias>" in w for w in result["warnings"]), (expression, result["warnings"])
+
+
+class TestDimensionShape:
+    """A model writes a calculated dimension the way it writes a measure.
+
+    `measures` take `{"expression": ...}`, so `dimensions` got the same
+    key — and the code went straight to `dim["field"]`, raising
+    `KeyError: 'field'`. Found by an LLM driving the real server: it
+    wanted `Year(order_date)` as a dimension and got an opaque crash.
+    """
+
+    @staticmethod
+    def _cube(**kwargs):
+        """Run the argument handling against a stubbed Engine."""
+        from tests.test_hypercube import _PagingEngine
+        return _PagingEngine(total_rows=2, first_page=2).create_hypercube(1, **kwargs)
+
+    @pytest.mark.parametrize("alias", ["expression", "name", "definition", "qDef"])
+    def test_a_dimension_spelled_another_way_is_accepted(self, alias):
+        """It must get past argument handling; what follows needs a socket."""
+        result = self._cube(dimensions=[{alias: "=Year(OrderDate)"}],
+                            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert result.get("error_category") != "invalid_argument", result
+
+    def test_a_dimension_with_no_name_is_refused_clearly(self):
+        result = self._cube(dimensions=[{"sort_by": {}}],
+                            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert result["error_category"] == "invalid_argument"
+        assert "dimensions[0]" in result["error"]
+        assert "=Year(OrderDate)" in result["hint"]
+
+    def test_an_empty_field_name_is_refused(self):
+        result = self._cube(dimensions=[{"field": "   "}],
+                            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_the_position_of_the_bad_dimension_is_named(self):
+        result = self._cube(dimensions=[{"field": "Region"}, {"nonsense": 1}],
+                            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert "dimensions[1]" in result["error"]

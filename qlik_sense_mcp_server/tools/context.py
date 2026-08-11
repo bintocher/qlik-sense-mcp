@@ -52,14 +52,26 @@ load_dotenv()
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 _logging_level = getattr(logging, LOG_LEVEL, logging.INFO)
+_log_formatter = logging.Formatter(
+    fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 if not logging.getLogger().handlers:
     handler = logging.StreamHandler(stream=sys.stderr)
-    formatter = logging.Formatter(
-        fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    handler.setFormatter(formatter)
+    handler.setFormatter(_log_formatter)
     logging.getLogger().addHandler(handler)
+# Over stdio the log has nowhere to go: stdout is the protocol, and MCP
+# clients generally swallow the server's stderr. QLIK_LOG_FILE gives the
+# operator somewhere to look — which tools were called, with which
+# arguments, and how long each took.
+_log_file = os.getenv("QLIK_LOG_FILE")
+if _log_file:
+    try:
+        file_handler = logging.FileHandler(_log_file, encoding="utf-8")
+        file_handler.setFormatter(_log_formatter)
+        logging.getLogger().addHandler(file_handler)
+    except OSError as exc:  # a bad path must not stop the server
+        logging.getLogger().warning("QLIK_LOG_FILE %r unusable: %s", _log_file, exc)
 logging.getLogger().setLevel(_logging_level)
 logger = logging.getLogger("qlik_sense_mcp_server.server")
 

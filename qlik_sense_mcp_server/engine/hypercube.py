@@ -479,11 +479,37 @@ class EngineHypercubeMixin:
             # caller's data and make `dimensions` in the response something
             # other than the echoed input it claims to be.
             converted_dimensions = []
-            for dim in dimensions:
+            for position, dim in enumerate(dimensions):
                 if isinstance(dim, str):
                     dim = {"field": dim}
                 else:
                     dim = dict(dim)
+                    # A measure is `{"expression": ...}`, so a model writing a
+                    # calculated dimension reaches for the same key — and used
+                    # to get `KeyError: 'field'`, an opaque crash instead of an
+                    # answer. Accept the spelling; Qlik takes both a field name
+                    # and an `=expression` in the same slot anyway.
+                    if "field" not in dim:
+                        for alias in ("expression", "name", "definition", "qDef"):
+                            if dim.get(alias):
+                                dim["field"] = dim.pop(alias)
+                                break
+                if not str(dim.get("field") or "").strip():
+                    return {
+                        "error": (
+                            f"dimensions[{position}] has no field name: "
+                            f"{dim!r}"
+                        ),
+                        "error_category": "invalid_argument",
+                        "failed_step": "plan",
+                        "hint": (
+                            "A dimension is {\"field\": \"<FieldName>\"} — a "
+                            "real field, or an expression starting with '=' "
+                            "such as {\"field\": \"=Year(OrderDate)\"}. A bare "
+                            "string is accepted too. Aggregations belong in "
+                            "`measures`, not here."
+                        ),
+                    }
                 dim.setdefault("sort_by", {
                     "qSortByNumeric": 0,
                     "qSortByAscii": 1,  # Default: ASCII ascending
