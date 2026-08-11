@@ -17,6 +17,11 @@ from . import context
 
 logger = context.logger
 
+# Log the body of each reply, not just the call. Auditing "what did the
+# model see" needs both halves of the exchange.
+_LOG_REPLIES = __import__("os").getenv("QLIK_LOG_REPLIES", "").lower() == "true"
+_LOG_REPLY_CHARS = int(__import__("os").getenv("QLIK_LOG_REPLY_CHARS", "4000"))
+
 
 # What a reader needs first, in the order it needs it. A model reads the
 # head of a reply most carefully, so the category and the fix go before the
@@ -201,6 +206,12 @@ def _timed(func):
         logger.info("tool %s %s", func.__name__, _describe_call(sig, args, kwargs))
         try:
             result = func(*args, **kwargs)
+            if _LOG_REPLIES and isinstance(result, str):
+                # QLIK_LOG_REPLIES exists for auditing what a model was
+                # actually told. Off by default: replies carry data, and
+                # data does not belong in a log unless someone asked.
+                logger.info("reply %s %s", func.__name__,
+                            result[:_LOG_REPLY_CHARS])
         except Exception as ex:
             elapsed = round(time.monotonic() - t0, 3)
             logger.exception("Tool %s raised after %.3fs", func.__name__, elapsed)
