@@ -49,6 +49,28 @@ def pytest_configure(config):
     )
 
 
+# Which app each e2e module works against. Switching apps costs an Engine
+# session — Qlik will not open a second document on one socket, so the
+# client has to reconnect — and Qlik caps concurrent sessions per user.
+# Running the modules in app order turns a dozen switches into two.
+_APP_ORDER = {
+    "test_e2e_tools": 0,        # the small app (and its sheets)
+    "test_e2e_connection": 1,   # small app, plus one deliberate switch
+    "test_e2e_large_app": 2,    # the 10M-row app
+}
+
+
+def pytest_collection_modifyitems(items):
+    """Order e2e tests by the app they use; leave everything else alone."""
+    def key(item):
+        if "e2e" not in item.keywords:
+            return (0, 0)
+        module = item.module.__name__.rsplit(".", 1)[-1]
+        return (1, _APP_ORDER.get(module, 99))
+
+    items.sort(key=key)
+
+
 def _e2e_env():
     """Build the QLIK_* environment for a live run, or return None."""
     url = os.getenv("QLIK_E2E_URL")
