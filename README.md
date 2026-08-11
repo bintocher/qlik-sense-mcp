@@ -68,8 +68,19 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.8.0 line
+## Key facts about the v1.9.0 line
 
+- **A wrong query is refused, not answered.** Qlik evaluates an unknown
+  field name as an expression worth 0, so a hypercube grouped by a typo
+  came back as a single row holding the grand total — a plausible number
+  with nothing to mark it as wrong. Dimension fields are checked against
+  the data model first (about 10ms), and measures that come back entirely
+  zero, contain SQL, or mention names the model does not have are
+  reported in `warnings`.
+- **Objects say which fields they use.** `get_app_sheet_objects` returns
+  `fields_used`, including fields reached through master measures and the
+  ones inside a filter pane's listboxes — so "what does this sheet work
+  with" is one call.
 - **Paging is done by Qlik, not after it.** App and task listings read
   `/{entity}/table` with `skip`/`take` and take the total from
   `/{entity}/count`, so nothing past the QRS record limit goes missing
@@ -80,8 +91,6 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
   connection or an Engine error used to arrive as `[]`, `""` or "no
   schedule", which reads as a tidy, empty Qlik. Every such path now
   returns an `error_category` and the original cause.
-
-
 - **Column meanings, not just column names.** Fields and tables commented
   in the load script (`COMMENT FIELD` / `COMMENT TABLE`) carry that text
   into `get_app_details` as `comment`, and into `get_app_field` as

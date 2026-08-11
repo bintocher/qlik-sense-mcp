@@ -109,3 +109,148 @@ class TestExpressions:
         """'North' is a value being compared against, not a column."""
         assert "North" not in engine._extract_fields_from_expression(
             "Sum(If(Region='North', Sales))")
+
+    def test_a_double_quoted_search_is_not_a_field(self, engine):
+        """In a set modifier, double quotes are a search value, not a name.
+
+        `Country={"New Zealand"}` used to report `New` and `Zealand` as two
+        fields of the data model.
+        """
+        assert engine._extract_fields_from_expression(
+            'Sum({<Country={"New Zealand", "C*"}>} Sales)') == ["Country", "Sales"]
+
+    def test_non_latin_field_names_are_found(self, engine):
+        """Real dimensions on the stand this was measured against are
+        `Год` and `Месяц`; an A-Za-z pattern loses every one of them."""
+        assert engine._extract_fields_from_expression(
+            "Count(distinct lara_id) / Sum(Год)") == ["lara_id", "Год"]
+
+    @pytest.mark.parametrize("expression", [
+        "Count(distinct lara_id) / 1e3",
+        "Sum(Sales) * 1.5",
+        "Sum(Sales) / 1000",
+    ])
+    def test_numeric_literals_are_not_fields(self, engine, expression):
+        found = engine._extract_fields_from_expression(expression)
+        assert all(not f[0].isdigit() for f in found), found
+
+    def test_a_variable_expansion_is_not_a_field(self, engine):
+        assert engine._extract_fields_from_expression(
+            "Sum(Sales) / $(vTarget)") == ["Sales"]
+
+
+class TestExpressionsFromProperties:
+    """The layout has no measure expressions — the properties do.
+
+    Measured on 31.62: `qMeasureInfo` in a GetLayout reply carries
+    qFallbackTitle, formatting and statistics, and no `qDef` at all. Reading
+    the expression from the layout therefore found nothing on every real
+    object, while the tests passed against a hand-written layout that had a
+    `qDef` Qlik never sends.
+    """
+
+    def test_inline_measure_and_dimension(self, engine):
+        properties = {"qProp": {"qHyperCubeDef": {
+            "qMeasures": [{"qDef": {"qDef": "Sum(Sales)", "qLabel": "Revenue"}}],
+            "qDimensions": [{"qDef": {"qFieldDefs": ["Region"]}}],
+        }}}
+        parsed = engine._object_expressions(properties)
+        assert parsed["measures"] == [
+            {"expression": "Sum(Sales)", "label": "Revenue", "library_id": None}]
+        assert parsed["dimensions"][0]["fields"] == ["Region"]
+
+    def test_a_master_measure_reports_its_library_id(self, engine):
+        properties = {"qProp": {"qHyperCubeDef": {
+            "qMeasures": [{"qLibraryId": "abc-123", "qDef": {"qDef": ""}}],
+            "qDimensions": [],
+        }}}
+        parsed = engine._object_expressions(properties)
+        assert parsed["measures"][0]["library_id"] == "abc-123"
+        assert parsed["measures"][0]["expression"] == ""
+
+    def test_a_failed_properties_call_is_not_an_object_without_measures(self, engine):
+        assert engine._object_expressions(Exception("boom")) == {
+            "measures": [], "dimensions": []}
+
+    def test_an_object_with_no_hypercube(self, engine):
+        assert engine._object_expressions({"qProp": {}}) == {"measures": [], "dimensions": []}
+
+
+class TestMasterItemResolution:
+    """A chart built from the library stores only an id.
+
+    Without resolving it, the charts a modeller took the trouble to
+    standardise are exactly the ones reporting no fields — which is the
+    wrong way round.
+    """
+
+    class _Engine(QlikEngineAPI):
+        def __init__(self):
+            self.batches = []
+
+        def send_requests_pipelined(self, requests, raise_on_error=True):
+            self.batches.append([r["method"] for r in requests])
+            method = requests[0]["method"]
+            if method in ("GetMeasure", "GetDimension"):
+                return [{"qReturn": {"qHandle": 10 + i}} for i in range(len(requests))]
+            if method == "GetLayout":
+                # Handles were handed out in request order: measures first.
+                return [{"qLayout": {"qMeasure": {"qDef": "Sum(Sales)"}}},
+                        {"qLayout": {"qDim": {"qFieldDefs": ["Region"]}}}][:len(requests)]
+            raise AssertionError(method)
+
+    def test_library_measure_and_dimension_are_filled_in(self):
+        engine = self._Engine()
+        entries = {0: {
+            "measures": [{"expression": "", "label": "", "library_id": "m-1"}],
+            "dimensions": [{"fields": [], "label": "", "library_id": "d-1"}],
+        }}
+        engine._resolve_library_items(1, entries)
+        assert entries[0]["measures"][0]["expression"] == "Sum(Sales)"
+        assert entries[0]["dimensions"][0]["fields"] == ["Region"]
+
+    def test_nothing_to_resolve_costs_no_calls(self):
+        engine = self._Engine()
+        entries = {0: {"measures": [{"expression": "Sum(Sales)", "library_id": None}],
+                       "dimensions": []}}
+        engine._resolve_library_items(1, entries)
+        assert engine.batches == []
+
+    def test_the_same_library_id_is_fetched_once(self):
+        engine = self._Engine()
+        entries = {
+            0: {"measures": [{"expression": "", "library_id": "m-1"}], "dimensions": []},
+            1: {"measures": [{"expression": "", "library_id": "m-1"}], "dimensions": []},
+        }
+        engine._resolve_library_items(1, entries)
+        assert engine.batches[0] == ["GetMeasure"]
+
+
+class TestContainerChildren:
+    """A filter pane holds no fields itself; its listbox children do."""
+
+    class _Engine(QlikEngineAPI):
+        def __init__(self):
+            pass
+
+        def send_requests_pipelined(self, requests, raise_on_error=True):
+            if requests[0]["method"] == "GetObject":
+                return [{"qReturn": {"qHandle": 50 + i}} for i in range(len(requests))]
+            return [
+                {"qLayout": {"qListObject": {"qDimensionInfo": {"qGroupFieldDefs": [name]}}}}
+                for name in ("Region", "Year")
+            ][:len(requests)]
+
+    def test_children_contribute_their_fields_to_the_parent(self):
+        engine = self._Engine()
+        layouts = {0: {"qLayout": {"qChildList": {"qItems": [
+            {"qInfo": {"qId": "lb1"}}, {"qInfo": {"qId": "lb2"}}]}}}}
+        assert sorted(engine._nested_object_fields(1, layouts)[0]) == ["Region", "Year"]
+
+    def test_an_object_without_children_asks_nothing(self):
+        engine = self._Engine()
+        assert engine._nested_object_fields(1, {0: {"qLayout": {"qHyperCube": {}}}}) == {}
+
+    def test_a_failed_layout_is_skipped(self):
+        engine = self._Engine()
+        assert engine._nested_object_fields(1, {0: Exception("gone")}) == {}

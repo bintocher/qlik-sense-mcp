@@ -122,6 +122,32 @@ class EngineSheetsMixin:
             ) if layout_indices else []
             layout_by_index = dict(zip(layout_indices, layout_outcomes))
 
+            # Wave 3: the layout does NOT carry measure expressions. Verified
+            # on 31.62 against a live sheet: `qMeasureInfo` has
+            # qFallbackTitle, formatting and statistics, but no `qDef` —
+            # reading the expression from the layout found nothing on every
+            # real object. The definition lives in the properties, under
+            # qHyperCubeDef.qMeasures[].qDef.qDef.
+            property_outcomes = self.send_requests_pipelined(
+                [{"method": "GetProperties", "params": [], "handle": obj_handles[i]}
+                 for i in layout_indices],
+                raise_on_error=False,
+            ) if layout_indices else []
+            properties_by_index = dict(zip(layout_indices, property_outcomes))
+
+            expressions_by_index = {
+                i: self._object_expressions(properties_by_index.get(i))
+                for i in layout_indices
+            }
+            # A filter pane holds no fields itself — it is a container whose
+            # listbox children each carry one. Reading only the top level
+            # reported every filter pane on every sheet as using no fields,
+            # which is the opposite of what a filter pane is for.
+            nested_fields = self._nested_object_fields(app_handle, layout_by_index)
+            # Wave 4: master items carry a library id instead of a definition,
+            # so resolve those in one more batch.
+            self._resolve_library_items(app_handle, expressions_by_index)
+
             detailed_objects = []
             for i, (obj_id, obj_type, child_obj) in enumerate(child_meta):
                 obj_layout = layout_by_index.get(i)
@@ -133,13 +159,29 @@ class EngineSheetsMixin:
                 if "qLayout" not in obj_layout:
                     continue
                 try:
-                    fields_used = self._extract_fields_from_object(obj_layout["qLayout"])
+                    expressions = expressions_by_index.get(i) or {"measures": [], "dimensions": []}
+                    fields_used = set(self._extract_fields_from_object(obj_layout["qLayout"]))
+                    fields_used.update(nested_fields.get(i, []))
+                    for measure in expressions["measures"]:
+                        fields_used.update(
+                            self._extract_fields_from_expression(measure.get("expression", "")))
+                    for dimension in expressions["dimensions"]:
+                        for field_def in dimension.get("fields", []):
+                            name = self._extract_field_name_from_expression(field_def)
+                            if name:
+                                fields_used.add(name)
+                            else:
+                                fields_used.update(
+                                    self._extract_fields_from_expression(field_def))
+                    fields_used = sorted(fields_used)
                     detailed_obj = {
                         "object_id": obj_id,
                         "object_type": obj_type,
                         "object_title": obj_layout["qLayout"].get("title", ""),
                         "object_subtitle": obj_layout["qLayout"].get("subtitle", ""),
                         "fields_used": fields_used,
+                        "measures": expressions["measures"],
+                        "dimensions": expressions["dimensions"],
                         "basic_info": child_obj,
                         "detailed_layout": obj_layout["qLayout"]
                     }
@@ -154,6 +196,184 @@ class EngineSheetsMixin:
         except Exception as e:
             logger.error("_get_sheet_objects_detailed error: %s", e)
             raise
+
+    def _nested_object_fields(self, app_handle: int,
+                              layout_by_index: Dict[int, Any]) -> Dict[int, List[str]]:
+        """Fields used by the children of container objects.
+
+        One level deep: that covers the filter pane, which is the container
+        that matters and the only one commonly nested on a sheet. A
+        container inside a container would need recursion, and buying that
+        with two more round-trips per level is not worth it until something
+        actually needs it.
+        """
+        wanted = []  # (parent_index, child_id)
+        for index, layout in layout_by_index.items():
+            if isinstance(layout, Exception) or not isinstance(layout, dict):
+                continue
+            children = ((layout.get("qLayout") or {}).get("qChildList") or {}).get("qItems") or []
+            for child in children:
+                child_id = ((child or {}).get("qInfo") or {}).get("qId")
+                if child_id:
+                    wanted.append((index, child_id))
+        if not wanted:
+            return {}
+
+        try:
+            handle_outcomes = self.send_requests_pipelined(
+                [{"method": "GetObject", "params": {"qId": child_id}, "handle": app_handle}
+                 for _parent, child_id in wanted],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.debug("Could not resolve nested objects: %s", exc)
+            return {}
+
+        handles = []
+        for outcome in handle_outcomes:
+            if isinstance(outcome, Exception):
+                handles.append(None)
+                continue
+            handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
+
+        positions = [i for i, handle in enumerate(handles) if handle is not None]
+        try:
+            layouts = self.send_requests_pipelined(
+                [{"method": "GetLayout", "params": [], "handle": handles[i]}
+                 for i in positions],
+                raise_on_error=False,
+            ) if positions else []
+        except Exception as exc:
+            logger.debug("Could not read nested object layouts: %s", exc)
+            return {}
+
+        by_parent: Dict[int, List[str]] = {}
+        for position, layout in zip(positions, layouts):
+            if isinstance(layout, Exception) or not isinstance(layout, dict):
+                continue
+            parent_index = wanted[position][0]
+            fields = self._extract_fields_from_object(layout.get("qLayout") or {})
+            if fields:
+                by_parent.setdefault(parent_index, []).extend(fields)
+        return by_parent
+
+    @staticmethod
+    def _object_expressions(properties: Any) -> Dict[str, List[Dict[str, Any]]]:
+        """Measure and dimension definitions from an object's properties.
+
+        Returns them in the shape a reader wants — expression plus label —
+        rather than Qlik's doubly-nested `qDef.qDef`. A master item has no
+        expression here, only `qLibraryId`; those are filled in afterwards
+        by `_resolve_library_items`.
+        """
+        empty: Dict[str, List[Dict[str, Any]]] = {"measures": [], "dimensions": []}
+        if isinstance(properties, Exception) or not isinstance(properties, dict):
+            return empty
+        cube = ((properties.get("qProp") or {}).get("qHyperCubeDef")) or {}
+        if not isinstance(cube, dict):
+            return empty
+
+        measures = []
+        for measure in cube.get("qMeasures", []) or []:
+            if not isinstance(measure, dict):
+                continue
+            inner = measure.get("qDef") or {}
+            measures.append({
+                "expression": (inner.get("qDef") or "") if isinstance(inner, dict) else "",
+                "label": (inner.get("qLabel") or "") if isinstance(inner, dict) else "",
+                "library_id": measure.get("qLibraryId")
+                              or (inner.get("qLibraryId") if isinstance(inner, dict) else None),
+            })
+
+        dimensions = []
+        for dimension in cube.get("qDimensions", []) or []:
+            if not isinstance(dimension, dict):
+                continue
+            inner = dimension.get("qDef") or {}
+            dimensions.append({
+                "fields": (inner.get("qFieldDefs") or []) if isinstance(inner, dict) else [],
+                "label": ((inner.get("qFieldLabels") or [""])[0]
+                          if isinstance(inner, dict) and inner.get("qFieldLabels") else ""),
+                "library_id": dimension.get("qLibraryId")
+                              or (inner.get("qLibraryId") if isinstance(inner, dict) else None),
+            })
+
+        return {"measures": measures, "dimensions": dimensions}
+
+    def _resolve_library_items(self, app_handle: int,
+                               expressions_by_index: Dict[int, Dict[str, Any]]) -> None:
+        """Fill in the expressions of master measures and dimensions.
+
+        A chart built from the library stores only `qLibraryId`, so without
+        this step exactly the charts a modeller took the trouble to
+        standardise are the ones reporting no fields.
+        """
+        wanted_measures, wanted_dimensions = [], []
+        for entry in expressions_by_index.values():
+            for measure in entry["measures"]:
+                if measure.get("library_id") and not measure.get("expression"):
+                    wanted_measures.append(measure["library_id"])
+            for dimension in entry["dimensions"]:
+                if dimension.get("library_id") and not dimension.get("fields"):
+                    wanted_dimensions.append(dimension["library_id"])
+
+        wanted_measures = list(dict.fromkeys(wanted_measures))
+        wanted_dimensions = list(dict.fromkeys(wanted_dimensions))
+        if not wanted_measures and not wanted_dimensions:
+            return
+
+        try:
+            handles = self.send_requests_pipelined(
+                [{"method": "GetMeasure", "params": {"qId": lib_id}, "handle": app_handle}
+                 for lib_id in wanted_measures]
+                + [{"method": "GetDimension", "params": {"qId": lib_id}, "handle": app_handle}
+                   for lib_id in wanted_dimensions],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.debug("Could not resolve master items: %s", exc)
+            return
+
+        resolved_handles = []
+        for outcome in handles:
+            if isinstance(outcome, Exception):
+                resolved_handles.append(None)
+                continue
+            resolved_handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
+
+        layout_indices = [i for i, h in enumerate(resolved_handles) if h is not None]
+        try:
+            layouts = self.send_requests_pipelined(
+                [{"method": "GetLayout", "params": [], "handle": resolved_handles[i]}
+                 for i in layout_indices],
+                raise_on_error=False,
+            ) if layout_indices else []
+        except Exception as exc:
+            logger.debug("Could not read master item layouts: %s", exc)
+            return
+
+        measure_expressions: Dict[str, str] = {}
+        dimension_fields: Dict[str, List[str]] = {}
+        for position, layout in zip(layout_indices, layouts):
+            if isinstance(layout, Exception):
+                continue
+            body = (layout or {}).get("qLayout") or {}
+            if position < len(wanted_measures):
+                lib_id = wanted_measures[position]
+                measure_expressions[lib_id] = ((body.get("qMeasure") or {}).get("qDef") or "")
+            else:
+                lib_id = wanted_dimensions[position - len(wanted_measures)]
+                dimension_fields[lib_id] = ((body.get("qDim") or {}).get("qFieldDefs") or [])
+
+        for entry in expressions_by_index.values():
+            for measure in entry["measures"]:
+                lib_id = measure.get("library_id")
+                if lib_id and not measure.get("expression"):
+                    measure["expression"] = measure_expressions.get(lib_id, "")
+            for dimension in entry["dimensions"]:
+                lib_id = dimension.get("library_id")
+                if lib_id and not dimension.get("fields"):
+                    dimension["fields"] = dimension_fields.get(lib_id, [])
 
     def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
         """Extract field names used in an object layout.
@@ -235,15 +455,30 @@ class EngineSheetsMixin:
 
         fields = set(re.findall(r"\[([^\]]+)\]", expression))
 
-        # Drop string literals first — 'Sales' inside a set expression is a
-        # value, not a field.
-        without_literals = re.sub(r"'[^']*'", " ", expression)
-        # And bracketed names, already collected above.
-        without_literals = re.sub(r"\[[^\]]*\]", " ", without_literals)
+        text = expression
+        # Dollar expansion is resolved by Qlik before evaluation; the name
+        # inside is a variable, not a field.
+        text = re.sub(r"\$\([^)]*\)", " ", text)
+        # Both quote styles are values inside a set modifier: single quotes
+        # are a literal, double quotes are a *search* —
+        # `Country={"New Zealand"}` matched "New" and "Zealand" as fields
+        # until this line existed.
+        text = re.sub(r"'[^']*'", " ", text)
+        text = re.sub(r'"[^"]*"', " ", text)
+        # Bracketed names, already collected above.
+        text = re.sub(r"\[[^\]]*\]", " ", text)
 
-        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_.]*)\s*(\()?", without_literals):
+        # Field names are routinely non-Latin — `Год` and `Месяц` are the
+        # dimensions of a chart on the stand this was measured against — so
+        # the identifier pattern has to be Unicode-aware rather than A-Za-z.
+        for match in re.finditer(r"(?<![\w.])(\w[\w.]*)\s*(\()?", text, re.UNICODE):
             name, is_call = match.group(1), match.group(2)
             if is_call or name.lower() in _EXPRESSION_KEYWORDS:
+                continue
+            # A name cannot start with a digit in an unbracketed reference,
+            # so anything that does is a literal — including the scientific
+            # notation `1e3`, which was being reported as a field.
+            if name[0].isdigit():
                 continue
             fields.add(name)
 

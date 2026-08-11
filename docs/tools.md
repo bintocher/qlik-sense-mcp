@@ -37,8 +37,8 @@ categories. The lists below are a quick map only.
 | `get_app_script` | Full load script (`SET`/`LET`, `LOAD ... FROM ...`). Read this to understand how calendar fields and named variables are built. |
 | `get_app_variables` | User variables split by source (script vs UI), with wildcard search and pagination. |
 | `get_app_sheets` | List of sheets in the app, with title and description. |
-| `get_app_sheet_objects` | List of objects on a specific sheet, with `object_id`, `object_type`, `object_description`. |
-| `get_app_object` | Full layout of one specific object via `GetObject` + `GetLayout`. Reverse-engineers an existing chart. |
+| `get_app_sheet_objects` | List of objects on a specific sheet, with `object_id`, `object_type`, `object_description`, `fields_used`, `measures` and `dimensions` — the expressions behind each object, with master items resolved to their library definitions and filter panes reporting the fields of their listboxes. |
+| `get_app_object` | Full layout of one object, plus `measures`, `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does not put them in the layout, where `qMeasureInfo` carries only the fallback title, formatting and statistics. Master items are resolved to their library definitions. |
 | `get_app_field` | Distinct values of one field with pagination and wildcard search, both applied by Engine over the whole field rather than over a prefetched prefix. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. Adds `field_comment` when the load script commented that field. |
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |
 | `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, non-null count, null count, total count, min, max, null %, completeness — the null share comes from `NullCount()`, not from subtracting one non-null count from another). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
@@ -107,6 +107,24 @@ On failure, tools return:
 so a failed call always tells you *which* query failed, not just that
 something timed out.
 
+### Warnings
+
+A successful `engine_create_hypercube` reply carries a `warnings` list.
+It is empty on a clean query and names the things Qlik answers instead
+of refusing:
+
+- a measure whose every value came back `0` or `'-'` — the signature of
+  a set-analysis filter matching no value, a misspelled field inside the
+  aggregation, or an expression Engine could not evaluate;
+- SQL written into a measure (`AS`, `SELECT`, `GROUP BY`, `FROM`,
+  `WHERE`), which returns a full table of `'-'`;
+- a name inside a measure that the data model does not have (found
+  lexically, so a variable or an unusual function may appear here —
+  it warns rather than blocks).
+
+Treat a warning as "check this before quoting the number", not as a
+failure: the rows are real, their meaning may not be.
+
 The categories you can see from `engine_create_hypercube`:
 
 - `invalid_sort` — `sort_by` matched no column, or `sort_order` was not
@@ -117,6 +135,11 @@ The categories you can see from `engine_create_hypercube`:
   reduce `limit`. The hint contains an exact suggested value.
 - `socket_timeout` — Engine is genuinely computing something slow. Add
   more set-analysis filters, reduce `max_rows`, or switch to top-N.
+- `field_not_found` — a dimension names a field the data model does
+  not have. Qlik would not refuse it: an unknown name is evaluated as
+  an expression, the cube collapses to one row carrying the grand
+  total, and that reads as a real answer. The reply lists
+  `unknown_fields` and `did_you_mean`.
 - `engine_api_error` — invalid expression / unknown field. The full
   Engine error is in `error`.
 - `connection_error` — WebSocket connection problem.

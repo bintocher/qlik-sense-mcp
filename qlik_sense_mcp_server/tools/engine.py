@@ -820,15 +820,19 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 
     Returns:
         JSON with `objects` array where each element has `object_id`,
-        `object_type` (e.g. `"barchart"`, `"table"`, `"kpi"`, `"listbox"`)
-        and `object_description` (title). Use `object_id` in `get_app_object`.
-    
+        `object_type` (e.g. `"barchart"`, `"table"`, `"kpi"`, `"listbox"`),
+        `object_description` (title) and `fields_used` — the fields the
+        object's dimensions and measures refer to, which answers "what does
+        this sheet work with" without opening every object. Use `object_id`
+        in `get_app_object` for the full layout.
+
     Example:
         Call: {"app_id": "a1b2...", "sheet_id": "b2c3d4e5-1111-..."}
         Returns: {"tool_call_seconds": 1.1, "total_objects": 2,
                   "objects": [{"object_id": "AbCdEf",
                                "object_type": "barchart",
-                               "object_description": "Sales by Region"}]}
+                               "object_description": "Sales by Region",
+                               "fields_used": ["Region", "Sales"]}]}
 
     Qlik session limit: this server keeps ONE Engine session for all
     calls. Qlik allows max 5 concurrent sessions per user and may LOCK
@@ -843,7 +847,17 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         objects = context.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
         formatted = [
-            {"object_id": o.get("object_id", ""), "object_type": o.get("object_type", ""), "object_description": o.get("object_title", "")}
+            {"object_id": o.get("object_id", ""),
+             "object_type": o.get("object_type", ""),
+             "object_description": o.get("object_title", ""),
+             # Already computed while reading each object's layout and
+             # properties. Dropping any of it meant answering "which fields
+             # does this sheet work with" took one get_app_object call per
+             # object — and the expressions were not reachable at all, since
+             # the layout get_app_object returns does not contain them.
+             "fields_used": o.get("fields_used", []),
+             "measures": o.get("measures", []),
+             "dimensions": o.get("dimensions", [])}
             for o in objects if isinstance(o, dict)
         ]
         return _ok({"app_id": app_id, "sheet_id": sheet_id, "total_objects": len(formatted), "objects": formatted})
@@ -872,10 +886,15 @@ def get_app_object(app_id: str, object_id: str) -> str:
         object_id: Object ID from `get_app_sheet_objects`. Required.
 
     Returns:
-        JSON with full `qLayout` of the object. Key fields depend on the
-        object type — look for `qHyperCube.qDimensionInfo`, `qMeasureInfo`,
-        `qDataPages[0].qMatrix` for charts/tables.
-    
+        JSON with the full `qLayout` of the object, plus `measures`,
+        `dimensions` and `fields_used`. Read the expressions from
+        `measures` — Engine does NOT put them in the layout, where
+        `qMeasureInfo` carries only the fallback title, formatting and
+        statistics. Master measures and dimensions are resolved to their
+        library definitions. In the layout itself, look for
+        `qHyperCube.qDimensionInfo` and `qDataPages[0].qMatrix` for the
+        computed data.
+
     Example:
         Call: {"app_id": "a1b2...", "object_id": "AbCdEf"}
         Returns: {"tool_call_seconds": 1.4,
@@ -916,6 +935,30 @@ def get_app_object(app_id: str, object_id: str) -> str:
         if "qLayout" not in layout_result:
             return _err("Failed to get object layout",
                         error_category="engine_api_error")
+        # The layout does not contain the measure expressions — Engine puts
+        # qFallbackTitle, formatting and statistics in qMeasureInfo and
+        # nothing else. Since reverse-engineering a chart is what this tool
+        # is for, fetch the properties too and resolve any master items.
+        try:
+            properties = context.engine_api.send_request(
+                "GetProperties", [], handle=obj_handle)
+            expressions = context.engine_api._object_expressions(properties)
+            by_index = {0: expressions}
+            context.engine_api._resolve_library_items(app_handle, by_index)
+            layout_result["measures"] = expressions["measures"]
+            layout_result["dimensions"] = expressions["dimensions"]
+            layout_result["fields_used"] = sorted(
+                set(context.engine_api._extract_fields_from_object(layout_result["qLayout"]))
+                | {f for m in expressions["measures"]
+                   for f in context.engine_api._extract_fields_from_expression(
+                       m.get("expression", ""))}
+                | {f for d in expressions["dimensions"] for f in d.get("fields", [])}
+            )
+        except Exception as prop_error:
+            # The layout is still worth returning; say what is missing
+            # rather than pretending the object has no measures.
+            logger.warning("GetProperties failed for %s: %s", object_id, prop_error)
+            layout_result["properties_error"] = str(prop_error)
         return _ok(layout_result)
     except Exception as ex:
         return _err(str(ex), app_id=app_id, object_id=object_id)
