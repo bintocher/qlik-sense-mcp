@@ -94,12 +94,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   was run over each of them against a live Qlik. An `http://` URL is
   logged as a warning, because the JWT and the session cookie then
   travel in clear text.
-
-  (The note in the released 1.8.1 text about a stand whose TLS had
-  failed was wrong: the handshake failed for `curl` and PowerShell,
-  which both use Windows schannel, while `httpx`, .NET `SslStream` and
-  the browser completed it against the same port. The server was fine;
-  the diagnosis was not. The change itself stands on its own.)
 - **TLS verification is off by default.** `QLIK_VERIFY_SSL` now defaults
   to `false` and must be set to `true` to turn verification on. Qlik
   Sense Enterprise serves its own self-signed certificate, so a correct
