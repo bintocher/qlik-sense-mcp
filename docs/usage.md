@@ -108,13 +108,22 @@ is not linked to those facts in the data model.
 
 ## One session at a time
 
-Qlik Sense allows at most **5 concurrent sessions per user identity**,
-and exceeding that can get the account **locked** — a platform limit no
-MCP setting can raise. This server funnels every tool call through a
-single cached Engine session, so an entire analysis costs one session.
-Keep it that way: never fan out tool calls in parallel (they are
-serialised over one WebSocket anyway), and do not run a second MCP
-process or a second editor against the same credentials.
+Qlik Sense allows at most **5 concurrent sessions per user identity** —
+a platform limit no MCP setting can raise. What counts against it is the
+*session*, not the query: measured on 31.62, the JWT bootstrap creates
+one on its own before any WebSocket exists, while sockets sharing that
+one bootstrapped cookie are free (sixteen at once, seven of them holding
+seven different apps open, still one session).
+
+So the cost is in how often a session is started, not in how much you
+ask. Keep one server process running and reuse it; restarting it in a
+loop is what exhausts the quota. Do not run a second MCP process or a
+second editor against the same credentials, and do not fan out tool
+calls — they are serialised over one WebSocket anyway.
+
+Sessions also outlive their socket: after they are dropped through the
+Proxy API the Engine can still refuse a new one for a few minutes, so
+when you hit the limit, wait rather than retry.
 
 ## Hard limits enforced by this server
 
