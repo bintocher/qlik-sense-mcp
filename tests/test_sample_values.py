@@ -140,3 +140,61 @@ class TestAttachToFields:
         fields = self._fields()
         repository._attach_sample_values(1, fields)
         assert all("values" not in f for f in fields)
+
+
+class TestFieldEdges:
+    """A field too wide to list still has to show its shape.
+
+    `client_id` has 200 000 values: listing them is useless, omitting them
+    leaves the caller guessing what a value looks like. The two ends answer
+    both questions actually asked — what is the format, what is the range.
+    """
+
+    class _Edges(QlikEngineAPI):
+        def __init__(self, values):
+            self.values = values
+            self.sorts = []
+
+        def send_requests_pipelined(self, requests, raise_on_error=True):
+            method = requests[0]["method"]
+            if method == "CreateSessionObject":
+                out = []
+                for i, req in enumerate(requests):
+                    definition = req["params"][0]["qListObjectDef"]
+                    sort = definition["qDef"]["qSortCriterias"][0]
+                    self.sorts.append(sort["qSortByNumeric"])
+                    out.append({"qReturn": {"qHandle": 100 + i}})
+                return out
+            if method == "GetLayout":
+                out = []
+                for i, direction in enumerate(self.sorts):
+                    values = (self.values if direction == 1
+                              else list(reversed(self.values)))
+                    rows = [[{"qText": v}] for v in values[:5]]
+                    out.append({"qLayout": {"qListObject": {
+                        "qDataPages": [{"qMatrix": rows}]}}})
+                return out
+            return [{} for _ in requests]
+
+    def test_both_ends_are_returned(self):
+        engine = self._Edges(["1", "2", "3", "4", "5", "6"])
+        edges = engine.get_field_edges_batch(1, ["fact_id"])
+        assert edges["fact_id"]["lowest"][0] == "1"
+        assert edges["fact_id"]["highest"][0] == "6"
+
+    def test_each_field_asks_for_both_directions(self):
+        engine = self._Edges(["a", "b"])
+        engine.get_field_edges_batch(1, ["one", "two"])
+        assert engine.sorts == [1, -1, 1, -1]
+
+    def test_nothing_wanted_costs_no_calls(self):
+        engine = self._Edges([])
+        assert engine.get_field_edges_batch(1, []) == {}
+
+    def test_a_wide_field_gets_edges_not_a_list(self, monkeypatch):
+        engine = self._Edges(["C000000", "C000001", "C199999"])
+        monkeypatch.setattr(repository.context, "engine_api", engine)
+        fields = [{"name": "client_id", "distinct_values": 200_000, "tags": []}]
+        repository._attach_sample_values(1, fields)
+        assert "values" not in fields[0]
+        assert fields[0]["lowest_values"][0] == "C000000"

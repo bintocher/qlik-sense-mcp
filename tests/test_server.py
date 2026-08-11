@@ -56,8 +56,8 @@ class TestFastMCPRegistration:
         assert hasattr(srv.mcp, "_tool_manager")
 
     def test_tools_count(self):
-        # Exactly 26 MCP tools in certificate mode; update when one is added.
-        assert len(srv.mcp._tool_manager._tools) == 26
+        # Exactly 27 MCP tools in certificate mode; update when one is added.
+        assert len(srv.mcp._tool_manager._tools) == 27
 
     def test_core_tools_registered(self):
         tool_names = set(srv.mcp._tool_manager._tools.keys())

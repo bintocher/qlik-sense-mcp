@@ -72,6 +72,96 @@ class EngineFieldsMixin:
         except Exception as e:
             return {"error": str(e), "details": "Error in get_fields method"}
 
+    SCHEMA_CACHE_TTL_SECONDS = 600.0
+
+    def _schema_store(self) -> Dict[str, Dict[str, Any]]:
+        """Per-instance cache, created on first use.
+
+        Deliberately not a class attribute: instances built without
+        __init__ (test doubles, subclasses) would then share one dict and
+        answer each other's questions.
+        """
+        store = self.__dict__.get("_schema_cache")
+        if store is None:
+            store = {}
+            self.__dict__["_schema_cache"] = store
+        return store
+
+    def cached_fields(self, app_handle: int, app_id: str,
+                      reload_stamp: Any = None) -> Dict[str, Any]:
+        """`get_fields`, remembered per app.
+
+        Reading the data model costs a `GetTablesAndKeys` round-trip and
+        the answer only changes when the app reloads — but every field
+        check, every suggestion and every `get_app_details` was paying for
+        it again. The entry is dropped when the reload timestamp moves, and
+        expires anyway after ten minutes so a stale entry cannot outlive a
+        reload the caller never mentioned.
+        """
+        import time as _time
+        store = self._schema_store()
+        entry = store.get(app_id)
+        fresh = (
+            entry is not None
+            and entry.get("reload_stamp") == reload_stamp
+            and (_time.monotonic() - entry["read_at"]) < self.SCHEMA_CACHE_TTL_SECONDS
+        )
+        if fresh:
+            entry["hits"] = entry.get("hits", 0) + 1
+            return entry["model"]
+
+        model = self.get_fields(app_handle)
+        if isinstance(model, dict) and model.get("fields"):
+            store[app_id] = {
+                "model": model, "reload_stamp": reload_stamp,
+                "read_at": _time.monotonic(), "hits": 0,
+            }
+        return model
+
+    def forget_schema(self, app_id: str = None) -> None:
+        """Drop one app's cached model, or all of them."""
+        store = self._schema_store()
+        if app_id is None:
+            store.clear()
+        else:
+            store.pop(app_id, None)
+
+    def search_app(self, app_handle: int, term: str, fields: List[str] = None,
+                   max_fields: int = 8, max_values: int = 5) -> Dict[str, Any]:
+        """Find a term among the app's values, without knowing the field.
+
+        Engine's own `SearchResults` does this. Measured on a 10M-row app:
+        across every field it takes about 30 seconds, against a named list
+        of fields it is instant — so the caller can narrow it when it knows
+        roughly where to look, and pay the full scan when it does not.
+        """
+        search_fields = fields or []
+        result = self.send_request(
+            "SearchResults",
+            [
+                {"qSearchFields": search_fields, "qContext": "CurrentSelections"},
+                [term],
+                {"qOffset": 0, "qCount": max_fields,
+                 "qMaxNbrFieldMatches": max_values},
+            ],
+            handle=app_handle,
+            timeout=self.ws_operation_timeout,
+        )
+        groups = ((result.get("qResult") or {}).get("qSearchGroupArray") or [])
+        matches = []
+        for group in groups:
+            for item in group.get("qItems", []) or []:
+                values = [m.get("qText", "") for m in item.get("qItemMatches", []) or []]
+                if values:
+                    matches.append({
+                        "field": item.get("qIdentifier", ""),
+                        "values": values,
+                        "total_matches_in_field": item.get("qItemMatches") and
+                                                  item.get("qTotalNumberOfMatches",
+                                                           len(values)),
+                    })
+        return {"term": term, "matches": matches, "fields_matched": len(matches)}
+
     def get_field_description(self, app_handle: int, field_name: str) -> Dict[str, Any]:
         """Describe one field via `GetFieldDescription`.
 
@@ -374,6 +464,99 @@ class EngineFieldsMixin:
             logger.warning("Could not destroy sample list objects: %s", exc)
 
         return values
+
+    def get_field_edges_batch(
+        self, app_handle: int, field_names: List[str], count: int = 5
+    ) -> Dict[str, Dict[str, List[str]]]:
+        """The lowest and highest values of each field, in one pass.
+
+        For a field with thousands of distinct values, listing them is
+        useless and omitting them leaves the caller guessing the shape of
+        the data. The two ends answer what actually gets asked: what does
+        a value look like, and what range is it in. Sorted by Qlik, so
+        text sorts as text and numbers as numbers.
+        """
+        if not field_names:
+            return {}
+
+        specs = []  # (field, end, object_id, definition)
+        for name in field_names:
+            for end, direction in (("lowest", 1), ("highest", -1)):
+                object_id = f"edge-{uuid.uuid4().hex[:12]}"
+                specs.append((name, end, object_id, {
+                    "qInfo": {"qId": object_id, "qType": "ListObject"},
+                    "qListObjectDef": {
+                        "qDef": {
+                            "qFieldDefs": [name],
+                            "qSortCriterias": [{
+                                "qSortByNumeric": direction,
+                                "qSortByAscii": direction,
+                                "qSortByLoadOrder": 0,
+                                "qSortByFrequency": 0,
+                                "qSortByState": 0,
+                                "qSortByExpression": 0,
+                                "qExpression": {"qv": ""},
+                            }],
+                        },
+                        "qInitialDataFetch": [
+                            {"qTop": 0, "qLeft": 0, "qHeight": count, "qWidth": 1}],
+                    },
+                }))
+
+        try:
+            created = self.send_requests_pipelined(
+                [{"method": "CreateSessionObject", "params": [definition],
+                  "handle": app_handle} for _n, _e, _oid, definition in specs],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.debug("Could not read field edges: %s", exc)
+            return {}
+
+        handles = []
+        for outcome in created:
+            if isinstance(outcome, Exception):
+                handles.append(None)
+                continue
+            handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
+
+        live = [i for i, handle in enumerate(handles) if handle is not None]
+        try:
+            layouts = self.send_requests_pipelined(
+                [{"method": "GetLayout", "params": [], "handle": handles[i]}
+                 for i in live],
+                raise_on_error=False,
+            ) if live else []
+        except Exception as exc:
+            logger.debug("Could not read field-edge layouts: %s", exc)
+            return {}
+
+        edges: Dict[str, Dict[str, List[str]]] = {}
+        for index, layout in zip(live, layouts):
+            if isinstance(layout, Exception):
+                continue
+            name, end, _oid, _definition = specs[index]
+            list_object = ((layout or {}).get("qLayout") or {}).get("qListObject") or {}
+            values = [
+                cell.get("qText", "")
+                for page in list_object.get("qDataPages", []) or []
+                for row in page.get("qMatrix", []) or []
+                for cell in row
+                if cell.get("qText", "") != ""
+            ]
+            if values:
+                edges.setdefault(name, {})[end] = values
+
+        try:
+            self.send_requests_pipelined(
+                [{"method": "DestroySessionObject", "params": [specs[i][2]],
+                  "handle": app_handle} for i in live],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.warning("Could not destroy edge list objects: %s", exc)
+
+        return edges
 
     def _get_field_values_via_hypercube(
         self, app_handle: int, field_name: str, max_values: int = 100

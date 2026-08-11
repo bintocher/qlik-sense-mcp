@@ -243,6 +243,7 @@ def engine_create_hypercube(
     exclude_null_dimensions: bool = True,
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
+    offset: int = 0,
 ) -> str:
     """
     Run a grouped aggregation against a Qlik app and return the rows.
@@ -448,6 +449,11 @@ def engine_create_hypercube(
             ARBITRARY rows, not the most important ones.
         sort_order: `"desc"` (default, largest first — top-N) or `"asc"`
             (smallest first — bottom-N).
+        offset: Row to start from, for reading a result in pages. The reply
+            carries `has_more` and `next_offset`; pass that value back to
+            get the following page. Keep `sort_by` identical between pages,
+            otherwise the order — and therefore the paging — changes under
+            you.
         suppress_zero: Drop rows whose measure is 0. Default False.
             Useful for `sort_order="asc"`, where zero-valued groups
             would otherwise fill the entire result.
@@ -516,6 +522,7 @@ def engine_create_hypercube(
             suppress_zero=suppress_zero,
             include_raw_layout=include_raw_layout,
             exclude_null_dimensions=exclude_null_dimensions,
+            offset=offset,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the
@@ -986,3 +993,62 @@ def get_app_object(app_id: str, object_id: str) -> str:
         return _err(str(ex), app_id=app_id, object_id=object_id)
 
 
+
+
+@mcp.tool()
+@_timed
+@_engine_serialised
+def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
+               max_fields: int = 8, max_values: int = 5) -> str:
+    """
+    Find where a value lives in an app: which field contains it, and how it
+    is actually spelled there.
+
+    Use this BEFORE writing a set-analysis filter on a value you have not
+    seen in the data. Qlik does not refuse a filter on a value that does not
+    exist — it returns zeros — so "Moscow" against a field holding "Moskva"
+    produces a clean, wrong answer. One call here settles it.
+
+    Also use it when the user names something ("the Northwest district",
+    "customer C0001") and you do not know which field holds it.
+
+    Args:
+        app_id: Application GUID. Required.
+        term: What to look for. Matched as a prefix by Qlik's own search, so
+            "Mos" finds "Moskva". Case-insensitive.
+        fields: Optional list of field names to search. Omit to search the
+            whole app. On a 10M-row app the whole-app search takes ~30s
+            against about a second for a named field, so pass the field names
+            when you have a good guess.
+        max_fields: How many matching fields to report. Default 8.
+        max_values: How many matching values per field. Default 5.
+
+    Returns:
+        JSON with `matches`: for each field that contains the term, the
+        field name and the matching values exactly as Qlik stores them.
+        An empty `matches` means the value is not in the app — which is an
+        answer, not a failure.
+
+    Example:
+        Call: {"app_id": "a1b2...", "term": "Mos"}
+        Returns: {"tool_call_seconds": 1.4, "term": "Mos", "fields_matched": 1,
+                  "matches": [{"field": "region_name", "values": ["Moskva"]}]}
+    """
+    e = _check()
+    if e:
+        return e
+    try:
+        app_handle = context.engine_api.ensure_app(app_id, no_data=False)
+        result = context.engine_api.search_app(
+            app_handle, term, fields=fields,
+            max_fields=max_fields, max_values=max_values)
+        if not result.get("matches"):
+            result["hint"] = (
+                f"Nothing in this app matches {term!r}. Check the spelling "
+                f"against `values` / `lowest_values` in get_app_details, or "
+                f"search for a shorter prefix."
+            )
+        return _ok(result)
+    except Exception as ex:
+        return _err(str(ex), app_id=app_id, term=term,
+                    error_category="engine_api_error")

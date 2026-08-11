@@ -1,6 +1,6 @@
 # Tools
 
-The server exposes up to **26** MCP tools, grouped into three areas:
+The server exposes up to **27** MCP tools, grouped into three areas:
 
 - **Repository API** — fast metadata via Qlik Repository (HTTP/QRS).
 - **Engine API** — data and load script via Qlik Engine (WebSocket).
@@ -13,8 +13,8 @@ certificate mode only:
 
 | Mode | Tools registered |
 |------|------------------|
-| certificate | 26 — everything below |
-| JWT (virtual proxy) | 12 — Repository metadata + Engine only |
+| certificate | 27 — everything below |
+| JWT (virtual proxy) | 13 — Repository metadata + Engine only |
 
 Every tool returns its full parameter documentation via the standard MCP
 `tools/list` request. Use that as the authoritative reference — the
@@ -38,6 +38,7 @@ categories. The lists below are a quick map only.
 | `get_app_variables` | User variables split by source (script vs UI), with wildcard search and pagination. |
 | `get_app_sheets` | List of sheets in the app, with title and description. |
 | `get_app_sheet_objects` | List of objects on a specific sheet, with `object_id`, `object_type`, `object_description`, `fields_used`, `measures` and `dimensions` — the expressions behind each object, with master items resolved to their library definitions and filter panes reporting the fields of their listboxes. |
+| `search_app` | Find which field holds a value, and how it is spelled there. Use before writing a set-analysis filter on a value you have not seen: Qlik answers a filter on a missing value with zeros, not an error. Omit `fields` to search the whole app (~30s on 10M rows) or name them for an instant answer. |
 | `get_app_object` | Full layout of one object, plus `measures`, `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does not put them in the layout, where `qMeasureInfo` carries only the fallback title, formatting and statistics. Master items are resolved to their library definitions. |
 | `get_app_field` | Distinct values of one field with pagination and wildcard search, both applied by Engine over the whole field rather than over a prefetched prefix. Falls back to a single-dimension hypercube if the underlying `ListObject` returns nothing. Adds `field_comment` when the load script commented that field. |
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |

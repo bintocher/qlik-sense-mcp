@@ -28,6 +28,23 @@ SAMPLE_VALUES_MAX_CARDINALITY = 25
 # How many fields to sample in one reply. Sampling is one pipelined batch,
 # but the values still cost context.
 SAMPLE_VALUES_MAX_FIELDS = 20
+# For fields too wide to list, show the ends instead: five smallest and
+# five largest values, sorted by Qlik so text sorts as text.
+EDGE_VALUES_COUNT = 5
+EDGE_VALUES_MAX_FIELDS = 12
+
+# The finished `get_app_details` payload per app, keyed by the app's last
+# reload. Everything in it — tables, fields, sample values, edges — changes
+# only when the app reloads.
+_DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def forget_app_details(app_id: str = None) -> None:
+    """Drop the cached model for one app, or for all of them."""
+    if app_id is None:
+        _DETAILS_CACHE.clear()
+    else:
+        _DETAILS_CACHE.pop(app_id, None)
 
 
 def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None:
@@ -52,20 +69,19 @@ def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None
         and any(tag in ("$date", "$timestamp") for tag in (f.get("tags") or []))
     ]
     wanted = (candidates + date_fields)[:SAMPLE_VALUES_MAX_FIELDS]
-    if not wanted:
-        return
-
-    try:
-        results = context.engine_api.get_field_values_batch(
-            app_handle,
-            [(f["name"], SAMPLE_VALUES_MAX_CARDINALITY if f in candidates else 3)
-             for f in wanted],
-        )
-    except Exception as exc:
-        # An aid, not the answer: if it cannot be produced, the reply is
-        # still correct without it.
-        logger.debug("Could not sample field values: %s", exc)
-        return
+    results = {}
+    if wanted:
+        try:
+            results = context.engine_api.get_field_values_batch(
+                app_handle,
+                [(f["name"], SAMPLE_VALUES_MAX_CARDINALITY if f in candidates else 3)
+                 for f in wanted],
+            )
+        except Exception as exc:
+            # An aid, not the answer: if it cannot be produced, the reply is
+            # still correct without it.
+            logger.debug("Could not sample field values: %s", exc)
+            results = {}
 
     for field in wanted:
         values = results.get(field["name"])
@@ -75,6 +91,32 @@ def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None
             field["values"] = values
         else:
             field["sample"] = values[:3]
+
+    # Fields with too many values to list still need to show their shape.
+    # The two ends answer the questions that actually get asked — what does
+    # a value look like, and what range is it in — where a bare count of
+    # distinct values answers neither.
+    wide = [
+        f for f in fields
+        if (f.get("distinct_values") or 0) > SAMPLE_VALUES_MAX_CARDINALITY
+        and not f.get("sample")
+    ][:EDGE_VALUES_MAX_FIELDS]
+    if not wide:
+        return
+    try:
+        edges = context.engine_api.get_field_edges_batch(
+            app_handle, [f["name"] for f in wide], count=EDGE_VALUES_COUNT)
+    except Exception as exc:
+        logger.debug("Could not read field edges: %s", exc)
+        return
+    for field in wide:
+        ends = edges.get(field["name"])
+        if not ends:
+            continue
+        if ends.get("lowest"):
+            field["lowest_values"] = ends["lowest"]
+        if ends.get("highest"):
+            field["highest_values"] = ends["highest"]
 
 
 @mcp.tool()
@@ -274,10 +316,30 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         return _ok(resolved)
     aid = resolved["app_id"]
 
-    # Get tables and fields via Engine API (WebSocket)
+    reload_stamp = resolved.get("reload_dttm", "")
+    cached = _DETAILS_CACHE.get(aid)
+    if cached and cached["reload_stamp"] == reload_stamp:
+        # Everything below — the model read, the sample values, the edges —
+        # depends only on the app and its last reload. Answer from the
+        # cache and say so, rather than paying for it on every question
+        # about the same app.
+        reply = dict(cached["result"])
+        reply["from_cache"] = True
+        return _ok(reply)
+
+    # Get tables and fields via Engine API (WebSocket). The model is cached
+    # per app and dropped when the app reloads — `reload_dttm` is exactly
+    # the stamp that moves when it does.
     try:
         app_handle = context.engine_api.ensure_app(aid, no_data=False)
-        fields_data = context.engine_api.get_fields(app_handle)
+        # The cache is an optimisation, not part of the client contract:
+        # anything that can read the model is enough.
+        read_model = getattr(context.engine_api, "cached_fields", None)
+        if read_model is not None:
+            fields_data = read_model(
+                app_handle, aid, (resolved.get("metainfo") or {}).get("reload_dttm"))
+        else:
+            fields_data = context.engine_api.get_fields(app_handle)
     except Exception as ex:
         fields_data = {"error": str(ex)}
 
@@ -402,6 +464,10 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     }
     if isinstance(fields_data, dict) and "error" in fields_data:
         result["engine_error"] = fields_data["error"]
+    else:
+        # Only cache a complete answer. A reply that lost its data model to
+        # a refused session must not become the cached truth.
+        _DETAILS_CACHE[aid] = {"reload_stamp": reload_stamp, "result": result}
     return _ok(result)
 
 

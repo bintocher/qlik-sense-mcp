@@ -72,7 +72,16 @@ class EngineHypercubeMixin:
         happy path has no reason to pay for.
         """
         try:
-            model = self.get_fields(app_handle)
+            # Served from the per-app cache when it is warm: this runs on
+            # the error path, where a second model read would add latency
+            # to a reply the caller is already unhappy about.
+            read_model = getattr(self, "cached_fields", None)
+            # getattr: instances that skip __init__ have no cached app id,
+            # and an AttributeError here would silently cost the caller its
+            # "did you mean" suggestions.
+            app_id = getattr(self, "_cached_app_id", "") or ""
+            model = (read_model(app_handle, app_id, None)
+                     if read_model else self.get_fields(app_handle))
         except Exception as exc:
             logger.debug("Could not list fields for a suggestion: %s", exc)
             return []
@@ -507,7 +516,8 @@ class EngineHypercubeMixin:
 
     def _read_remaining_pages(self, cube_handle: int, n_cols: int,
                               rows_so_far: int, wanted_rows: int,
-                              timings: Dict[str, Any]) -> "tuple[List[Dict[str, Any]], int]":
+                              timings: Dict[str, Any],
+                              start_at: int = 0) -> "tuple[List[Dict[str, Any]], int]":
         """Fetch the rows GetLayout did not include, page by page.
 
         Stops on an empty page: an Engine that keeps answering with nothing
@@ -525,7 +535,7 @@ class EngineHypercubeMixin:
             try:
                 reply = self.send_request(
                     "GetHyperCubeData",
-                    ["/qHyperCubeDef", [{"qTop": rows_so_far, "qLeft": 0,
+                    ["/qHyperCubeDef", [{"qTop": start_at + rows_so_far, "qLeft": 0,
                                          "qHeight": height, "qWidth": n_cols}]],
                     handle=cube_handle,
                     timeout=self.ws_operation_timeout,
@@ -575,6 +585,7 @@ class EngineHypercubeMixin:
         suppress_zero: bool = False,
         include_raw_layout: bool = False,
         exclude_null_dimensions: bool = True,
+        offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
@@ -671,6 +682,7 @@ class EngineHypercubeMixin:
             # multiple well-scoped queries, not one giant one.
             HARD_MAX_ROWS = self.HARD_MAX_ROWS
             HARD_MAX_CELLS = self.HARD_MAX_CELLS
+            page_offset = max(0, int(offset or 0))
             n_cols = len(converted_dimensions) + len(converted_measures)
             n_dims = len(converted_dimensions)
             column_names = self._column_names(converted_dimensions, converted_measures)
@@ -884,7 +896,10 @@ class EngineHypercubeMixin:
                 ],
                 "qInitialDataFetch": [
                     {
-                        "qTop": 0,
+                        # Paging starts where the caller asked. Without this
+                        # every page was the first page, so a result wider
+                        # than the row cap had no second page at all.
+                        "qTop": page_offset,
                         "qLeft": 0,
                         "qHeight": first_page_height,
                         "qWidth": n_cols,
@@ -991,10 +1006,11 @@ class EngineHypercubeMixin:
             # assembled, otherwise a request for 4000 rows quietly returns
             # fewer and the caller has no way to tell a short page from a
             # short result.
-            wanted_rows = min(max_rows, total_rows_on_server)
+            wanted_rows = min(max_rows, max(0, total_rows_on_server - page_offset))
             if rows_fetched < wanted_rows:
                 extra_pages, rows_fetched = self._read_remaining_pages(
-                    cube_handle, n_cols, rows_fetched, wanted_rows, timings)
+                    cube_handle, n_cols, rows_fetched, wanted_rows, timings,
+                    start_at=page_offset)
                 initial_pages = initial_pages + extra_pages
 
             # Warn the caller if the server has MORE data than we returned.
@@ -1094,6 +1110,14 @@ class EngineHypercubeMixin:
                 "hard_max_rows": HARD_MAX_ROWS,
                 "truncation_warning": truncation_warning,
                 "warnings": warnings,
+                "offset": page_offset,
+                # There IS a next page and here is how to ask for it. A
+                # refusal used to be the only answer to "more than the cap",
+                # which left the caller reformulating a query that was fine.
+                "has_more": (page_offset + rows_fetched) < total_rows_on_server,
+                "next_offset": (page_offset + rows_fetched
+                                if (page_offset + rows_fetched) < total_rows_on_server
+                                else None),
                 "timings": timings,
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
