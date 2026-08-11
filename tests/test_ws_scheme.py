@@ -3,9 +3,9 @@
 `QLIK_SERVER_URL=http://host/jwt` has to connect with `ws://`. The client
 used to hard-code `wss://` on the grounds that TLS is mandatory, which is
 not a decision it gets to make: Qlik serves the virtual proxies on 80 and
-443 both, and when the proxy's TLS is broken — a state this very server hit
-on a live stand, where 443 stopped completing handshakes while 80 answered
-`204` — plain HTTP is the only thing that works.
+443 both, and which one an operator points this server at is their call —
+a lab node, a deployment that terminates TLS in front of Qlik, or a client
+whose TLS stack cannot talk to that particular proxy.
 """
 
 from unittest.mock import MagicMock, patch

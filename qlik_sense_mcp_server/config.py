@@ -189,11 +189,10 @@ class QlikSenseConfig(BaseModel):
             )
 
         if parsed_server.scheme == "http":
-            # Not refused: Qlik does serve the hub and the virtual proxies on
-            # plain HTTP, and on a deployment whose proxy certificate is
-            # broken it is the only thing that answers. But the JWT and the
-            # session cookie then travel in clear text, which the operator
-            # should be choosing deliberately rather than by a typo.
+            # Not refused: Qlik serves the hub and the virtual proxies on
+            # plain HTTP as well, and choosing that is the operator's call.
+            # But the JWT and the session cookie then travel in clear text,
+            # which should be a deliberate choice rather than a typo.
             logger.warning(
                 "QLIK_SERVER_URL uses http:// — the JWT and the Qlik session "
                 "cookie will be sent unencrypted. Use https:// unless this is "

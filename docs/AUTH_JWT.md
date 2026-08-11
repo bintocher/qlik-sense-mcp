@@ -149,8 +149,8 @@ Two variables — that is the whole configuration.
   The scheme decides the transport for everything, WebSocket included:
   `https://host/jwt` connects with `wss://`, `http://host/jwt` with `ws://`.
   Prefer `https`. `http` is there because Qlik does serve the proxies on
-  port 80, and on a node whose proxy TLS is broken it is the only thing that
-  answers — but the token and the session cookie then travel in clear text,
+  port 80, and some clients cannot complete TLS against a given proxy even
+  when other clients can — but the token and the session cookie then travel in clear text,
   so treat it as a stopgap on a trusted network and expect a warning in the
   log saying so.
 - **`QLIK_JWT_TOKEN`** — the token string the admin gave you. Treat it like
