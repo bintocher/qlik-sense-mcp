@@ -98,20 +98,18 @@ line did. On a typical analysis session that issues 20 tool calls
 against the same app, the savings are significant: one WebSocket
 handshake plus one `OpenDoc` instead of twenty of each.
 
-#### Liveness without ping (since 1.7.3)
+#### Liveness without ping (since 1.8.0)
 
 Before reusing the cached socket, the client has to decide whether it is
 still alive. It must not do that with a WebSocket ping.
 
 Qlik's Proxy Service does not relay ping/pong to the Engine. Through a
 virtual proxy — that is, in every JWT deployment — the first request after
-a ping is never answered: the call blocks for the whole `QLIK_WS_TIMEOUT`,
-the socket is then force-closed, and the next call reconnects. Every forced
-reconnect costs an Engine session, Qlik allows 5 per user, and a session
-outlives the socket that created it, so a few minutes of ordinary use ends
-with `OnMaxParallelSessionsExceeded` and every tool failing. On a direct
-Engine socket (port 4747, certificate mode) the same ping is harmless,
-which is why the problem only ever appeared in JWT mode.
+a ping is never answered: the call blocks for the whole `QLIK_WS_TIMEOUT`
+(180s by default), the socket is then force-closed, and the next call
+reconnects — so in JWT mode every second tool call hung for minutes. On a
+direct Engine socket (port 4747, certificate mode) the same ping is
+harmless, which is why the problem only ever appeared in JWT mode.
 
 `_is_connected()` therefore:
 

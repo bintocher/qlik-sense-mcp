@@ -26,7 +26,7 @@ uvx qlik-sense-mcp-server
 To pin a specific version:
 
 ```bash
-uvx qlik-sense-mcp-server@1.7.1
+uvx qlik-sense-mcp-server@1.8.0
 ```
 
 Do not pin below 1.6.1: earlier releases declare `mcp>=1.1.0` with no

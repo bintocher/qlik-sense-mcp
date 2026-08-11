@@ -46,7 +46,7 @@ without them the e2e tests skip. `tests/test_e2e_large_app.py`
 additionally wants an app with 10M+ rows, because guard rails, ranking
 and paging only misbehave at a size a small app never reaches.
 
-This split is not a preference. Every defect fixed in the 1.7.3 line —
+This split is not a preference. Every defect fixed in the 1.8.0 line —
 a ping that wedged the socket through a proxy, a reused session-object
 id returning a stale calculation, paging that walked off the end of the
 data, a schedule QRS rejected outright — passed the offline tests and

@@ -1,6 +1,6 @@
 # Tools
 
-The server exposes up to **24** MCP tools, grouped into three areas:
+The server exposes up to **26** MCP tools, grouped into three areas:
 
 - **Repository API** — fast metadata via Qlik Repository (HTTP/QRS).
 - **Engine API** — data and load script via Qlik Engine (WebSocket).
@@ -8,12 +8,12 @@ The server exposes up to **24** MCP tools, grouped into three areas:
 
 **Availability depends on the authentication mode.** Task management
 calls QRS endpoints that require repository-admin rights, which a JWT
-analyst identity does not have, so those 12 tools are registered in
+analyst identity does not have, so those 14 tools are registered in
 certificate mode only:
 
 | Mode | Tools registered |
 |------|------------------|
-| certificate | 24 — everything below |
+| certificate | 26 — everything below |
 | JWT (virtual proxy) | 12 — Repository metadata + Engine only |
 
 Every tool returns its full parameter documentation via the standard MCP
