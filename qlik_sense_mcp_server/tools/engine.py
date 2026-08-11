@@ -349,6 +349,28 @@ def engine_create_hypercube(
          ever matched    {<[Client]=P({<[Flag]={1}>}[Client])>}
          never matched   {<[Client]=E({<[Flag]={1}>}[Client])>}
 
+       Quoting decides the meaning, and getting it wrong returns 0
+       rather than an error:
+         'single'  literal, case-sensitive, exact value
+         "double"  search: wildcards, case-insensitive, comparisons
+       Comparison operators only work inside double quotes, and a range
+       is ONE string with NO SPACES:
+         GOOD: {<[Score]={">=100<200"}>}
+         BAD:  {<[Score]={'>=100'}>}      literal, matches nothing
+         BAD:  {<[Score]={">=100 <200"}>} parses, matches nothing
+
+    2a. DATES ARE COMPARED AS THE TEXT QLIK DISPLAYS, not as numbers.
+       Serial numbers and mismatched formats return 0 silently. Read the
+       `sample` values a date field carries in `get_app_details` — that
+       is the format to match. Safest forms, in order of preference:
+         GOOD: {<[Year]={2026}>}                    calendar field
+         GOOD: {<[OrderDate]={"=Year([OrderDate])=2026"}>}
+         GOOD: {<[OrderDate]={">=$(=Date('2026-01-01','DD.MM.YYYY'))"}>}
+         BAD:  {<[OrderDate]={">=45658<=46022"}>}   serial numbers
+         BAD:  {<[OrderDate]={"2026*"}>}            unless the display
+                                                    format starts with
+                                                    the year
+
     3. A DIMENSION `field` MUST BE A PLAIN FIELD NAME — never an
        expression. `{"field": "=Year(OrderDate)"}` is evaluated for
        every row of the fact table and will time out. If you need

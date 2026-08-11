@@ -25,6 +25,18 @@ _DOLLAR_EXPANSION = re.compile(r"\$\([^)]*\)")
 # Field names and string values, which must not be scanned for SQL keywords:
 # `[Cost as planned]` is a perfectly good field name.
 _QUOTED_OR_BRACKETED = re.compile(r"\[[^\]]*\]|'[^']*'|\"[^\"]*\"")
+# Field names used inside a set modifier: `{<Region={'North'}>}`. A name
+# here that the model does not have is worse than a typo elsewhere — Qlik
+# drops the condition and returns the UNFILTERED total, a number that is
+# larger than the truth and looks entirely plausible.
+_SET_MODIFIER_FIELDS = re.compile(
+    r"[<,]\s*(?:\[([^\]]+)\]|([^\[\]\s=<>{},]+))\s*[-+*/]?=", re.UNICODE)
+# A comparison inside single quotes is a literal, so it matches nothing.
+_QUOTED_COMPARISON = re.compile(r"'\s*(<=|>=|<>|<|>)")
+# A range search is one string with no spaces; with a space it parses and
+# silently matches nothing.
+_SPACED_RANGE = re.compile(r'"[^"]*(?:<=|>=|<|>)[^"]*\s+(?:<=|>=|<|>)')
+
 _SQL_ISMS = (
     # The alias may be bare, bracketed or quoted — `AS "total"` is the form
     # a model writes most often, and it used to pass unnoticed.
@@ -110,6 +122,42 @@ class EngineHypercubeMixin:
             exists[name] = bool(info.get("qName"))
         return exists
 
+    def _check_expressions(self, app_handle: int,
+                           expressions: List[Any]) -> Dict[str, str]:
+        """Ask Engine to parse each expression without evaluating it.
+
+        `CheckExpression` is the only authority on Qlik syntax, and it is
+        cheap. Measured on 31.62 it catches what no amount of lexing here
+        can: `SUM(x) AS total` -> "Garbage after expression: 'AS'",
+        `COUNTX(x)` -> "COUNTX is not a valid function", `Sum(Sum(x))` ->
+        "Nested aggregation not allowed", an unclosed paren -> "')' or ','
+        expected". It also returns the character range of any name the
+        model does not have.
+
+        Returns {expression: error text} for the ones that failed.
+        """
+        wanted = [e for e in expressions if e]
+        if not wanted:
+            return {}
+        try:
+            outcomes = self.send_requests_pipelined(
+                [{"method": "CheckExpression", "params": [expr], "handle": app_handle}
+                 for expr in wanted],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            logger.debug("CheckExpression unavailable, skipping: %s", exc)
+            return {}
+
+        broken = {}
+        for expr, outcome in zip(wanted, outcomes):
+            if isinstance(outcome, Exception):
+                continue
+            message = ((outcome or {}).get("qErrorMsg") or "").strip()
+            if message:
+                broken[expr] = " ".join(message.split())
+        return broken
+
     def _validate_cube_inputs(
         self, app_handle: int,
         dimensions: List[Dict[str, Any]],
@@ -151,6 +199,7 @@ class EngineHypercubeMixin:
             dimension_fields.append(field.strip("[]"))
 
         measure_fields: List[str] = []
+        modifier_fields: List[str] = []
         for measure in measures:
             expression = measure.get("expression") or ""
             # Strip bracketed names and string literals before looking for
@@ -169,6 +218,25 @@ class EngineHypercubeMixin:
                         f"'-' instead."
                     )
                     break
+            if _QUOTED_COMPARISON.search(expression):
+                warnings.append(
+                    f"Measure {expression!r} compares inside single quotes. "
+                    f"Qlik reads '>=100' as the literal text, matches "
+                    f'nothing and returns 0. Use double quotes: {{">=100"}}.'
+                )
+            if _SPACED_RANGE.search(expression):
+                warnings.append(
+                    f"Measure {expression!r} has a space inside a range "
+                    f'search. {{">=100 <200"}} parses and matches nothing; '
+                    f'write it as one string: {{">=100<200"}}.'
+                )
+            for bracketed, bare in _SET_MODIFIER_FIELDS.findall(
+                    _DOLLAR_EXPANSION.sub(" ", expression)):
+                # `Year*=` is the "add to the selection" form; the
+                # operator is not part of the name.
+                name = (bracketed or bare).strip().strip("'\"").rstrip("*+-/")
+                if name:
+                    modifier_fields.append(name)
             # Variable expansion is resolved by Qlik, not by us; the names
             # inside it are not field names.
             measure_fields.extend(
@@ -176,8 +244,66 @@ class EngineHypercubeMixin:
             )
         measure_fields.extend(calculated_dimension_fields)
 
-        to_check = list(dict.fromkeys(dimension_fields + measure_fields))
+        # Syntax first: an expression Qlik cannot parse is a refusal, not a
+        # warning, and its error text says exactly what is wrong.
+        broken = self._check_expressions(
+            app_handle,
+            [m.get("expression") for m in measures]
+            + [d.get("field") for d in dimensions
+               if str(d.get("field") or "").startswith("=")],
+        )
+        if broken:
+            first_expression, first_error = next(iter(broken.items()))
+            return {
+                "error": f"Qlik cannot parse {first_expression!r}: {first_error}",
+                "error_category": "invalid_expression",
+                "failed_step": "validate",
+                "invalid_expressions": broken,
+                "hint": (
+                    "The message comes from Qlik's own parser. Qlik is not "
+                    "SQL: name a measure with the `label` argument rather "
+                    "than `AS`, filter with set analysis "
+                    "(Sum({<Year={2026}>} Amount)) rather than WHERE, and "
+                    "wrap an inner aggregation in Aggr() or TOTAL."
+                ),
+            }
+
+        to_check = list(dict.fromkeys(dimension_fields + measure_fields + modifier_fields))
         exists = self._fields_exist(app_handle, to_check)
+
+        unknown_modifier_fields = [
+            f for f in dict.fromkeys(modifier_fields) if not exists.get(f, True)
+        ]
+        if unknown_modifier_fields:
+            known = self._known_field_names(app_handle)
+            folded = {name.casefold(): name for name in known}
+            suggestions = {}
+            for name in unknown_modifier_fields:
+                matches = difflib.get_close_matches(
+                    name.casefold(), list(folded), n=3, cutoff=0.6)
+                if matches:
+                    suggestions[name] = [folded[m] for m in matches]
+            return {
+                "error": (
+                    "Set analysis filters on field(s) this app does not have: "
+                    + ", ".join(repr(f) for f in unknown_modifier_fields)
+                ),
+                "error_category": "field_not_found",
+                "failed_step": "validate",
+                "unknown_fields": unknown_modifier_fields,
+                "did_you_mean": suggestions,
+                "next_actions": [
+                    "call get_app_details(app_id) and copy the field name exactly",
+                    "field names are case-sensitive",
+                ],
+                "hint": (
+                    "This one is worse than a plain typo: Qlik does not "
+                    "reject a set modifier on an unknown field, it drops the "
+                    "condition. The measure then returns the UNFILTERED "
+                    "total — a number larger than the truth, with nothing to "
+                    "mark it as wrong."
+                ),
+            }
 
         unknown_dimension_fields = [f for f in dimension_fields if not exists.get(f, True)]
         unknown_measure_fields = [
@@ -198,6 +324,18 @@ class EngineHypercubeMixin:
                     name.casefold(), list(folded), n=3, cutoff=0.6)
                 if matches:
                     suggestions[name] = [folded[m] for m in matches]
+            # A list of candidates still leaves the caller to rebuild the
+            # whole call. Hand back the corrected one instead.
+            corrected = None
+            if len(unknown_dimension_fields) == 1:
+                only = unknown_dimension_fields[0]
+                best = suggestions.get(only)
+                if best:
+                    corrected = [
+                        (best[0] if d.get("field", "").strip("[]") == only
+                         else d.get("field"))
+                        for d in dimensions
+                    ]
             return {
                 "error": (
                     "Unknown field(s) in dimensions: "
@@ -207,6 +345,12 @@ class EngineHypercubeMixin:
                 "failed_step": "validate",
                 "unknown_fields": unknown_dimension_fields,
                 "did_you_mean": {k: v for k, v in suggestions.items() if v},
+                "next_actions": ([
+                    f"retry with dimensions={corrected!r}",
+                ] if corrected else [
+                    "call get_app_details(app_id) and read `fields[].name`",
+                    "field names are case-sensitive; copy them exactly",
+                ]) + ["do not guess another spelling without checking"],
                 "hint": (
                     "Qlik does not refuse an unknown dimension — it evaluates "
                     "the name as an expression, and the cube collapses to one "
@@ -618,6 +762,14 @@ class EngineHypercubeMixin:
                     "error_category": "limit_exceeded",
                     "failed_step": "plan",
                     "hard_max_rows": HARD_MAX_ROWS,
+                    "next_actions": [
+                        f"retry with limit={min(HARD_MAX_ROWS, 50)} and "
+                        f"sort_by set to the measure you care about",
+                        "or narrow every measure with set analysis, "
+                        "e.g. Sum({<Year={2026}>} Amount)",
+                        "do not retry the same limit — it is refused before "
+                        "Qlik is contacted",
+                    ],
                     "hint": (
                         "Design a smaller query instead of bulk-dumping:\n"
                         "  1. Add set analysis to narrow the period/scope, "
@@ -652,6 +804,12 @@ class EngineHypercubeMixin:
                     "max_rows_requested": max_rows,
                     "cells_requested": n_cols * max_rows,
                     "cell_cap": HARD_MAX_CELLS,
+                    "next_actions": [
+                        f"retry with limit={suggested_rows} at the current "
+                        f"{n_cols} columns",
+                        "or drop a dimension/measure and keep the limit",
+                        "do not retry the same combination",
+                    ],
                     "hint": (
                         f"Either drop to max_rows={suggested_rows} with the "
                         f"current {n_cols} columns, OR reduce the number "

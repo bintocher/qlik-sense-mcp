@@ -25,6 +25,10 @@ class _Engine(QlikEngineAPI):
         self.checked = []
 
     def send_requests_pipelined(self, requests, raise_on_error=True):
+        if requests[0]["method"] == "CheckExpression":
+            # The double is not a Qlik parser; treat every expression as
+            # syntactically fine and let the field checks do the work.
+            return [{"qErrorMsg": ""} for _ in requests]
         outcomes = []
         for request in requests:
             name = request["params"][0]
@@ -261,3 +265,93 @@ class TestDimensionShape:
         result = self._cube(dimensions=[{"field": "Region"}, {"nonsense": 1}],
                             measures=[{"expression": "Sum(Sales)"}], max_rows=5)
         assert "dimensions[1]" in result["error"]
+
+
+class TestSetModifierFields:
+    """A set modifier on a field that does not exist is the worst case.
+
+    Qlik does not reject it — it drops the condition. The measure then
+    returns the unfiltered total: a number LARGER than the truth, which
+    the all-zero detector cannot see and a reader has no reason to
+    doubt.
+    """
+
+    def test_an_unknown_modifier_field_is_refused(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
+        assert result["error_category"] == "field_not_found"
+        assert "Regionn" in result["unknown_fields"]
+
+    def test_the_refusal_explains_why_it_matters(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
+        assert "UNFILTERED" in result["hint"]
+
+    def test_a_known_modifier_field_passes(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
+        assert "error" not in result
+
+    def test_a_bracketed_name_with_a_space(self):
+        engine = _Engine(known=("Region", "Sales", "Order Date"))
+        result = engine._validate_cube_inputs(
+            1, _dims("Region"), _measures('Sum({<[Order Date]={">=1<2"}>} Sales)'))
+        assert "error" not in result, result
+
+    def test_the_selection_operator_is_not_part_of_the_name(self):
+        """`Year*=` means "add to the current selection"."""
+        engine = _Engine(known=("Region", "Sales", "Year"))
+        result = engine._validate_cube_inputs(
+            1, _dims("Region"), _measures('Sum({<Year*={">2020"}>} Sales)'))
+        assert "error" not in result, result
+
+
+class TestQuotingTraps:
+    def test_a_comparison_in_single_quotes_is_flagged(self):
+        """'>=100' is a literal; it matches nothing and returns 0."""
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Sales={'>=100'}>} Sales)"))
+        assert any("single quotes" in w for w in result["warnings"]), result
+
+    def test_a_spaced_range_is_flagged(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures('Sum({<Sales={">=100 <200"}>} Sales)'))
+        assert any("space inside a range" in w for w in result["warnings"]), result
+
+    def test_a_correct_range_is_quiet(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures('Sum({<Sales={">=100<200"}>} Sales)'))
+        assert result["warnings"] == [], result
+
+
+class TestExpressionSyntax:
+    """Engine's own parser, asked before anything is built."""
+
+    class _Parser(_Engine):
+        def __init__(self, errors=None, **kwargs):
+            super().__init__(**kwargs)
+            self.errors = errors or {}
+
+        def send_requests_pipelined(self, requests, raise_on_error=True):
+            if requests[0]["method"] == "CheckExpression":
+                return [{"qErrorMsg": self.errors.get(r["params"][0], "")}
+                        for r in requests]
+            return super().send_requests_pipelined(requests, raise_on_error)
+
+    def test_a_parse_error_is_reported_with_qliks_own_words(self):
+        engine = self._Parser({"SUM(Sales) AS total": "Garbage after expression: 'AS'"})
+        result = engine._validate_cube_inputs(
+            1, _dims("Region"), _measures("SUM(Sales) AS total"))
+        assert result["error_category"] == "invalid_expression"
+        assert "Garbage after expression" in result["error"]
+
+    def test_valid_syntax_passes_through(self):
+        engine = self._Parser()
+        result = engine._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Sales)"))
+        assert "error" not in result
+
+    def test_a_calculated_dimension_is_checked_too(self):
+        engine = self._Parser({"=Yearr(OrderDate)": "Yearr is not a valid function"})
+        result = engine._validate_cube_inputs(
+            1, [{"field": "=Yearr(OrderDate)"}], _measures("Sum(Sales)"))
+        assert result["error_category"] == "invalid_expression"
