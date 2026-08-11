@@ -13,7 +13,7 @@ the user identity travels in the JWT payload. See
 
 | Variable | Description |
 |----------|-------------|
-| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. |
+| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
 | `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode only. |
 | `QLIK_USER_ID` | User ID used for authentication. Cert mode only. |
 
@@ -69,7 +69,7 @@ Defaults match the standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QLIK_VERIFY_SSL` | `true` | Verify SSL certificates. Set to `false` for self-signed dev clusters. |
+| `QLIK_VERIFY_SSL` | `false` | Verify TLS certificates. Off by default: Qlik Sense Enterprise serves its own self-signed certificate, so a correct installation fails verification. Set to `true` once Qlik presents a certificate your machine trusts (and point `QLIK_CA_CERT_PATH` at the CA if it is a private one). |
 
 ## Timeouts and retries
 
