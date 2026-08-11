@@ -313,10 +313,14 @@ class TestQuotingTraps:
             1, _dims("Region"), _measures("Sum({<Sales={'>=100'}>} Sales)"))
         assert any("single quotes" in w for w in result["warnings"]), result
 
-    def test_a_spaced_range_is_flagged(self):
+    def test_a_spaced_range_is_not_flagged(self):
+        """The literature says a space breaks a range search. Measured on
+        31.62 it does not: `{">=5 <=9"}` and `{">=5<=9"}` both returned
+        12,497,302,308.36 against the same field. Warning about it would
+        send a caller to rewrite a query that works."""
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures('Sum({<Sales={">=100 <200"}>} Sales)'))
-        assert any("space inside a range" in w for w in result["warnings"]), result
+        assert result["warnings"] == [], result
 
     def test_a_correct_range_is_quiet(self):
         result = _Engine()._validate_cube_inputs(

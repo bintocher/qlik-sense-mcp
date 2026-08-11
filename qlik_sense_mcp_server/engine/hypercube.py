@@ -33,10 +33,6 @@ _SET_MODIFIER_FIELDS = re.compile(
     r"[<,]\s*(?:\[([^\]]+)\]|([^\[\]\s=<>{},]+))\s*[-+*/]?=", re.UNICODE)
 # A comparison inside single quotes is a literal, so it matches nothing.
 _QUOTED_COMPARISON = re.compile(r"'\s*(<=|>=|<>|<|>)")
-# A range search is one string with no spaces; with a space it parses and
-# silently matches nothing.
-_SPACED_RANGE = re.compile(r'"[^"]*(?:<=|>=|<|>)[^"]*\s+(?:<=|>=|<|>)')
-
 _SQL_ISMS = (
     # The alias may be bare, bracketed or quoted — `AS "total"` is the form
     # a model writes most often, and it used to pass unnoticed.
@@ -223,12 +219,6 @@ class EngineHypercubeMixin:
                     f"Measure {expression!r} compares inside single quotes. "
                     f"Qlik reads '>=100' as the literal text, matches "
                     f'nothing and returns 0. Use double quotes: {{">=100"}}.'
-                )
-            if _SPACED_RANGE.search(expression):
-                warnings.append(
-                    f"Measure {expression!r} has a space inside a range "
-                    f'search. {{">=100 <200"}} parses and matches nothing; '
-                    f'write it as one string: {{">=100<200"}}.'
                 )
             for bracketed, bare in _SET_MODIFIER_FIELDS.findall(
                     _DOLLAR_EXPANSION.sub(" ", expression)):
