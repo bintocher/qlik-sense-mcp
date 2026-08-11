@@ -192,17 +192,23 @@ class EngineConnectionMixin:
                 f"{ws_scheme}://{server_netloc}/{prefix}/app{jwt_csrf_qs}",
             ])
         else:
-            if app_id:
-                enc = quote(app_id, safe="")
-                endpoints_all.append(
-                    f"wss://{server_host}:{self.config.engine_port}/app/{enc}"
-                )
-            endpoints_all.extend([
-                f"wss://{server_host}:{self.config.engine_port}/app/engineData",
-                f"wss://{server_host}:{self.config.engine_port}/app",
-                f"ws://{server_host}:{self.config.engine_port}/app/engineData",
-                f"ws://{server_host}:{self.config.engine_port}/app",
-            ])
+            # Certificate mode talks to the Engine port directly, but the
+            # scheme is still the operator's to choose: `http://host` means
+            # ws://. The opposite scheme stays in the list as a fallback,
+            # after the requested one — before this, both wss:// entries came
+            # first and the default retry budget of 2 meant ws:// was never
+            # reached at all.
+            primary, fallback = (("ws", "wss") if server_scheme == "http"
+                                 else ("wss", "ws"))
+            port = self.config.engine_port
+            for scheme in (primary, fallback):
+                if app_id:
+                    enc = quote(app_id, safe="")
+                    endpoints_all.append(f"{scheme}://{server_host}:{port}/app/{enc}")
+                endpoints_all.extend([
+                    f"{scheme}://{server_host}:{port}/app/engineData",
+                    f"{scheme}://{server_host}:{port}/app",
+                ])
         # ws_retries controls how many fallback endpoints to try; always at
         # least 1, and if app_id is given we add +1 to include the per-app URL
         # without starving the fallback list.

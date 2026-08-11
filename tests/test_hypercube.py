@@ -501,3 +501,28 @@ class TestRequestEcho:
         parsed = json.loads(fine("app-3"))
         assert "request" not in parsed
         assert "tool_call_seconds" in parsed
+
+
+class TestEmptyResultIsExplained:
+    """No rows at all is the strongest version of "this measure is empty".
+
+    `suppress_zero=True` turns a full table of zeros into an empty result,
+    and the per-column check needs rows to look at — so the warning went
+    quiet exactly when the answer was emptiest.
+    """
+
+    def test_an_empty_result_is_flagged(self):
+        eng = _PagingEngine(total_rows=0, first_page=0, page_size=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert result["rows"] == []
+        assert any("no rows" in w for w in result["warnings"]), result["warnings"]
+
+    def test_suppress_zero_is_named_as_a_possible_cause(self):
+        eng = _PagingEngine(total_rows=0, first_page=0, page_size=3)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10, suppress_zero=True)
+        assert any("suppress_zero" in w for w in result["warnings"]), result["warnings"]
+
+    def test_a_result_with_rows_is_not_flagged_as_empty(self):
+        eng = _PagingEngine(total_rows=5, first_page=5, page_size=5)
+        result = eng.create_hypercube(1, DIMS, MEASURES, 10)
+        assert not any("no rows" in w for w in result.get("warnings", []))

@@ -4,6 +4,82 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [1.9.0] - 2026-08-11
+
+### Added
+
+- **A query that names something that does not exist is now refused.**
+  Qlik evaluates an unknown name as an expression worth 0 rather than
+  reporting an error, so a typo came back as data: measured on 31.62, a
+  hypercube grouped by `no_such_field` returned a single row holding
+  49,989,556,885.52 — the grand total over all ten regions, and
+  indistinguishable from a real answer. Dimension fields are now checked
+  against the data model before the cube is built (one pipelined
+  `GetFieldDescription` batch, ~0.01s), and an unknown one comes back as
+  `error_category: field_not_found` with `did_you_mean` suggestions.
+- **Measures that quietly evaluate to nothing are called out.** Every
+  reply carries `warnings`. A measure whose every value is `0` or `'-'`
+  is flagged — that is what Qlik returns for a set-analysis filter
+  matching no value (`region_name={'Moscow'}` where the data says
+  `Moskva`), a misspelled field inside an aggregation, or an expression
+  it could not evaluate. SQL written into a measure (`AS`, `SELECT`,
+  `GROUP BY`, `FROM`, `WHERE`) is named as such, and names inside a
+  measure that the model does not have are reported without blocking the
+  query, since they are found lexically.
+- **Objects report the expressions behind them.**
+  `get_app_sheet_objects` returns `fields_used`, `measures` and
+  `dimensions` — all three were computed and then dropped, so answering
+  "what does this sheet work with" meant one call per object, and the
+  expressions were not reachable at all. `get_app_object` gained the
+  same three: its docstring promised "dimension/measure definitions and
+  expressions" while returning a layout that does not contain them.
+
+### Fixed
+
+- **A calculated dimension skipped the check.** `=Year(no_such_field)`
+  was passed through unexamined because an expression is not a field
+  name — leaving open the exact hole the check exists to close. The
+  names inside it are now read too, as a warning rather than a refusal.
+- **An empty result is explained.** `suppress_zero=True` turns a full
+  table of zeros into no rows at all, and the per-column check needs
+  rows to look at, so the warning went quiet precisely when the answer
+  was emptiest.
+- **The SQL check no longer fires on a legal field name.** It scanned
+  the raw expression, so a field called `[Cost as planned]` read as an
+  SQL alias. Bracketed names and string literals are masked first — and
+  masked rather than removed, so `AS "total"`, the alias form a model
+  writes most often, is still caught.
+- **Measure expressions were read from the wrong place.** The code
+  looked for `qMeasureInfo.qDef` in the object layout, and Engine does
+  not put it there — verified against a live sheet, where every measure
+  arrived with `qFallbackTitle`, formatting and statistics but no
+  definition at all. The expression lives in the properties
+  (`qHyperCubeDef.qMeasures[].qDef.qDef`), which are now fetched in the
+  same pipelined pass. Objects also report their `measures` and
+  `dimensions` with expressions and labels.
+- **Charts built from the library reported no fields.** A master measure
+  or dimension stores only `qLibraryId`; those are now resolved through
+  `GetMeasure`/`GetDimension` — so precisely the charts a modeller took
+  the trouble to standardise stop being the ones that answer "no fields".
+- **Filter panes report the fields they filter on.** A filter pane is a
+  container: the fields live in its listbox children, one level down, and
+  reading only the top level reported every filter pane as using nothing.
+- **Non-Latin field names are found.** The identifier pattern was
+  `[A-Za-z_]`, so a chart grouped by `Год` and `Месяц` — the actual
+  dimensions on the stand — contributed no fields. Numeric literals no
+  longer count either: `Count(distinct id) / 1e3` used to report `1e3`
+  as a field.
+- **A double-quoted search is a value, not a field.**
+  `Sum({<Country={"New Zealand"}>} Sales)` reported `New` and `Zealand`
+  as fields of the data model. Both quote styles and `$(variable)`
+  expansions are now removed before names are read.
+- **Certificate mode follows the URL scheme too.** It listed both
+  `wss://` endpoints before the `ws://` ones, and with the default retry
+  budget of 2 the plain-WebSocket entries were unreachable — so
+  `QLIK_SERVER_URL=http://host` could not connect at all. The requested
+  scheme is now tried first and exhausted before the other. (1.8.1 fixed
+  this for JWT mode only.)
+
 ## [1.8.1] - 2026-08-11
 
 ### Changed

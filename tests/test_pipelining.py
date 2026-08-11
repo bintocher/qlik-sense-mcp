@@ -168,8 +168,11 @@ class TestSheetObjectsUsesPipelining:
 
         def fake_pipelined(requests, timeout=None, raise_on_error=True):
             pipelined_calls.append([r["method"] for r in requests])
-            if requests[0]["method"] == "GetObject":
+            method = requests[0]["method"]
+            if method == "GetObject":
                 return [{"qReturn": {"qHandle": 100 + i}} for i in range(len(requests))]
+            if method == "GetProperties":
+                return [{"qProp": {"qHyperCubeDef": {}}} for _ in requests]
             return [{"qLayout": {"title": f"obj{i}"}} for i in range(len(requests))]
 
         eng.send_request = fake_send_request
@@ -180,10 +183,13 @@ class TestSheetObjectsUsesPipelining:
 
         assert len(result) == 3
         assert [r["object_title"] for r in result] == ["obj0", "obj1", "obj2"]
-        # Exactly 2 batched calls total, regardless of how many children.
-        assert len(pipelined_calls) == 2
-        assert pipelined_calls[0] == ["GetObject"] * 3
-        assert pipelined_calls[1] == ["GetLayout"] * 3
+        # The point is that the cost is a constant number of round-trips, not
+        # one per object: handles, layouts and properties, each in one batch.
+        # (Properties are needed because the layout has no measure
+        # expressions — Engine simply does not put them there.)
+        assert [len(batch) for batch in pipelined_calls] == [3, 3, 3]
+        assert [batch[0] for batch in pipelined_calls] == [
+            "GetObject", "GetLayout", "GetProperties"]
 
     def test_one_bad_child_does_not_drop_the_rest(self):
         eng = QlikEngineAPI.__new__(QlikEngineAPI)

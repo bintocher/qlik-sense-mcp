@@ -10,11 +10,32 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 from typing import Dict, List, Any, Optional
+import difflib
 import logging
+import re
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
+
+# Qlik evaluates an unknown name as an expression worth 0 rather than
+# refusing it, so a typo comes back as data. These patterns catch the shapes
+# that produce a confident, wrong answer.
+_DOLLAR_EXPANSION = re.compile(r"\$\([^)]*\)")
+# Field names and string values, which must not be scanned for SQL keywords:
+# `[Cost as planned]` is a perfectly good field name.
+_QUOTED_OR_BRACKETED = re.compile(r"\[[^\]]*\]|'[^']*'|\"[^\"]*\"")
+_SQL_ISMS = (
+    # The alias may be bare, bracketed or quoted — `AS "total"` is the form
+    # a model writes most often, and it used to pass unnoticed.
+    (re.compile(r"\bas\s+[\w\[\"']", re.I | re.UNICODE),
+     "`AS <alias>` is SQL; in Qlik a measure is named with the `label` argument"),
+    (re.compile(r"\bselect\b", re.I), "`SELECT` is SQL; a measure is just the aggregation"),
+    (re.compile(r"\bgroup\s+by\b", re.I), "`GROUP BY` is SQL; grouping is what `dimensions` does"),
+    (re.compile(r"\bfrom\s+[A-Za-z_\[]", re.I), "`FROM` is SQL; a hypercube has no table clause"),
+    (re.compile(r"\bwhere\b", re.I), "`WHERE` is SQL; filter with set analysis, "
+                                     "e.g. Sum({<Year={2026}>} Amount)"),
+)
 
 
 class EngineHypercubeMixin:
@@ -35,6 +56,197 @@ class EngineHypercubeMixin:
         "asc": 1, "ascending": 1, "up": 1, "low": 1,
         "lowest": 1, "bottom": 1, "1": 1,
     }
+
+    def _known_field_names(self, app_handle: int) -> List[str]:
+        """Every field in the data model, for suggesting a near miss.
+
+        Only called on the error path — it walks the model, which the
+        happy path has no reason to pay for.
+        """
+        try:
+            model = self.get_fields(app_handle)
+        except Exception as exc:
+            logger.debug("Could not list fields for a suggestion: %s", exc)
+            return []
+        # get_fields names the key `field_name`; the tool layer renames it to
+        # `name` on the way out. Accept both so this keeps working whichever
+        # one it is handed. Deduplicated: a join key appears once per table it
+        # belongs to, and suggesting it three times helps nobody.
+        names = [
+            f.get("field_name") or f.get("name") or ""
+            for f in (model.get("fields") or [])
+            if f.get("field_name") or f.get("name")
+        ]
+        return list(dict.fromkeys(names))
+
+    def _fields_exist(self, app_handle: int, names: List[str]) -> Dict[str, bool]:
+        """Ask Engine which of these names the data model actually has.
+
+        `GetFieldDescription` is the cheap answer — no hypercube, no data
+        page — and the batch goes out in one pipelined round-trip.
+        """
+        if not names:
+            return {}
+        try:
+            outcomes = self.send_requests_pipelined(
+                [{"method": "GetFieldDescription", "params": [name], "handle": app_handle}
+                 for name in names],
+                raise_on_error=False,
+            )
+        except Exception as exc:
+            # The check is a guard, not the query. If it cannot run, let the
+            # query through — refusing it would turn a diagnostic into an
+            # outage, and an unchecked name still gets the empty-measure
+            # warning after the fact.
+            logger.debug("Field existence check unavailable, skipping: %s", exc)
+            return {}
+        exists = {}
+        for name, outcome in zip(names, outcomes):
+            if isinstance(outcome, Exception):
+                # Engine answers "Invalid parameters" for an unknown field.
+                exists[name] = False
+                continue
+            info = (outcome or {}).get("qReturn") or {}
+            exists[name] = bool(info.get("qName"))
+        return exists
+
+    def _validate_cube_inputs(
+        self, app_handle: int,
+        dimensions: List[Dict[str, Any]],
+        measures: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Catch the mistakes Qlik answers with a number instead of an error.
+
+        A dimension naming a field that does not exist is fatal: Qlik
+        evaluates the name as an expression, which collapses the cube to a
+        single row carrying the grand total — a result that looks exactly
+        like a legitimate answer. Measured on 31.62: a cube on
+        `no_such_field` returned one row worth 49,989,556,885.52, the total
+        over all ten regions.
+
+        Measure expressions get warnings rather than errors, because the
+        field names inside them are found lexically and a false positive
+        must not block a working query.
+        """
+        unknown_dimension_fields: List[str] = []
+        warnings: List[str] = []
+
+        dimension_fields = []
+        calculated_dimension_fields: List[str] = []
+        for dim in dimensions:
+            field = (dim.get("field") or "").strip()
+            if not field:
+                continue
+            if field.startswith("="):
+                # A calculated dimension is an expression, so it is not a
+                # field name — but the names *inside* it are, and skipping
+                # them outright let `=Year(no_such_field)` back through the
+                # exact hole this check exists to close. Lexical, so a
+                # warning rather than a refusal.
+                calculated_dimension_fields.extend(
+                    self._extract_fields_from_expression(
+                        _DOLLAR_EXPANSION.sub(" ", field.lstrip("=")))
+                )
+                continue
+            dimension_fields.append(field.strip("[]"))
+
+        measure_fields: List[str] = []
+        for measure in measures:
+            expression = measure.get("expression") or ""
+            # Strip bracketed names and string literals before looking for
+            # SQL: a field legitimately called [Cost as planned] contains
+            # the word "as", and warning about it sends the caller to
+            # rewrite a query that works.
+            # Replaced by a placeholder rather than removed, so that
+            # `AS "total"` — the alias form a model writes most often —
+            # still reads as `AS X` and is caught.
+            for_sql_check = _QUOTED_OR_BRACKETED.sub("X", expression)
+            for pattern, explanation in _SQL_ISMS:
+                if pattern.search(for_sql_check):
+                    warnings.append(
+                        f"Measure {expression!r} looks like SQL: {explanation}. "
+                        f"Qlik does not refuse it — every row comes back as "
+                        f"'-' instead."
+                    )
+                    break
+            # Variable expansion is resolved by Qlik, not by us; the names
+            # inside it are not field names.
+            measure_fields.extend(
+                self._extract_fields_from_expression(_DOLLAR_EXPANSION.sub(" ", expression))
+            )
+        measure_fields.extend(calculated_dimension_fields)
+
+        to_check = list(dict.fromkeys(dimension_fields + measure_fields))
+        exists = self._fields_exist(app_handle, to_check)
+
+        unknown_dimension_fields = [f for f in dimension_fields if not exists.get(f, True)]
+        unknown_measure_fields = [
+            f for f in measure_fields
+            if not exists.get(f, True) and f not in unknown_dimension_fields
+        ]
+
+        if unknown_dimension_fields:
+            known = self._known_field_names(app_handle)
+            # Matching case-insensitively and answering with the real name:
+            # field names are case-sensitive in Qlik, so the wrong case is
+            # the most common way to miss — and `REGION_NAME` is exactly the
+            # miss a case-sensitive comparison fails to explain.
+            folded = {name.casefold(): name for name in known}
+            suggestions = {}
+            for name in unknown_dimension_fields:
+                matches = difflib.get_close_matches(
+                    name.casefold(), list(folded), n=3, cutoff=0.6)
+                if matches:
+                    suggestions[name] = [folded[m] for m in matches]
+            return {
+                "error": (
+                    "Unknown field(s) in dimensions: "
+                    + ", ".join(repr(f) for f in unknown_dimension_fields)
+                ),
+                "error_category": "field_not_found",
+                "failed_step": "validate",
+                "unknown_fields": unknown_dimension_fields,
+                "did_you_mean": {k: v for k, v in suggestions.items() if v},
+                "hint": (
+                    "Qlik does not refuse an unknown dimension — it evaluates "
+                    "the name as an expression, and the cube collapses to one "
+                    "row holding the grand total, which reads as a real "
+                    "answer. Check the name with get_app_details (field names "
+                    "are case-sensitive)."
+                ),
+            }
+
+        if unknown_measure_fields:
+            warnings.append(
+                "Measure expressions mention name(s) the data model does not "
+                "have: " + ", ".join(repr(f) for f in unknown_measure_fields)
+                + ". Qlik scores an unknown name as 0, so the measure will "
+                  "read as zero rather than fail. (If these are variables or "
+                  "function names, ignore this.)"
+            )
+
+        return {"warnings": warnings}
+
+    @staticmethod
+    def _measure_columns_are_empty(rows: List[List[Any]], n_dims: int,
+                                   column_names: List[str]) -> List[str]:
+        """Name the measures that came back entirely 0 or '-'.
+
+        The signature of a mistake Qlik will not report: a set-analysis
+        filter on a value that does not exist, a misspelled field inside an
+        aggregation, SQL syntax. All of them return a full, well-formed
+        result whose numbers are meaningless.
+        """
+        if not rows:
+            return []
+        empty = []
+        for col in range(n_dims, len(column_names)):
+            values = [row[col] for row in rows if col < len(row)]
+            if not values:
+                continue
+            if all(v in (0, 0.0, "-", "", None) for v in values):
+                empty.append(column_names[col])
+        return empty
 
     @staticmethod
     def _normalize_sort_order(sort_order: Any) -> Optional[int]:
@@ -531,6 +743,18 @@ class EngineHypercubeMixin:
                 "qHyperCubeDef": hypercube_def,
             }
 
+            # Before spending a session object on it: does the query name
+            # things that exist? Qlik answers a typo with a number, so this
+            # is the difference between an error and a wrong answer.
+            step = "validate"
+            t_step = time.monotonic()
+            validation = self._validate_cube_inputs(
+                app_handle, converted_dimensions, converted_measures)
+            timings["validate_seconds"] = round(time.monotonic() - t_step, 3)
+            if validation.get("error"):
+                return validation
+            input_warnings: List[str] = validation.get("warnings", [])
+
             step = "CreateSessionObject"
             logger.info(
                 "create_hypercube: %s (dims=%d, measures=%d, max_rows=%d, op_timeout=%.1fs)",
@@ -642,9 +866,38 @@ class EngineHypercubeMixin:
 
             timings["total_seconds"] = round(time.monotonic() - t0, 3)
 
+            rows = self._matrix_to_rows(initial_pages, column_names)
+            warnings = list(input_warnings)
+            if not rows and converted_measures:
+                # No rows at all is the *strongest* version of the same
+                # signal, and `suppress_zero` turns a table of zeros into
+                # exactly this — so the check below, which needs rows to
+                # look at, would go quiet precisely when the result is
+                # emptiest.
+                warnings.append(
+                    "The query returned no rows. With suppress_zero=True that "
+                    "is what a measure evaluating to 0 everywhere looks like; "
+                    "otherwise the dimensions have no values under the current "
+                    "filters. Re-run without suppress_zero to tell the two "
+                    "apart."
+                    if suppress_zero else
+                    "The query returned no rows: no dimension value satisfied "
+                    "the query. Check the field names and any set-analysis "
+                    "filter values with get_app_field."
+                )
+            for empty_column in self._measure_columns_are_empty(rows, n_dims, column_names):
+                warnings.append(
+                    f"Every value of {empty_column!r} came back 0 or '-'. That "
+                    f"is what Qlik returns for a set-analysis filter matching "
+                    f"no value, a misspelled field inside the aggregation, or "
+                    f"an expression it could not evaluate — it does not report "
+                    f"any of them as an error. Check the filter values with "
+                    f"get_app_field before trusting this as a real zero."
+                )
+
             response: Dict[str, Any] = {
                 "columns": column_names,
-                "rows": self._matrix_to_rows(initial_pages, column_names),
+                "rows": rows,
                 "total_rows": total_rows_on_server,
                 "returned_rows": rows_fetched,
                 "total_columns": total_cols,
@@ -666,6 +919,7 @@ class EngineHypercubeMixin:
                 ],
                 "hard_max_rows": HARD_MAX_ROWS,
                 "truncation_warning": truncation_warning,
+                "warnings": warnings,
                 "timings": timings,
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
