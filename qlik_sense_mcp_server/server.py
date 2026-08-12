@@ -43,6 +43,7 @@ from .tools.repository import get_about, get_apps, get_app_details  # noqa: F401
 from .tools.engine import (  # noqa: F401
     engine_create_hypercube,
     engine_get_field_range,
+    engine_query,
     get_app_field,
     get_app_field_statistics,
     get_app_object,

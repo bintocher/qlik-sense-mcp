@@ -17,6 +17,11 @@ from .exceptions import QlikConnectionError
 
 logger = logging.getLogger(__name__)
 
+# Deadline for the one retry a timed-out request is given. Wide enough for
+# a Qlik loading itself back into memory, and paid only when the ordinary
+# deadline has already passed.
+COLD_START_TIMEOUT = 60.0
+
 
 class QlikRepositoryAPI:
     """Client for Qlik Sense Repository API using httpx."""
@@ -117,7 +122,21 @@ class QlikRepositoryAPI:
 
             kwargs['headers'] = headers
 
-            response = self.client.request(method, url, **kwargs)
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.TimeoutException:
+                # A Qlik that has been idle answers its first request
+                # slowly: measured through the virtual proxy, 3 to 15
+                # seconds cold against hundredths of a second once warm.
+                # The ordinary deadline is right for a working server and
+                # wrong for a waking one, so the first timeout buys one
+                # retry with room to breathe rather than failing the call.
+                logger.info(
+                    "QRS did not answer %s within %.0fs, retrying once with "
+                    "%.0fs", endpoint, DEFAULT_HTTP_TIMEOUT,
+                    COLD_START_TIMEOUT)
+                response = self.client.request(
+                    method, url, timeout=COLD_START_TIMEOUT, **kwargs)
 
             # If the session cookie expired mid-flight, invalidate and retry
             # once — this is cheaper than a proactive per-request check and

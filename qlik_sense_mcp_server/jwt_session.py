@@ -53,6 +53,14 @@ DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
 # the proxy, so the cookie is matched by this prefix rather than in full.
 _QLIK_SESSION_COOKIE_PREFIX = "X-Qlik-Session"
 
+# The bootstrap keeps its own deadline, wider than the one ordinary calls
+# run under. A proxy that has been idle answers this first request slowly:
+# measured, 15 to 21 seconds cold against 0.45 warm. Under the ordinary
+# 10-second budget the very first call after a quiet period always failed,
+# and the reply — "csrftoken request failed" — reads like a broken
+# configuration rather than a server waking up.
+BOOTSTRAP_TIMEOUT_SECONDS = 60.0
+
 
 class JwtBootstrapError(RuntimeError):
     """Raised when /qps/csrftoken bootstrap fails irrecoverably."""
@@ -245,9 +253,15 @@ class JwtSession:
         }
         logger.info("Bootstrapping JWT session via %s", url)
         try:
-            resp = client.get(url, headers=headers)
+            # The caller's client is shared with ordinary QRS calls and
+            # carries their deadline; this one request gets its own.
+            resp = client.get(url, headers=headers,
+                              timeout=BOOTSTRAP_TIMEOUT_SECONDS)
         except httpx.HTTPError as exc:
-            raise JwtBootstrapError(f"csrftoken request failed: {exc}") from exc
+            raise JwtBootstrapError(
+                f"csrftoken request failed after "
+                f"{BOOTSTRAP_TIMEOUT_SECONDS:.0f}s: {exc}"
+            ) from exc
 
         if resp.status_code == 401:
             raise JwtBootstrapError(
