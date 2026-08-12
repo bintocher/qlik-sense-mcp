@@ -263,6 +263,13 @@ def engine_query(
         queries: a list of whole queries, each with the keys above plus an
             optional "id". Use it for several independent questions at
             once. When present, the single-query arguments are ignored.
+        measures: an escape hatch inside a query, for one expression this
+            vocabulary cannot state — `[{"expression": "Sum({filter} A) / "
+            "Count({filter} B)", "label": "AOV"}]`. With `filters`, the
+            expression must mark where the filter goes: a set modifier
+            narrows the aggregation it sits in, and only the author knows
+            which one that is. Without the marker the query is refused
+            rather than answered with an unfiltered number.
 
     RETURNS
         `results`, one entry per query, each with `id`, `columns`, `rows`

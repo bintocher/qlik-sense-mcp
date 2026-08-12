@@ -11,17 +11,21 @@ from ..config import (
 )
 from typing import Dict, List, Any, Optional
 import difflib
+import re
 import logging
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
 
-# The opening of a set modifier. Its presence is the one thing this module
-# reads out of an expression itself; everything about the expression —
-# syntax, which names exist, which fields a modifier filters on — is
-# answered by Engine.
-_SET_MODIFIER_OPENER = "{<"
+# Where a set modifier begins, in any of the forms Qlik accepts: `{<`,
+# `{1<` (ignore the current selection), `{$<` (the current selection),
+# `{[Alt State]<`. Recognising that one is present is the only thing this
+# module reads out of an expression itself — everything about the
+# expression, including which fields the modifier filters on, is answered
+# by Engine. Missing a form would skip the check for it silently, which is
+# why this accepts an identifier rather than the bare `{<`.
+_SET_MODIFIER = re.compile(r"\{\s*(?:[$0-9]\w*|\[[^\]]*\]|\w+)?\s*<")
 
 # Where a described filter is written into a hand-written expression.
 _FILTER_MARKER = "{filter}"
@@ -79,35 +83,74 @@ class EngineHypercubeMixin:
         ]
         return list(dict.fromkeys(names))
 
-    def _validate_cube_inputs(
-        self, app_handle: int,
-        dimensions: List[Dict[str, Any]],
-        measures: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Catch the mistakes Qlik answers with a number instead of an error.
+    def inspect_expressions(self, app_handle: int,
+                            texts: List[str]) -> Dict[str, Any]:
+        """Ask Engine everything worth knowing about a set of expressions.
 
-        Every judgement here comes from Engine, in one pipelined batch that
-        costs about 4ms against 75ms for the smallest hypercube:
+        Separate from the verdict on purpose. A batch of queries sends every
+        expression it holds through here once — three pipelined calls
+        whatever the batch size — and then each query is judged on its own
+        expressions. Judging the batch as a whole loses which query owns
+        which mistake, and one wrong query then either takes its neighbours
+        down or lets them through unchecked.
+
+        The three calls, measured at about 2ms each on an open app against
+        75ms for the smallest hypercube:
 
         `ExpandExpression` resolves `$(...)`, so the checks see the text
         that will actually run rather than the variable reference.
 
         `CheckExpression` reports syntax and, in `qBadFieldNames`, names the
-        data model does not have. Measured: it covers a bare
-        dimension field, a calculated dimension and an aggregation, and it
-        stops at the set modifier.
+        data model does not have. Measured: it covers a bare dimension
+        field, a calculated dimension and an aggregation, and it stops at
+        the set modifier.
 
-        `GetFieldsFromExpression` covers what `CheckExpression` does not: the
-        fields a set modifier filters on. A modifier whose field Engine does
-        not recognise is dropped by Qlik, and the measure then returns the
-        unfiltered total — larger than the truth, with nothing to mark it as
-        wrong.
+        `GetFieldsFromExpression` covers what `CheckExpression` does not:
+        the fields a set modifier filters on. A modifier whose field Engine
+        does not recognise is dropped by Qlik, and the measure then returns
+        the unfiltered total — larger than the truth, with nothing to mark
+        it as wrong.
+        """
+        wanted = [t for t in dict.fromkeys(texts) if t]
+        if not wanted:
+            return {"expanded": {}, "faults": {}, "filter_fields": {}}
 
-        A dimension on a field that does not exist is the same class of
-        failure: Qlik evaluates the name as an expression and the cube
-        collapses to one row holding the grand total. Measured: a
-        cube on `no_such_field` came back as a single row worth
-        49,989,556,885.52 — the total over all ten regions.
+        expanded = self.expand_expressions(app_handle, wanted)
+        faults = self.check_expressions(
+            app_handle, [expanded.get(text, text) for text in wanted])
+        with_modifier = [
+            text for text in wanted
+            if _SET_MODIFIER.search(expanded.get(text, text))
+        ]
+        recognised = self.fields_in_expressions(
+            app_handle, [expanded.get(text, text) for text in with_modifier]
+        ) if with_modifier else {}
+        return {
+            # Keyed by what the caller wrote, which is what it has to fix.
+            "expanded": expanded,
+            "faults": {text: faults[expanded.get(text, text)]
+                       for text in wanted if expanded.get(text, text) in faults},
+            "filter_fields": {text: recognised.get(expanded.get(text, text))
+                              for text in with_modifier},
+        }
+
+    def _validate_cube_inputs(
+        self, app_handle: int,
+        dimensions: List[Dict[str, Any]],
+        measures: List[Dict[str, Any]],
+        inspection: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Catch the mistakes Qlik answers with a number instead of an error.
+
+        A dimension on a field that does not exist is the archetype: Qlik
+        evaluates the name as an expression and the cube collapses to one
+        row holding the grand total. Measured: a cube on `no_such_field`
+        came back as a single row worth 49,989,556,885.52 — the total over
+        all ten regions.
+
+        `inspection` is what Engine already said about these expressions,
+        for a caller that asked about several queries at once. Without it
+        the expressions here are sent to Engine on their own.
         """
         warnings: List[str] = []
 
@@ -126,15 +169,10 @@ class EngineHypercubeMixin:
         if not every_text:
             return {"warnings": warnings}
 
-        expanded = self.expand_expressions(app_handle, every_text)
-        faults = self.check_expressions(
-            app_handle, [expanded.get(text, text) for text in every_text])
-        # Faults come back keyed by the expanded text; map them back to what
-        # the caller wrote, which is what it has to fix.
-        by_original = {
-            text: faults[expanded.get(text, text)]
-            for text in every_text if expanded.get(text, text) in faults
-        }
+        if inspection is None:
+            inspection = self.inspect_expressions(app_handle, every_text)
+        by_original = {text: inspection["faults"][text]
+                       for text in every_text if text in inspection["faults"]}
 
         broken = {
             text: fault["error"] for text, fault in by_original.items()
@@ -160,18 +198,11 @@ class EngineHypercubeMixin:
         # apply. Engine lists the modifier fields it recognised; an
         # expression that carries a modifier and yields none of them is
         # filtering on something this app does not have.
-        with_modifier = [
-            text for text in measure_texts
-            if _SET_MODIFIER_OPENER in expanded.get(text, text)
-        ]
+        with_modifier = [text for text in measure_texts
+                         if text in inspection["filter_fields"]]
         if with_modifier:
-            recognised = self.fields_in_expressions(
-                app_handle, [expanded.get(text, text) for text in with_modifier])
-            unread = [
-                text for text in with_modifier
-                if expanded.get(text, text) in recognised
-                and not recognised[expanded.get(text, text)]
-            ]
+            recognised = inspection["filter_fields"]
+            unread = [text for text in with_modifier if not recognised.get(text)]
             # What Engine did read is worth saying even when it read
             # something. It reports the modifier fields it recognised and
             # says nothing about the ones it did not, so a modifier naming
@@ -179,7 +210,7 @@ class EngineHypercubeMixin:
             # and the condition Qlik dropped is invisible unless the reply
             # names what survived.
             for text in with_modifier:
-                fields = recognised.get(expanded.get(text, text))
+                fields = recognised.get(text)
                 if fields:
                     warnings.append(
                         f"Set analysis in {text!r} filters on: "

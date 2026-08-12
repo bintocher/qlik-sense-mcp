@@ -23,8 +23,9 @@ class _Engine(QlikEngineAPI):
     ws_operation_timeout = 30.0
 
     def __init__(self, known=("Region", "Amount", "OrderDate", "Category"),
-                 rows=None, period_bounds=(40544, 40908)):
+                 rows=None, period_bounds=(40544, 40908), syntax_errors=None):
         self.known = set(known)
+        self.syntax_errors = syntax_errors or {}
         self.rows = rows if rows is not None else [["North", 10.0]]
         self.period_bounds = period_bounds
         self.batches = []
@@ -43,8 +44,10 @@ class _Engine(QlikEngineAPI):
         if method == "ExpandExpression":
             return {"qExpandedExpression": params[0]}
         if method == "CheckExpression":
-            missing = [w for w in self._names(params[0]) if w not in self.known]
-            return {"qErrorMsg": "", "qBadFieldNames": [
+            complaint = self.syntax_errors.get(params[0], "")
+            missing = [] if complaint else [
+                w for w in self._names(params[0]) if w not in self.known]
+            return {"qErrorMsg": complaint, "qBadFieldNames": [
                 {"qFrom": params[0].index(name), "qCount": len(name)}
                 for name in missing]}
         if method == "GetFieldsFromExpression":

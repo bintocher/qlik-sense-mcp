@@ -44,6 +44,13 @@ DEFAULT_QUERY_LIMIT = 100
 # same thing.
 FILTER_MARKER = "{filter}"
 
+# Queries one call may carry. The batch is sent to Engine before the first
+# reply is read and every query holds a session object until the batch
+# ends, so an unbounded list would hold the single shared socket, and the
+# memory behind it, for as long as it took. Twenty-five is far above any
+# real question and far below anything that hurts.
+MAX_QUERIES_PER_CALL = 25
+
 
 class EngineQueriesMixin:
     """Run typed queries, several at a time, over one socket."""
@@ -246,6 +253,22 @@ class EngineQueriesMixin:
         reason; the rest of the batch still answers.
         """
         started = time.monotonic()
+        if len(queries) > MAX_QUERIES_PER_CALL:
+            # Refused before anything is planned or opened: the whole batch
+            # goes to Engine before the first reply is read, and every
+            # query holds a session object until it ends.
+            return {
+                "error": (
+                    f"{len(queries)} queries in one call; the cap is "
+                    f"{MAX_QUERIES_PER_CALL}."
+                ),
+                "error_category": "limit_exceeded",
+                "hint": (
+                    f"Send up to {MAX_QUERIES_PER_CALL} at a time. They run "
+                    f"together, so a batch that size already costs the same "
+                    f"three round-trips as one query."
+                ),
+            }
         plans: List[Dict[str, Any]] = []
         for position, query in enumerate(queries):
             if not isinstance(query, dict):
@@ -262,21 +285,27 @@ class EngineQueriesMixin:
 
         runnable = [plan for plan in plans if not plan.get("error")]
 
-        # One validation for the whole request rather than one per query:
-        # the dimensions and measures of every query go to Engine in the
-        # same batch, so five queries cost the checks of one.
+        # Engine is asked about every expression in the batch at once —
+        # three pipelined calls whatever the batch size — and then each
+        # query is judged on its own expressions. Judging the batch as a
+        # whole would lose which query owns which mistake: one bad name
+        # would either refuse its neighbours or, with two mistakes of
+        # different kinds, let the second through unchecked.
         if runnable:
-            verdict = self._validate_cube_inputs(
-                app_handle,
-                [dim for plan in runnable for dim in plan["dimensions"]],
-                [measure for plan in runnable for measure in plan["measures"]],
-            )
-            if verdict.get("error"):
-                # Engine names the expression that failed, so the refusal
-                # lands on the query that wrote it rather than on the batch.
-                blamed = self._queries_named_in(verdict, runnable)
-                for plan in (blamed or runnable):
+            inspection = self.inspect_expressions(app_handle, [
+                text for plan in runnable
+                for text in ([str(d.get("field") or "") for d in plan["dimensions"]]
+                             + [str(m.get("expression") or "")
+                                for m in plan["measures"]])
+            ])
+            for plan in runnable:
+                verdict = self._validate_cube_inputs(
+                    app_handle, plan["dimensions"], plan["measures"],
+                    inspection=inspection)
+                if verdict.get("error"):
                     plan.update(verdict)
+                elif verdict.get("warnings"):
+                    plan.setdefault("warnings", []).extend(verdict["warnings"])
         runnable = [plan for plan in plans if not plan.get("error")]
 
         prepared = []
@@ -298,6 +327,34 @@ class EngineQueriesMixin:
             return {"results": [self._query_reply(p, None, None) for p in plans],
                     "seconds": round(time.monotonic() - started, 3)}
 
+        # From here on Engine holds objects for this batch, and they are
+        # released on every path out — including a transport failure part
+        # way through. A leak pins each result set in Engine memory for the
+        # rest of a session this server keeps open by design.
+        created_ids: List[str] = [shaped["object"]["qInfo"]["qId"]
+                                  for _, shaped in prepared]
+        try:
+            return self._run_prepared(app_handle, plans, prepared, started)
+        finally:
+            # getattr: a killed socket has nothing left to talk to, and an
+            # instance built without __init__ has no attribute to ask.
+            if created_ids and getattr(self, "ws", True) is not None:
+                try:
+                    self.send_requests_pipelined(
+                        [{"method": "DestroySessionObject", "params": [qid],
+                          "handle": app_handle} for qid in created_ids],
+                        raise_on_error=False,
+                        timeout=self.ws_operation_timeout,
+                    )
+                except Exception as exc:
+                    # Never turn a finished batch into a failure because the
+                    # cleanup did not go through.
+                    logger.warning("Releasing batch session objects failed: %s",
+                                   exc)
+
+    def _run_prepared(self, app_handle: int, plans: List[Dict[str, Any]],
+                      prepared: List[tuple], started: float) -> Dict[str, Any]:
+        """Create, read and answer, for the queries that survived planning."""
         # Batch one: create every session object, and evaluate every
         # control probe alongside them.
         creates = [
@@ -368,21 +425,6 @@ class EngineQueriesMixin:
             plan["cube"] = cube
             plan["shaped"] = shaped
 
-        # Batch three: release every object. A leak here would pin the
-        # result set in Engine memory for the rest of the session, which is
-        # long-lived by design.
-        if handles:
-            try:
-                self.send_requests_pipelined(
-                    [{"method": "DestroySessionObject",
-                      "params": [shaped["object"]["qInfo"]["qId"]],
-                      "handle": app_handle}
-                     for _, shaped, _ in handles],
-                    raise_on_error=False, timeout=self.ws_operation_timeout,
-                )
-            except Exception as exc:
-                logger.warning("Releasing batch session objects failed: %s", exc)
-
         results = [
             self._query_reply(plan, plan.get("cube"), plan.get("shaped"))
             for plan in plans
@@ -393,29 +435,6 @@ class EngineQueriesMixin:
             "queries_failed": len([r for r in results if r.get("error")]),
             "seconds": round(time.monotonic() - started, 3),
         }
-
-    @staticmethod
-    def _queries_named_in(verdict: Dict[str, Any],
-                          plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Which queries in the batch wrote the expressions Engine refused.
-
-        A refusal that names an expression belongs to whoever wrote it; the
-        rest of the batch has done nothing wrong and still answers.
-        """
-        blamed_texts = set(verdict.get("invalid_expressions") or {})
-        blamed_names = set(verdict.get("unknown_fields") or [])
-        if not blamed_texts and not blamed_names:
-            return []
-        blamed = []
-        for plan in plans:
-            texts = ({str(d.get("field") or "") for d in plan["dimensions"]}
-                     | {str(m.get("expression") or "") for m in plan["measures"]})
-            if texts & blamed_texts:
-                blamed.append(plan)
-                continue
-            if any(name in text for name in blamed_names for text in texts):
-                blamed.append(plan)
-        return blamed
 
     def _shape_cube(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Resolve limits and sorting, then build the object definition."""
@@ -428,9 +447,18 @@ class EngineQueriesMixin:
         n_cols = n_dims + len(measures)
         column_names = self._column_names(dimensions, measures)
 
+        # A limit the caller did not state defaults; one it stated wrongly
+        # is refused. Reading `limit=0` as "give me a hundred rows" answers
+        # a question nobody asked.
         limit = plan.get("limit")
-        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        if limit is None:
             limit = DEFAULT_QUERY_LIMIT
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            return {"error": f"limit={limit!r} is not a positive row count.",
+                    "error_category": "invalid_limit",
+                    "hint": (f"Pass an integer between 1 and "
+                             f"{self.HARD_MAX_ROWS}, or omit it for "
+                             f"{DEFAULT_QUERY_LIMIT}.")}
         limit = min(limit, self.HARD_MAX_ROWS)
         if n_cols and n_cols * limit > self.HARD_MAX_CELLS:
             limit = max(1, self.HARD_MAX_CELLS // n_cols)
@@ -520,6 +548,10 @@ class EngineQueriesMixin:
         for check in plan.get("period_check", []):
             if check.get("filter_applied") is False:
                 warnings.append(check["note"])
+        # What the checks said before the query ran — which fields a set
+        # modifier really filters on, for instance — belongs in the same
+        # place as what the result said afterwards.
+        warnings.extend(plan.get("warnings") or [])
 
         reply: Dict[str, Any] = {
             "id": plan["id"],

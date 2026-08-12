@@ -116,3 +116,108 @@ class TestImpossibleDates:
         plan = engine._plan_query(1, "app", _query(
             filters=[{"field": "OrderDate", "period": bound}]), 0)
         assert plan.get("error_category") != "invalid_period"
+
+
+class TestEachQueryIsJudgedOnItsOwn:
+    """Two mistakes of different kinds in one batch, and a name that is a
+    substring of a good one — the cases a batch-wide verdict gets wrong."""
+
+    def test_two_mistakes_of_different_kinds_both_land(self):
+        engine = _Engine(known=("Region", "Amount"),
+                         syntax_errors={"Sum([Amount]) AS t": "Garbage after"})
+        result = engine.run_queries(1, "app", [
+            _query(metrics=[], measures=[{"expression": "Sum([Amount]) AS t"}]),
+            _query(metrics=[{"field": "Nope", "agg": "sum"}]),
+            _query(),
+        ])
+        assert result["results"][0]["error_category"] == "invalid_expression"
+        assert result["results"][1]["error_category"] == "field_not_found"
+        assert "error" not in result["results"][2]
+        assert result["queries_run"] == 1
+
+    def test_a_good_name_containing_a_bad_one_still_runs(self):
+        """`NopeAmount` exists; `Nope` does not. Blaming by substring
+        refused the query that used the real field."""
+        engine = _Engine(known=("Region", "NopeAmount"))
+        result = engine.run_queries(1, "app", [
+            _query(metrics=[{"field": "Nope", "agg": "sum"}]),
+            _query(metrics=[{"field": "NopeAmount", "agg": "sum"}]),
+        ])
+        assert result["results"][0]["error_category"] == "field_not_found"
+        assert "error" not in result["results"][1]
+
+    def test_engine_is_still_asked_only_once_for_the_batch(self):
+        engine = _Engine()
+        engine.run_queries(1, "app", [_query() for _ in range(4)])
+        assert len([b for b in engine.batches if b[0] == "CheckExpression"]) == 1
+
+
+class TestBatchSize:
+    def test_a_batch_over_the_cap_is_refused_before_anything_opens(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_QUERIES_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(
+            1, "app", [_query() for _ in range(MAX_QUERIES_PER_CALL + 1)])
+        assert result["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_a_batch_at_the_cap_runs(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_QUERIES_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(
+            1, "app", [_query() for _ in range(MAX_QUERIES_PER_CALL)])
+        assert result["queries_run"] == MAX_QUERIES_PER_CALL
+
+
+class TestLimitIsNotGuessed:
+    @pytest.mark.parametrize("limit", [0, -1, True, "10", 2.5])
+    def test_a_limit_that_is_not_a_row_count_is_refused(self, limit):
+        engine = _Engine()
+        reply = engine.run_queries(
+            1, "app", [_query(limit=limit)])["results"][0]
+        assert reply["error_category"] == "invalid_limit"
+
+    def test_an_absent_limit_still_defaults(self):
+        from qlik_sense_mcp_server.engine.queries import DEFAULT_QUERY_LIMIT
+
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(), 0)
+        plan.pop("limit")
+        plan["limit"] = None
+        assert engine._shape_cube(plan)["limit"] == DEFAULT_QUERY_LIMIT
+
+
+class TestObjectsAreAlwaysReleased:
+    def test_a_transport_failure_mid_batch_still_releases(self):
+        """A leak pins each result set in Engine memory for the rest of a
+        session this server keeps open by design."""
+        class _Failing(_Engine):
+            def send_requests_pipelined(self, requests, raise_on_error=True,
+                                        timeout=None):
+                if requests[0]["method"] == "GetLayout":
+                    raise TimeoutError("WebSocket recv() timed out")
+                return super().send_requests_pipelined(
+                    requests, raise_on_error, timeout)
+
+        engine = _Failing()
+        with pytest.raises(TimeoutError):
+            engine.run_queries(1, "app", [_query(), _query()])
+        assert len(engine.destroyed) == 2
+
+    def test_nothing_is_sent_when_the_socket_is_gone(self):
+        class _Dead(_Engine):
+            ws = None
+
+            def send_requests_pipelined(self, requests, raise_on_error=True,
+                                        timeout=None):
+                if requests[0]["method"] == "GetLayout":
+                    raise TimeoutError("WebSocket recv() timed out")
+                return super().send_requests_pipelined(
+                    requests, raise_on_error, timeout)
+
+        engine = _Dead()
+        with pytest.raises(TimeoutError):
+            engine.run_queries(1, "app", [_query()])
+        assert engine.destroyed == []
