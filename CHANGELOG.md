@@ -8,6 +8,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
+- Validating a hypercube no longer asks Qlik about field names the cached
+  data model already lists — one round-trip less on almost every query,
+  measured as two pipelined batches becoming one. A name the cache does
+  not list is still verified against Engine, so an unknown field is still
+  refused and a system field is still accepted.
+- `get_app_details` switches to a `columns` + `rows` table once a model has
+  more than 60 fields, and skips reading sample values there. Narrow
+  models — the normal case — keep the readable per-field form.
+- `get_app_details` now says in its own description that `get_about` is
+  never a prerequisite and `get_apps` is only needed without a name.
+
 - Engine sessions are released about five seconds after the socket
   closes instead of lingering for the proxy's inactivity timeout. The
   WebSocket URL now carries a `ttl` segment, so restarting the server

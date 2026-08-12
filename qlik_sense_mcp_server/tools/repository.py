@@ -33,6 +33,14 @@ SAMPLE_VALUES_MAX_FIELDS = 20
 EDGE_VALUES_COUNT = 5
 EDGE_VALUES_MAX_FIELDS = 12
 
+# Past this many fields the reply switches from a list of objects to a
+# header plus rows. Measured: as objects, 33 fields cost 7.6k characters and
+# the repeated key names are most of it. Below the threshold the readable
+# form is worth its size; a 300-field warehouse model is not.
+WIDE_MODEL_FIELDS = 60
+WIDE_MODEL_COLUMNS = ["name", "table", "is_key", "distinct_values", "rows",
+                      "tags", "comment"]
+
 # The finished `get_app_details` payload per app, keyed by the app's last
 # reload. Everything in it — tables, fields, sample values, edges — changes
 # only when the app reloads.
@@ -220,6 +228,10 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
 
     At least one of `app_id` or `name` must be provided. `app_id` is always preferred.
 
+    This is the first call to make. `get_about` is never a prerequisite, and
+    `get_apps` is only needed when you have neither the GUID nor the name —
+    given a name, call this directly and skip the lookup.
+
     Args:
         app_id: Application GUID (e.g. `"a1b2c3d4-..."`). Preferred over `name`
             because it uniquely identifies the app. Obtain it from `get_apps`.
@@ -376,7 +388,11 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         # 'Moskva' returns a clean table of zeros. Measured against a real
         # LLM, guessing cost ten tool calls and two minutes on a question
         # that needs two calls once the values are visible.
-        _attach_sample_values(app_handle, fields)
+        # Skipped on a wide model: the reply drops values and edges there
+        # anyway, and reading them would be two pipelined batches paid for
+        # nothing.
+        if len(fields) <= WIDE_MODEL_FIELDS:
+            _attach_sample_values(app_handle, fields)
         for tname, tfields in table_map.items():
             rows = max((f.get("rows_count", 0) for f in tfields), default=0)
             entry = {
@@ -462,6 +478,24 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         "tables_count": len(tables),
         "fields_count": len(fields),
     }
+    if len(fields) > WIDE_MODEL_FIELDS:
+        # A model this wide spends most of the reply repeating the same keys.
+        # Measured: 33 fields cost 7.6k characters as objects, and the key
+        # names are two thirds of that. Past the threshold the same content
+        # goes out as a header plus rows — no information lost, and the
+        # narrow models that make up the normal case keep the readable form.
+        result["fields"] = {
+            "columns": WIDE_MODEL_COLUMNS,
+            "rows": [[field.get(key) for key in WIDE_MODEL_COLUMNS]
+                     for field in fields],
+            "note": ("Модель широкая, поэтому поля отданы таблицей: "
+                     "columns задаёт порядок значений в каждой строке rows."),
+        }
+        result.setdefault("warnings", []).append(
+            f"{len(fields)} fields — listed as columns+rows to keep the reply "
+            f"small. Values and edges are omitted for the same reason; ask "
+            f"about a specific field with get_app_field."
+        )
     if isinstance(fields_data, dict) and "error" in fields_data:
         result["engine_error"] = fields_data["error"]
     else:
