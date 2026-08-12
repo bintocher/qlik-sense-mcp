@@ -253,3 +253,42 @@ class TestCombining:
             {"field": "Region", "values": ["North"]},
         ])
         assert result["error_category"] == "empty_period"
+
+
+class TestFormMemoryExpires:
+    """A field's form follows how Qlik displays it, which a reload changes.
+
+    A form that selects nothing is measured again on the spot. One that
+    selects a wrong non-zero count would not be, so the memory expires
+    rather than lasting the life of a process built to be long-lived.
+    """
+
+    def test_a_stale_memory_is_measured_again(self, monkeypatch):
+        import qlik_sense_mcp_server.engine.filters as filters_module
+
+        engine = _Engine()
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        engine.asked.clear()
+        clock = [filters_module.time.monotonic()
+                 + engine.FILTER_FORM_TTL_SECONDS + 1]
+        monkeypatch.setattr(filters_module.time, "monotonic", lambda: clock[0])
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        assert len(engine.asked) > 1
+
+    def test_within_the_window_it_is_still_reused(self):
+        engine = _Engine()
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        engine.asked.clear()
+        engine.period_modifier(1, "app", "F", "2012", "2012")
+        assert len(engine.asked) == 1
+
+
+class TestImpossibleBounds:
+    @pytest.mark.parametrize("text", ["2024-02-30", "2024-13", "31.04.2024",
+                                      "2024-00", "0000-00-00"])
+    def test_a_date_that_does_not_exist_is_not_a_bound(self, text):
+        assert _parse_bound(text, upper=False) is None
+
+    @pytest.mark.parametrize("text", ["2024-02-29", "29.02.2024", "2024-12"])
+    def test_a_date_that_does_exist_is_read(self, text):
+        assert _parse_bound(text, upper=False) is not None

@@ -172,6 +172,22 @@ class EngineHypercubeMixin:
                 if expanded.get(text, text) in recognised
                 and not recognised[expanded.get(text, text)]
             ]
+            # What Engine did read is worth saying even when it read
+            # something. It reports the modifier fields it recognised and
+            # says nothing about the ones it did not, so a modifier naming
+            # two fields where only one exists comes back looking sound —
+            # and the condition Qlik dropped is invisible unless the reply
+            # names what survived.
+            for text in with_modifier:
+                fields = recognised.get(expanded.get(text, text))
+                if fields:
+                    warnings.append(
+                        f"Set analysis in {text!r} filters on: "
+                        + ", ".join(repr(f) for f in fields)
+                        + ". Any other field named in that modifier is not "
+                          "one this app has, and Qlik drops such a condition "
+                          "rather than reporting it."
+                    )
             if unread:
                 return {
                     "error": (

@@ -23,6 +23,7 @@ only where it agrees.
 import datetime
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -68,27 +69,31 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
     if not text:
         return None
 
-    match = _ISO_DAY.match(text)
-    if match:
-        year, month, day = (int(g) for g in match.groups())
-        return datetime.date(year, month, day)
-    match = _DOTTED_DAY.match(text)
-    if match:
-        day, month, year = (int(g) for g in match.groups())
-        return datetime.date(year, month, day)
-    match = _ISO_MONTH.match(text)
-    if match:
-        year, month = (int(g) for g in match.groups())
-        return (_last_day_of_month(year, month) if upper
-                else datetime.date(year, month, 1))
-    match = _YEAR.match(text)
-    if match:
-        year = int(match.group(1))
-        return (datetime.date(year, 12, 31) if upper
-                else datetime.date(year, 1, 1))
+    # A bound that looks like a date but is not one — 2024-02-30, month 13,
+    # 31.04 — is a bound this server cannot read, not an internal failure.
+    # Returning None sends it to the same refusal as "last tuesday", which
+    # names the forms that are accepted.
     try:
+        match = _ISO_DAY.match(text)
+        if match:
+            year, month, day = (int(g) for g in match.groups())
+            return datetime.date(year, month, day)
+        match = _DOTTED_DAY.match(text)
+        if match:
+            day, month, year = (int(g) for g in match.groups())
+            return datetime.date(year, month, day)
+        match = _ISO_MONTH.match(text)
+        if match:
+            year, month = (int(g) for g in match.groups())
+            return (_last_day_of_month(year, month) if upper
+                    else datetime.date(year, month, 1))
+        match = _YEAR.match(text)
+        if match:
+            year = int(match.group(1))
+            return (datetime.date(year, 12, 31) if upper
+                    else datetime.date(year, 1, 1))
         return _EPOCH + datetime.timedelta(days=int(float(text)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -106,14 +111,33 @@ def quote_value(value: Any) -> str:
 class EngineFiltersMixin:
     """Build set modifiers from plain descriptions, and prove they filter."""
 
-    # A field's working filter form does not change while the app stays
-    # loaded, so it is resolved once per field and reused.
-    def _filter_form_store(self) -> Dict[Tuple[str, str], str]:
+    # How long a measured filter form is reused. A field's form follows how
+    # Qlik displays its values, which a reload can change — a script that
+    # starts formatting a bare number as a date turns the cheap numeric
+    # form into the wrong one. A form that selects nothing is measured
+    # again on the spot, but one that selects a wrong non-zero count would
+    # not be, so the memory expires rather than lasting the life of a
+    # process that is deliberately long-lived.
+    FILTER_FORM_TTL_SECONDS = 600.0
+
+    def _filter_form_store(self) -> Dict[Tuple[str, str], Tuple[str, float]]:
         store = self.__dict__.get("_filter_forms")
         if store is None:
             store = {}
             self.__dict__["_filter_forms"] = store
         return store
+
+    def _remembered_form(self, app_id: str, field: str) -> Optional[str]:
+        entry = self._filter_form_store().get((app_id, field))
+        if not entry:
+            return None
+        form, measured_at = entry
+        if (time.monotonic() - measured_at) > self.FILTER_FORM_TTL_SECONDS:
+            return None
+        return form
+
+    def _remember_form(self, app_id: str, field: str, form: str) -> None:
+        self._filter_form_store()[(app_id, field)] = (form, time.monotonic())
 
     def forget_filter_forms(self, app_id: str = None) -> None:
         """Drop the remembered forms for one app, or for all of them."""
@@ -190,7 +214,7 @@ class EngineFiltersMixin:
         counts go out in one pipelined batch.
         """
         name = f"[{field}]"
-        remembered = self._filter_form_store().get((app_id, field))
+        remembered = self._remembered_form(app_id, field)
         candidates = self._period_forms(field, serial_from, serial_to)
         if remembered:
             # The form was measured against the reference once and holds for
@@ -242,7 +266,7 @@ class EngineFiltersMixin:
         for (label, modifier), value in zip(candidates, values[1:]):
             number = value.get("number")
             if number is not None and int(number) == reference:
-                self._filter_form_store()[(app_id, field)] = label
+                self._remember_form(app_id, field, label)
                 return {"modifier": modifier, "form": label,
                         "matched": reference}
 

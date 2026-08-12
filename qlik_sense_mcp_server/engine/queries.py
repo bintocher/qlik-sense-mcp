@@ -39,6 +39,11 @@ AGGREGATIONS = {
 # and a long tail of rows costs the reader more than it tells them.
 DEFAULT_QUERY_LIMIT = 100
 
+# Where a described filter goes inside an expression the caller wrote. The
+# same marker `engine_create_hypercube` uses, so the two tools ask for the
+# same thing.
+FILTER_MARKER = "{filter}"
+
 
 class EngineQueriesMixin:
     """Run typed queries, several at a time, over one socket."""
@@ -134,7 +139,11 @@ class EngineQueriesMixin:
             })
 
         # A caller that needs something this vocabulary cannot say writes
-        # the expression itself; the filter is still applied for it.
+        # the expression itself. A filter cannot be folded into an arbitrary
+        # expression on its behalf — a set modifier narrows the aggregation
+        # it sits in, and `Sum(A)/Count(B)` has two of them — so the
+        # expression marks where it goes, exactly as in
+        # engine_create_hypercube.
         for measure in query.get("measures") or []:
             if isinstance(measure, str):
                 measure = {"expression": measure}
@@ -143,6 +152,25 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"Measure {measure!r} carries no expression."),
                     "error_category": "invalid_argument"}
+            if modifier:
+                if FILTER_MARKER not in expression:
+                    return [], {"id": query_id, "error": (
+                        f"Measure {expression!r} is written by hand and this "
+                        f"query has filters, but the expression does not say "
+                        f"where the filter goes."),
+                        "error_category": "invalid_argument",
+                        "next_actions": [
+                            "write the marker inside the aggregation the "
+                            "filter narrows: \"Sum({filter} Amount)\"",
+                            "or state the measure as a metric: "
+                            '{"field": "Amount", "agg": "sum"}',
+                        ],
+                        "hint": (
+                            "Without this the aggregation would run over "
+                            "every row while the reply said the period had "
+                            "been applied."
+                        )}
+                expression = expression.replace(FILTER_MARKER, modifier)
             measures.append({
                 "expression": expression,
                 "label": str(measure.get("label") or expression),
@@ -234,18 +262,34 @@ class EngineQueriesMixin:
 
         runnable = [plan for plan in plans if not plan.get("error")]
 
-        # One validation batch for the whole request: every expression of
-        # every query goes to Engine together.
-        for plan in runnable:
+        # One validation for the whole request rather than one per query:
+        # the dimensions and measures of every query go to Engine in the
+        # same batch, so five queries cost the checks of one.
+        if runnable:
             verdict = self._validate_cube_inputs(
-                app_handle, plan["dimensions"], plan["measures"])
+                app_handle,
+                [dim for plan in runnable for dim in plan["dimensions"]],
+                [measure for plan in runnable for measure in plan["measures"]],
+            )
             if verdict.get("error"):
-                plan.update(verdict)
+                # Engine names the expression that failed, so the refusal
+                # lands on the query that wrote it rather than on the batch.
+                blamed = self._queries_named_in(verdict, runnable)
+                for plan in (blamed or runnable):
+                    plan.update(verdict)
         runnable = [plan for plan in plans if not plan.get("error")]
 
         prepared = []
         for plan in runnable:
-            shaped = self._shape_cube(plan)
+            try:
+                shaped = self._shape_cube(plan)
+            except Exception as exc:
+                # One malformed argument must not take the batch down —
+                # that is the whole promise of running them together.
+                logger.debug("Shaping query %s failed: %s", plan.get("id"), exc)
+                plan.update({"error": str(exc),
+                             "error_category": "invalid_argument"})
+                continue
             if shaped.get("error"):
                 plan.update(shaped)
                 continue
@@ -349,6 +393,29 @@ class EngineQueriesMixin:
             "queries_failed": len([r for r in results if r.get("error")]),
             "seconds": round(time.monotonic() - started, 3),
         }
+
+    @staticmethod
+    def _queries_named_in(verdict: Dict[str, Any],
+                          plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Which queries in the batch wrote the expressions Engine refused.
+
+        A refusal that names an expression belongs to whoever wrote it; the
+        rest of the batch has done nothing wrong and still answers.
+        """
+        blamed_texts = set(verdict.get("invalid_expressions") or {})
+        blamed_names = set(verdict.get("unknown_fields") or [])
+        if not blamed_texts and not blamed_names:
+            return []
+        blamed = []
+        for plan in plans:
+            texts = ({str(d.get("field") or "") for d in plan["dimensions"]}
+                     | {str(m.get("expression") or "") for m in plan["measures"]})
+            if texts & blamed_texts:
+                blamed.append(plan)
+                continue
+            if any(name in text for name in blamed_names for text in texts):
+                blamed.append(plan)
+        return blamed
 
     def _shape_cube(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         """Resolve limits and sorting, then build the object definition."""

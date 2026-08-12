@@ -131,6 +131,14 @@ class QlikRepositoryAPI:
                 # The ordinary deadline is right for a working server and
                 # wrong for a waking one, so the first timeout buys one
                 # retry with room to breathe rather than failing the call.
+                #
+                # Reading only. A timeout says nothing about whether the
+                # server acted: a POST that created a task and then timed
+                # out while answering would be sent again and create a
+                # second one. Those report the timeout instead, which the
+                # caller can resolve by looking at what exists.
+                if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+                    raise
                 logger.info(
                     "QRS did not answer %s within %.0fs, retrying once with "
                     "%.0fs", endpoint, DEFAULT_HTTP_TIMEOUT,
