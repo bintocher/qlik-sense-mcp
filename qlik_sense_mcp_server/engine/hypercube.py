@@ -53,16 +53,18 @@ class EngineHypercubeMixin:
         happy path has no reason to pay for.
         """
         try:
-            # Served from the per-app cache when it is warm: this runs on
-            # the error path, where a second model read would add latency
-            # to a reply the caller is already unhappy about.
-            read_model = getattr(self, "cached_fields", None)
-            # getattr: instances that skip __init__ have no cached app id,
-            # and an AttributeError here would silently cost the caller its
-            # "did you mean" suggestions.
+            # Whatever model has already been read, without reading one and
+            # without writing one back. This runs on the error path, where
+            # a suggestion is worth having but not worth a round-trip — and
+            # a model stored from here would carry no reload stamp, which
+            # would then make `get_app_details` reread the model it had.
+            # getattr: instances that skip __init__ have neither the cache
+            # nor a cached app id, and an AttributeError here would
+            # silently cost the caller its "did you mean" suggestions.
+            store = getattr(self, "_schema_store", None)
             app_id = getattr(self, "_cached_app_id", "") or ""
-            model = (read_model(app_handle, app_id, None)
-                     if read_model else self.get_fields(app_handle))
+            entry = store().get(app_id) if store and app_id else None
+            model = entry["model"] if entry else self.get_fields(app_handle)
         except Exception as exc:
             logger.debug("Could not list fields for a suggestion: %s", exc)
             return []
