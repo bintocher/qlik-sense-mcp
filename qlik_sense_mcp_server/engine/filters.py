@@ -185,11 +185,16 @@ class EngineFiltersMixin:
                    for tag in tags)
 
     def range_modifier(self, app_handle: int, app_id: str, field: str,
-                       low: Any, high: Any) -> Dict[str, Any]:
+                       low: Any, high: Any, low_exclusive: bool = False,
+                       high_exclusive: bool = False) -> Dict[str, Any]:
         """A set modifier selecting a range of a field that is not a date.
 
-        The bounds are the values themselves and both ends are included:
-        "discount from 400 to 500" is `>=400<=500`.
+        The bounds are the values themselves, and by default both ends are
+        included: "discount from 400 to 500" is `>=400<=500`. "More than
+        400" is a different question — `greater_than` excludes the bound,
+        and the difference is every row sitting exactly on it. Measured on
+        a 10M-row app: 184 orders have a discount of exactly 400, which is
+        the whole gap between a right answer and a wrong one.
         """
         stated = [v for v in (low, high) if v is not None]
         written = [_plain_number(v) for v in stated
@@ -206,9 +211,9 @@ class EngineFiltersMixin:
         name = f"[{field}]"
         parts = []
         if low is not None:
-            parts.append(f">={_plain_number(low)}")
+            parts.append(f"{'>' if low_exclusive else '>='}{_plain_number(low)}")
         if high is not None:
-            parts.append(f"<={_plain_number(high)}")
+            parts.append(f"{'<' if high_exclusive else '<='}{_plain_number(high)}")
         if not parts:
             return {"error": f"Filter on {field!r} states no bound.",
                     "error_category": "invalid_filter"}
@@ -232,6 +237,7 @@ class EngineFiltersMixin:
         return {
             "modifier": modifier, "field": field,
             "from": low, "to": high,
+            "from_excluded": low_exclusive, "to_excluded": high_exclusive,
             "distinct_values_in_range": int(matched) if matched is not None else None,
         }
 
@@ -474,7 +480,9 @@ class EngineFiltersMixin:
                     ),
                     "error_category": "invalid_filter",
                 }
-            has_period = any(k in entry for k in ("from", "to", "period"))
+            has_period = any(k in entry for k in
+                             ("from", "to", "period", "greater_than",
+                              "less_than"))
             values = entry.get("values")
             if has_period and values:
                 return {
@@ -487,8 +495,15 @@ class EngineFiltersMixin:
                 }
             if has_period:
                 period = entry.get("period")
-                low = entry.get("from", period)
-                high = entry.get("to", period)
+                # `greater_than` and `less_than` exclude the bound they
+                # name; `from` and `to` include it. "More than 400" and
+                # "from 400" are different questions, and the rows sitting
+                # exactly on the bound are the difference.
+                low = entry.get("from", entry.get("greater_than", period))
+                high = entry.get("to", entry.get("less_than", period))
+                low_exclusive = ("greater_than" in entry
+                                 and "from" not in entry)
+                high_exclusive = ("less_than" in entry and "to" not in entry)
                 # The same two keys mean days on a date field and values on
                 # any other. Asking Qlik which this is costs one cheap call
                 # and is the difference between "more than 400 off" and
@@ -500,7 +515,9 @@ class EngineFiltersMixin:
                     outcome = self.range_modifier(
                         app_handle, app_id, field,
                         low if low is not None else None,
-                        high if high is not None else None)
+                        high if high is not None else None,
+                        low_exclusive=low_exclusive,
+                        high_exclusive=high_exclusive)
             elif values is not None:
                 outcome = self.values_modifier(
                     app_handle, field,

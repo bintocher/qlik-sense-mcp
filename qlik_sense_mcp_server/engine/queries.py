@@ -263,7 +263,8 @@ class EngineQueriesMixin:
                 "expected_to": applied["to"],
                 "serial_from": low_bound,
                 "serial_to_exclusive": high_bound,
-                "inclusive_upper": not is_period,
+                "inclusive_upper": not is_period and not applied.get("to_excluded"),
+                "exclusive_lower": bool(applied.get("from_excluded")),
                 "earliest": f"=Text(Min({inner}))",
                 "latest": f"=Text(Max({inner}))",
                 "earliest_number": f"=Num(Min({inner}))",
@@ -301,7 +302,8 @@ class EngineQueriesMixin:
         upper = probe.get("serial_to_exclusive")
         outside = False
         if lower is not None:
-            outside = outside or low < lower
+            outside = outside or (low <= lower if probe.get("exclusive_lower")
+                                  else low < lower)
         if upper is not None:
             # A period's upper bound is the next day and excludes it; a
             # numeric range includes the bound the caller named.

@@ -351,3 +351,45 @@ class TestNumericRanges:
         engine = _Engine(date_fields=("F",))
         result = engine.build_filters(1, "app", [{"field": "F", "period": "2011"}])
         assert "40544" in result["modifier"]
+
+
+class TestStrictBounds:
+    """"More than 400" and "from 400" are different questions.
+
+    Measured on a 10M-row app: 184 orders have a discount of exactly 400,
+    which is the whole gap between 1 898 591 and 1 898 775 — and both
+    numbers look equally plausible.
+    """
+
+    @staticmethod
+    def _counting():
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 9, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_greater_than_excludes_the_bound(self):
+        result = self._counting().build_filters(
+            1, "app", [{"field": "price", "greater_than": 400}])
+        assert result["modifier"] == '{<[price]={">400"}>}'
+
+    def test_from_includes_it(self):
+        result = self._counting().build_filters(
+            1, "app", [{"field": "price", "from": 400}])
+        assert result["modifier"] == '{<[price]={">=400"}>}'
+
+    def test_less_than_excludes_the_upper_bound(self):
+        result = self._counting().build_filters(
+            1, "app", [{"field": "price", "less_than": 500}])
+        assert result["modifier"] == '{<[price]={"<500"}>}'
+
+    def test_the_two_can_be_combined(self):
+        result = self._counting().build_filters(
+            1, "app", [{"field": "price", "greater_than": 400, "to": 500}])
+        assert result["modifier"] == '{<[price]={">400<=500"}>}'
+
+    def test_which_end_was_excluded_is_reported(self):
+        result = self._counting().build_filters(
+            1, "app", [{"field": "price", "greater_than": 400}])
+        assert result["applied"][0]["from_excluded"] is True

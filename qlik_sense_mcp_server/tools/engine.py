@@ -259,8 +259,12 @@ def engine_query(
             2024-01 for a whole month, 2024 for a whole year, or a Qlik
             serial number — and on any other field they are the values
             themselves, so {"field": "Discount", "from": 400} is a
-            discount over 400. `{"field": "OrderDate", "period": "2024"}`
-            is the whole year in one key. Filters combine with AND.
+            discount of 400 or more. For a bound that excludes itself use
+            `greater_than` / `less_than`: "more than 400" is
+            {"field": "Discount", "greater_than": 400}, and the difference
+            between the two is every row sitting exactly on 400.
+            `{"field": "OrderDate", "period": "2024"}` is the whole year in
+            one key. Filters combine with AND.
             A filter that selects nothing is refused with what the field
             does hold, rather than answered with a zero.
         sort_by: a metric label or a grouping field. Set it whenever
