@@ -232,6 +232,132 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
 @mcp.tool()
 @_timed
 @_engine_serialised
+def engine_query(
+    app_id: str,
+    queries: Optional[List[Dict[str, Any]]] = None,
+    group_by: Optional[List[str]] = None,
+    metrics: Optional[List[Dict[str, Any]]] = None,
+    filters: Optional[List[Dict[str, Any]]] = None,
+    sort_by: Optional[str] = None,
+    sort_order: str = "desc",
+    limit: int = 100,
+) -> str:
+    """
+    Answer a question about an app's data: group by fields, aggregate
+    fields, filter by period or by value. The server writes the Qlik
+    expressions.
+
+    WHEN TO USE
+        Any question of the form "how much / how many, by what, for when".
+        This is the first tool to reach for once `get_app_details` has
+        shown which fields exist.
+
+        Ask several unrelated things at once. Every query in `queries` is
+        independent — its own grouping, its own measures, its own filters —
+        and the whole list shares three round-trips instead of three per
+        query:
+
+            {"app_id": "...",
+             "queries": [
+               {"id": "by_region",
+                "group_by": ["Region"],
+                "metrics": [{"field": "Amount", "agg": "sum"}],
+                "sort_by": "sum_Amount", "limit": 20},
+               {"id": "by_category",
+                "group_by": ["Category"],
+                "metrics": [{"field": "Amount", "agg": "sum"},
+                            {"field": "OrderId", "agg": "count_distinct"}]},
+               {"id": "yearly",
+                "group_by": ["Year"],
+                "metrics": [{"field": "Amount", "agg": "sum"}],
+                "filters": [{"field": "OrderDate", "from": "2023", "to": "2025"}]}
+             ]}
+
+        There is no cap on how many. Plan the whole question in one call
+        rather than discovering it one round-trip at a time.
+
+    WHEN NOT TO USE
+        A calculation this vocabulary cannot state — a nested aggregation,
+        `Aggr()`, `FirstSortedValue`, set analysis with P()/E(), a
+        comparison of two periods inside one column. Write the expression
+        yourself with `engine_create_hypercube`; `filters` works there too.
+
+    ARGUMENTS
+        app_id: application GUID.
+        group_by: field names to group by. Omit for a single total row.
+        metrics: what to aggregate, as
+            {"field": "Amount", "agg": "sum", "label": "Revenue"}.
+            `agg` is one of sum, count, count_distinct, avg, min, max,
+            median, stdev. `label` is optional and defaults to
+            `<agg>_<field>`; it names the column and is what `sort_by`
+            takes.
+        filters: what to narrow to. Two shapes:
+            {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
+            {"field": "Region", "values": ["North", "South"]}
+            A period bound may be a day (2024-01-31 or 31.01.2024), a month
+            (2024-01), a year (2024) or a Qlik serial number. `from` and
+            `to` include both ends. `{"field": "OrderDate", "period":
+            "2024"}` is the whole year in one key. Filters combine with AND.
+        sort_by: a metric label or a grouping field. Set it whenever
+            `limit` might cut the result, otherwise the rows that come back
+            are arbitrary rather than the largest.
+        sort_order: "desc" (default) or "asc".
+        limit: rows per query, default 100, cap 5000.
+        queries: a list of whole queries, each with the keys above plus an
+            optional "id". Use it for several independent questions at
+            once. When present, the single-query arguments are ignored.
+
+    RETURNS
+        `results`, one entry per query, each with `id`, `columns`, `rows`
+        (numbers as numbers, dates as the text Qlik displays), `total_rows`,
+        `grand_total` across all groups, and `sorted_by`.
+        `filters_applied` states what each filter resolved to.
+        `period_check` gives the earliest and latest value of each filtered
+        date field inside the result, so the period is verifiable from the
+        answer itself.
+        A query that fails carries `error` and `error_category`; the others
+        in the batch still answer.
+
+    DOES NOT RETURN
+        Raw Qlik layout, per-cell state, or the expressions it wrote.
+        Row-level records — every reply is aggregated.
+
+    A filter that selects nothing is refused before the query runs, and a
+    value the field does not hold is answered with what the field holds
+    instead. Qlik itself reports neither: it returns 0 for the first and
+    the unfiltered total for the second.
+    """
+    e = _check()
+    if e:
+        return e
+    if queries is None:
+        queries = [{
+            "group_by": group_by or [],
+            "metrics": metrics or [],
+            "filters": filters or [],
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "limit": limit,
+        }]
+    if not isinstance(queries, list) or not queries:
+        return _err(
+            "queries must be a non-empty list of query objects",
+            error_category="invalid_argument",
+            hint='One query: {"group_by": ["Region"], "metrics": '
+                 '[{"field": "Amount", "agg": "sum"}]}.',
+        )
+    try:
+        app_handle = context.engine_api.ensure_app(app_id, no_data=False)
+        return _ok(context.engine_api.run_queries(app_handle, app_id, queries))
+    except Exception as ex:
+        logger.exception("engine_query failed")
+        return _err(str(ex) or repr(ex), error_type=type(ex).__name__,
+                    app_id=app_id)
+
+
+@mcp.tool()
+@_timed
+@_engine_serialised
 def engine_create_hypercube(
     app_id: str,
     dimensions: Optional[List[Dict[str, Any]]] = None,
@@ -244,179 +370,75 @@ def engine_create_hypercube(
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
     offset: int = 0,
+    filters: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
-    Run a grouped aggregation against a Qlik app and return the rows.
-    This is the MAIN data-analysis tool. It is the Qlik equivalent of:
+    Run a grouped aggregation written as Qlik expressions.
 
-        SELECT <dimensions>, <measures>
-        FROM <app>
-        GROUP BY <dimensions>
-        ORDER BY <sort_by> <sort_order>
-        LIMIT <limit>
+    WHEN TO USE
+        A calculation `engine_query` cannot state: a nested aggregation,
+        `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, two periods
+        compared inside one column, a calculated dimension.
 
-    `dimensions` are the GROUP BY columns, `measures` are the aggregates,
-    `sort_by` + `sort_order` are the ORDER BY, and `limit` is the LIMIT.
+    WHEN NOT TO USE
+        A plain "how much by what, for when". `engine_query` states that
+        without any expression, writes the set analysis itself and returns
+        the control values that show the filter applied. Reach for it
+        first; come here when it cannot say what you need.
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 1 — TOP-N (the most common request)
-    ────────────────────────────────────────────────────────────────────
-    "Give me the 10 clients with the highest GGR":
+    THE SHAPE
+        `dimensions` group, `measures` aggregate, `sort_by` and
+        `sort_order` order, `limit` cuts:
 
-        {
-          "app_id": "a1b2c3d4-1111-2222-3333-444455556666",
-          "dimensions": [{"field": "clientid"}],
-          "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
-          "sort_by": "GGR",
-          "sort_order": "desc",
-          "limit": 10
-        }
+            {"app_id": "...",
+             "dimensions": [{"field": "clientid"}],
+             "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
+             "sort_by": "GGR", "sort_order": "desc", "limit": 10}
 
-    Returns (shortened):
+        Omit `dimensions` for a single total row.
 
-        {
-          "tool_call_seconds": 4.1,
-          "columns": ["clientid", "GGR"],
-          "rows": [["1042", 918450.5], ["8871", 764300.0]],
-          "total_rows": 5417612,
-          "returned_rows": 10,
-          "sorted_by": "GGR",
-          "sort_order": "desc",
-          "grand_total": [95552568044.93],
-          "timings": {"open_app_seconds": 0.01, "get_layout_seconds": 3.9}
-        }
+    FILTERING
+        Two ways, and the first is safer.
 
-    `total_rows` is how many groups exist on the server; `returned_rows`
-    is how many came back. For a ranked query that difference is normal
-    and expected — you asked for the top 10 of 5.4 million.
+        Describe the filter and mark where it belongs. The server writes
+        the set analysis, checks that it selects something, and reports
+        what it resolved to:
 
-    For the BOTTOM 10 use `"sort_order": "asc"` (add
-    `"suppress_zero": true` to skip groups whose measure is 0).
+            {"measures": [{"expression": "Sum({filter} Amount)",
+                           "label": "Revenue"}],
+             "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 2 — a single total, no grouping
-    ────────────────────────────────────────────────────────────────────
-    "What is the total GGR and the loaded date range?":
+        The marker `{filter}` is required with `filters`, because a set
+        modifier narrows the aggregation it sits in and only the author of
+        the expression knows which one that is.
 
-        {
-          "app_id": "...",
-          "measures": [
-            {"expression": "Sum(ggr)",       "label": "GGR"},
-            {"expression": "Min(OrderDate)", "label": "FirstDate"},
-            {"expression": "Max(OrderDate)", "label": "LastDate"}
-          ],
-          "limit": 1
-        }
+        Or write the set analysis yourself:
 
-    Omit `dimensions` entirely for a grand-total row. This is the fast,
-    correct way to learn an app's loaded period — never use
-    `get_app_field_statistics` on a date field for that.
+            Sum({<[Year]={2024}>} Amount)
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 3 — filtered breakdown (set analysis)
-    ────────────────────────────────────────────────────────────────────
-    "Revenue by region for 2026 only, biggest first":
+        Quoting decides the meaning and a wrong choice returns 0 rather
+        than an error: 'single' is an exact value, "double" is a search
+        where comparisons and wildcards work. A range is one string with
+        no spaces: {">=100<200"}.
 
-        {
-          "app_id": "...",
-          "dimensions": [{"field": "Region"}],
-          "measures": [
-            {"expression": "Sum({<[Year]={2026}>}Amount)", "label": "Revenue2026"}
-          ],
-          "sort_by": "Revenue2026",
-          "sort_order": "desc",
-          "limit": 20
-        }
+        Comparison inside a modifier runs against the text Qlik displays
+        for a value. On a date field displayed as `01.01.2024`, a serial
+        number range returns 0; on one displayed as `45292`, it works.
+        Stating the period as `filters` avoids the question — the server
+        measures which form this field answers to.
 
-    ────────────────────────────────────────────────────────────────────
-    HOW TO GET IT RIGHT (and fast)
-    ────────────────────────────────────────────────────────────────────
-    1. Call `get_app_details` FIRST. Field names are case-sensitive and
-       must exist in the data model. It also gives you `distinct_values`
-       per field, which tells you how many rows your query can produce.
-
-    2. FILTER INSIDE MEASURES WITH SET ANALYSIS, NEVER WITH `If()`.
-       `If()` scans every row of the fact table; set analysis is an
-       index lookup done before aggregation. On a 100M-row table that is
-       the difference between minutes and milliseconds.
-           BAD:  Sum(If(Year=2026, Amount))
-           GOOD: Sum({<[Year]={2026}>}Amount)
-       Quick reference (substitute real field names and values):
-         numeric field   {<[Year]={2026}>}
-         text field      {<[Region]={'North','South'}>}
-         wildcard        {<[Region]={"*ampton*"}>}
-         two fields AND  {<[Year]={2026},[Region]={'North'}>}
-         ignore filters  {1<[Region]={'North'}>}
-         ever matched    {<[Client]=P({<[Flag]={1}>}[Client])>}
-         never matched   {<[Client]=E({<[Flag]={1}>}[Client])>}
-
-       Quoting decides the meaning, and getting it wrong returns 0
-       rather than an error:
-         'single'  literal, case-sensitive, exact value
-         "double"  search: wildcards, case-insensitive, comparisons
-       Comparison operators only work inside double quotes, and a range
-       is ONE string with NO SPACES:
-         GOOD: {<[Score]={">=100<200"}>}
-         BAD:  {<[Score]={'>=100'}>}      literal, matches nothing
-         BAD:  {<[Score]={">=100 <200"}>} parses, matches nothing
-
-    2a. DATES ARE COMPARED AS THE TEXT QLIK DISPLAYS, not as numbers.
-       Serial numbers and mismatched formats return 0 silently. Read the
-       `sample` values a date field carries in `get_app_details` — that
-       is the format to match. Safest forms, in order of preference:
-         GOOD: {<[Year]={2026}>}                    calendar field
-         GOOD: {<[OrderDate]={"=Year([OrderDate])=2026"}>}
-         GOOD: {<[OrderDate]={">=$(=Date('2026-01-01','DD.MM.YYYY'))"}>}
-         BAD:  {<[OrderDate]={">=45658<=46022"}>}   serial numbers
-         BAD:  {<[OrderDate]={"2026*"}>}            unless the display
-                                                    format starts with
-                                                    the year
-
-    3. A DIMENSION `field` MUST BE A PLAIN FIELD NAME — never an
-       expression. `{"field": "=Year(OrderDate)"}` is evaluated for
-       every row of the fact table and will time out. If you need
-       monthly buckets, look for an existing calendar field in
-       `get_app_details`; if there is none, group by the raw date and
-       aggregate the handful of returned rows yourself.
-
-    4. To rank by an aggregate, use `sort_by` — do NOT hand-roll
-       `qSortByExpression` in the dimension. `sort_by` orders by the
-       measure column that was already computed, while
-       `qSortByExpression` makes the Engine compute the same aggregate a
-       SECOND time just for ordering (measured: 66s → 286s on a 91M-row
-       table, and it can silently return a wrong order).
-
-    5. If a call is slow, read `timings` in the response. It splits the
-       time into `open_app_seconds` (loading the app into Engine memory —
-       only the first call against an app pays this) and
-       `get_layout_seconds` (the actual computation). A large
-       `get_layout_seconds` means the query itself is too heavy: add set
-       analysis, drop a dimension, or lower `limit`.
-
-       A well-formed query answers in seconds: grouping by a field that
-       lives in the fact table returns in well under a second even on
-       91M rows. Tens of seconds means the grouping field sits on the far
-       side of a large link table — prefer a dimension closer to the
-       facts, or filter the period with set analysis.
-
-    ────────────────────────────────────────────────────────────────────
-    SESSION LIMIT — NEVER RUN THESE CALLS IN PARALLEL
-    ────────────────────────────────────────────────────────────────────
-    Qlik Sense allows a maximum of **5 concurrent sessions per user
-    identity**, and going over that can get the account LOCKED. This is a
-    Qlik platform limit — no MCP setting can raise it.
-
-    This server deliberately funnels every tool call through ONE cached
-    Engine session, so a whole analysis costs exactly one session. Keep
-    it that way:
-      - issue hypercube calls ONE AT A TIME, never fan them out
-        concurrently to "speed things up" — they are serialised over a
-        single WebSocket anyway, so parallelism buys nothing and risks
-        the lockout;
-      - do not start a second MCP process with the same credentials, and
-        do not run two editors against the same token side by side.
-    When a query is slow, make the query cheaper (see point 5) instead of
-    launching more of them.
+    PERFORMANCE
+        Filter inside the aggregation rather than with `If()`: set
+        analysis is an index lookup before aggregation, `If()` scans every
+        row of the fact table.
+        A dimension `field` should be a plain field name. An expression
+        there is evaluated per row of the fact table.
+        Rank with `sort_by`, not with `qSortByExpression` in the
+        dimension: measured on a 91M-row table, the latter took 286s
+        against 66s for the same ranking.
+        Read `timings` when a call is slow. `open_app_seconds` is loading
+        the app into memory, paid once per app; `get_layout_seconds` is
+        the computation itself.
 
     Args:
         app_id: Application GUID. Required. From `get_apps`.
@@ -469,35 +491,47 @@ def engine_create_hypercube(
             (per-cell `qElemNumber`/`qState`, `qDimensionInfo`,
             `qMeasureInfo`). Default False, because it costs several
             times more tokens than `rows` and is rarely needed.
-        max_rows: Deprecated alias for `limit`, kept so older callers
-            keep working. If both are given, `max_rows` wins.
+        max_rows: Alias for `limit`. If both are given, `max_rows` wins.
+        filters: Filters described rather than written, applied wherever a
+            measure carries the `{filter}` marker. Same shapes as
+            `engine_query`: `{"field": "OrderDate", "from": "2024-01-01",
+            "to": "2024-12-31"}` or `{"field": "Region", "values":
+            ["North"]}`.
 
     Returns:
-        JSON with:
           - `columns`: column names, in row order.
-          - `rows`: the data as plain arrays of values — numbers stay
-            numbers, text stays text. Read this, not `hypercube_data`.
+          - `rows`: values as data — numbers as numbers, dates as the text
+            Qlik displays for them, which is the same writing every other
+            reply about that field uses.
           - `total_rows`: how many groups exist on the server.
           - `returned_rows`: how many rows are in `rows`.
           - `sorted_by` / `sort_order`: the sort actually applied
             (`null` when unsorted).
-          - `grand_total`: totals across ALL groups, per measure —
-            correct even when the rows are truncated.
-          - `truncation_warning`: non-null when `total_rows >
-            returned_rows`. For an unsorted query this means the rows are
-            arbitrary — add `sort_by` or narrow the query.
-          - `timings`: seconds per step (see point 5 above).
+          - `grand_total`: totals across all groups, per measure — correct
+            even when the rows are truncated.
+          - `truncation_warning`: set when `total_rows > returned_rows`.
+            For an unsorted query the rows are arbitrary; add `sort_by`.
+          - `filters_applied`: what each described filter resolved to.
+          - `timings`: seconds per step.
 
-    Errors return `error`, `error_category` and an actionable `hint`:
-        `invalid_sort` — `sort_by` matched no column; the response lists
-            `available_columns`.
-        `invalid_limit` — `limit` was not a positive integer.
-        `limit_exceeded` — limit above 5000.
-        `cell_cap_exceeded` — columns * limit above 9900; the hint gives
-            a concrete smaller limit.
-        `socket_timeout` — the query is genuinely too heavy; the hint
-            lists what to cut, in order of impact.
-        `engine_api_error` — bad expression or unknown field name.
+    Does not return:
+        Row-level records, or the Qlik layout unless
+        `include_raw_layout=true`.
+
+    Errors carry `error`, `error_category` and the fix:
+        `invalid_expression` — Qlik's own parser rejected an expression;
+            its message is quoted.
+        `field_not_found` — a name the data model does not have, in a
+            dimension, a measure or a set modifier; `did_you_mean` lists
+            near matches.
+        `invalid_sort` — `sort_by` matched no column; `available_columns`
+            lists the valid ones.
+        `invalid_limit` / `limit_exceeded` / `cell_cap_exceeded` — the
+            reply names a limit that fits.
+        `empty_period` / `value_not_found` — a described filter selects
+            nothing; the reply says what the field holds.
+        `socket_timeout` — the query is too heavy; the hint lists what to
+            cut, in order of impact.
     """
     import traceback as _tb
     e = _check()
@@ -523,6 +557,7 @@ def engine_create_hypercube(
             include_raw_layout=include_raw_layout,
             exclude_null_dimensions=exclude_null_dimensions,
             offset=offset,
+            filters=filters,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the

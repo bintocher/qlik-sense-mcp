@@ -209,7 +209,7 @@ class EngineFieldsMixin:
         qlik_pattern = pattern.replace("%", "*")
         escaped = qlik_pattern.replace("'", "''")
 
-        # Qlik has no case-sensitive wildcard function. Checked on 31.62:
+        # Qlik has no case-sensitive wildcard function. Checked:
         # Match() respects case but takes no wildcards
         # (Match('C000001','C00000*') = 0), WildMatch() takes wildcards but
         # ignores case (WildMatch('abc','ABC') = 1). A case-sensitive search

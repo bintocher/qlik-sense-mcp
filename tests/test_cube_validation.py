@@ -1,7 +1,7 @@
 """Queries Qlik answers with a number instead of an error.
 
 Qlik evaluates an unknown name as an expression worth 0 and never says so.
-Measured on 31.62 against a 10M-row app: a cube grouped by `no_such_field`
+Measured: against a 10M-row app: a cube grouped by `no_such_field`
 came back as one row holding 49,989,556,885.52 — the grand total over all
 ten regions, indistinguishable from a real answer. A measure filtered on
 `region_name={'Moscow'}` where the data says `Moskva` returned a full,
@@ -9,35 +9,96 @@ well-formed table of zeros.
 
 Nothing downstream can recover from that: the rows are valid JSON, the
 numbers are plausible, and the model reports them as fact. So the check
-happens here, before the query runs.
+happens here, before the query runs — and every judgement in it comes from
+Engine, not from reading the expression.
+
+The double below answers the three Engine calls the way the real one does,
+measured:
+
+  ExpandExpression         resolves `$(...)` to literal text
+  CheckExpression          `qErrorMsg` for syntax, `qBadFieldNames` for
+                           names outside a set modifier — measured, it
+                           does not look inside one
+  GetFieldsFromExpression  the modifier fields it recognised, and only
+                           those: `Sum(Amount)` returns an empty list
 """
+
+import re
 
 import pytest
 
 from qlik_sense_mcp_server.engine_api import QlikEngineAPI
 
+_MODIFIER = re.compile(r"\{<.*?>\}", re.S)
+_NAME = re.compile(r"\[([^\]]+)\]|([A-Za-z_][A-Za-z_0-9]*)")
+# Qlik function names the double must not mistake for fields.
+_FUNCTIONS = {"sum", "avg", "count", "min", "max", "year", "month", "if",
+              "distinct", "aggr", "only", "median", "stdev", "text", "num",
+              "date", "and", "or", "not", "total"}
+
 
 class _Engine(QlikEngineAPI):
-    """Knows a fixed set of field names; records what was asked."""
+    """Answers like Qlik does, for a fixed set of field names."""
 
-    def __init__(self, known=("Region", "Sales", "OrderDate", "Category")):
+    def __init__(self, known=("Region", "Sales", "OrderDate", "Category"),
+                 syntax_errors=None):
         self.known = set(known)
+        self.syntax_errors = syntax_errors or {}
         self.checked = []
 
-    def send_requests_pipelined(self, requests, raise_on_error=True):
-        if requests[0]["method"] == "CheckExpression":
-            # The double is not a Qlik parser; treat every expression as
-            # syntactically fine and let the field checks do the work.
-            return [{"qErrorMsg": ""} for _ in requests]
-        outcomes = []
-        for request in requests:
-            name = request["params"][0]
-            self.checked.append(name)
+    # -- what the double pretends Qlik knows -------------------------------
+
+    def _bad_names(self, expression):
+        """Names outside any set modifier that the model does not have."""
+        outside = _MODIFIER.sub(" ", expression)
+        spans = []
+        for match in _NAME.finditer(outside):
+            name = match.group(1) or match.group(2)
+            if name.lower() in _FUNCTIONS or name.isdigit():
+                continue
             if name in self.known:
-                outcomes.append({"qReturn": {"qName": name, "qCardinal": 10}})
-            else:
-                outcomes.append(Exception("Invalid parameters"))
-        return outcomes
+                continue
+            spans.append({"qFrom": match.start(), "qCount": match.end() - match.start()})
+        return outside, spans
+
+    def _modifier_fields(self, expression):
+        found = []
+        for block in _MODIFIER.findall(expression):
+            for match in _NAME.finditer(block):
+                name = match.group(1) or match.group(2)
+                if name in self.known:
+                    found.append(name)
+        return list(dict.fromkeys(found))
+
+    # -- the Engine surface ------------------------------------------------
+
+    def send_requests_pipelined(self, requests, raise_on_error=True, timeout=None):
+        method = requests[0]["method"]
+        if method == "ExpandExpression":
+            # Measured: `=Sum($(vAny) call_duration)` came back as
+            # `=Sum( call_duration)` — the reference is replaced by nothing.
+            return [{"qExpandedExpression":
+                     re.sub(r"\$\([^)]*\)", "", r["params"][0])}
+                    for r in requests]
+        if method == "CheckExpression":
+            replies = []
+            for request in requests:
+                expression = request["params"][0]
+                self.checked.append(expression)
+                text, spans = self._bad_names(expression)
+                replies.append({
+                    "qErrorMsg": self.syntax_errors.get(expression, ""),
+                    "qBadFieldNames": spans if not self.syntax_errors.get(expression) else [],
+                    "_text": text,
+                })
+            # Engine reports positions into the expression it was given;
+            # the double blanked the modifiers, so hand back that same text
+            # for the positions to line up.
+            return [{k: v for k, v in r.items() if k != "_text"} for r in replies]
+        if method == "GetFieldsFromExpression":
+            return [{"qFieldNames": self._modifier_fields(r["params"][0])}
+                    for r in requests]
+        raise AssertionError(f"unexpected Engine call {method}")
 
     def get_fields(self, app_handle):
         # The Engine layer's own key name — the tool layer is what renames it
@@ -72,57 +133,47 @@ class TestUnknownDimension:
         result = _Engine()._validate_cube_inputs(1, _dims("[Region]"), [])
         assert "error" not in result
 
-    def test_a_calculated_dimension_is_not_a_field(self):
-        """`=Year(OrderDate)` is an expression; checking it as a name would
-        refuse a query that works."""
-        engine = _Engine()
-        result = engine._validate_cube_inputs(1, _dims("=Year(OrderDate)"), [])
+    def test_a_calculated_dimension_of_known_fields_passes(self):
+        result = _Engine()._validate_cube_inputs(1, _dims("=Year(OrderDate)"), [])
         assert "error" not in result
-        assert "=Year(OrderDate)" not in engine.checked
 
     def test_no_dimensions_is_fine(self):
         assert "error" not in _Engine()._validate_cube_inputs(1, [], _measures("Sum(Sales)"))
 
+    def test_nothing_to_check_needs_no_engine_call(self):
+        engine = _Engine()
+        assert engine._validate_cube_inputs(1, [], []) == {"warnings": []}
+        assert engine.checked == []
 
-class TestMeasureWarnings:
-    def test_unknown_name_in_a_measure_warns_but_does_not_block(self):
+
+class TestUnknownNamesInMeasures:
+    """Engine's verdict, so the query stops rather than warns.
+
+    `qBadFieldNames` is Qlik saying the name is not in the data model, and
+    Qlik scores such a name as 0 — the measure would come back as a column
+    of zeros that reads as a real answer.
+    """
+
+    def test_an_unknown_name_in_a_measure_is_refused(self):
         result = _Engine()._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Salez)"))
-        assert "error" not in result
-        assert any("Salez" in w for w in result["warnings"])
+        assert result["error_category"] == "field_not_found"
+        assert result["unknown_fields"] == ["Salez"]
 
-    def test_a_variable_expansion_is_not_treated_as_a_field(self):
-        """`$(vTarget)` is resolved by Qlik; the name inside is not a field."""
+    def test_the_refusal_suggests_the_real_name(self):
+        result = _Engine()._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Salez)"))
+        assert result["did_you_mean"]["Salez"] == ["Sales"]
+
+    def test_a_variable_expansion_is_resolved_before_checking(self):
+        """`$(vTarget)` is Qlik's to expand; the name inside is not a field."""
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum(Sales) / $(vTarget)"))
         assert result["warnings"] == []
+        assert "error" not in result
 
-    @pytest.mark.parametrize("expression, fragment", [
-        ("SUM(Sales) AS total", "AS <alias>"),
-        ("SELECT Sum(Sales)", "SELECT"),
-        ("Sum(Sales) GROUP BY Region", "GROUP BY"),
-        ("Sum(Sales) FROM Orders", "FROM"),
-        ("Sum(Sales) WHERE Region='North'", "WHERE"),
-    ])
-    def test_sql_syntax_is_named(self, expression, fragment):
-        result = _Engine()._validate_cube_inputs(1, _dims("Region"), [{"expression": expression}])
-        assert any(fragment in w for w in result["warnings"]), result["warnings"]
-
-    def test_set_analysis_is_not_mistaken_for_sql(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
-        assert result["warnings"] == []
-
-    def test_each_field_is_checked_once(self):
-        """Without a recently read model every name goes to Engine — once.
-
-        The saving from the schema cache is covered in
-        tests/test_field_check_cache.py, where a model has actually been
-        read. Here nothing has, so this is the ordinary path.
-        """
-        engine = _Engine()
-        engine._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum(Sales)", "Avg(Sales)", "Count(Sales)"))
-        assert engine.checked.count("Sales") == 1
+    def test_a_bad_name_inside_a_calculated_dimension_is_refused(self):
+        result = _Engine()._validate_cube_inputs(1, [{"field": "=Year(OrderDatte)"}], [])
+        assert result["error_category"] == "field_not_found"
+        assert "OrderDatte" in result["unknown_fields"]
 
 
 class TestEmptyMeasureDetection:
@@ -185,54 +236,6 @@ class TestSuggestions:
         assert "zzzzzz" not in result.get("did_you_mean", {})
 
 
-class TestCalculatedDimensions:
-    """`=Year(no_such_field)` used to skip the check entirely.
-
-    A calculated dimension is an expression, so it is not a field name —
-    but the names inside it are, and passing it through unexamined left
-    open the exact hole the check exists to close.
-    """
-
-    def test_a_bad_name_inside_a_calculated_dimension_is_reported(self):
-        result = _Engine()._validate_cube_inputs(
-            1, [{"field": "=Year(OrderDatte)"}], [])
-        assert any("OrderDatte" in w for w in result["warnings"]), result
-
-    def test_a_good_calculated_dimension_is_quiet(self):
-        result = _Engine()._validate_cube_inputs(
-            1, [{"field": "=Year(OrderDate)"}], [])
-        assert result["warnings"] == []
-
-    def test_it_warns_rather_than_refuses(self):
-        """Lexical, so it must not block a query that works."""
-        result = _Engine()._validate_cube_inputs(
-            1, [{"field": "=Year(OrderDatte)"}], [])
-        assert "error" not in result
-
-
-class TestSqlDetectionPrecision:
-    def test_a_field_name_containing_a_keyword_is_not_sql(self):
-        """`[Cost as planned]` is a legal field name, not an alias."""
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), [{"expression": "Sum([Cost as planned])"}])
-        assert not any("SQL" in w for w in result["warnings"]), result["warnings"]
-
-    def test_a_string_literal_containing_a_keyword_is_not_sql(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), [{"expression": "Sum(If(Region='North as usual', Sales))"}])
-        assert not any("SQL" in w for w in result["warnings"]), result["warnings"]
-
-    @pytest.mark.parametrize("expression", [
-        'SUM(Sales) AS "total"',
-        "SUM(Sales) AS [total]",
-        "SUM(Sales) AS total",
-    ])
-    def test_every_alias_form_is_caught(self, expression):
-        """A quoted alias is the form a model writes most often."""
-        result = _Engine()._validate_cube_inputs(1, _dims("Region"), [{"expression": expression}])
-        assert any("AS <alias>" in w for w in result["warnings"]), (expression, result["warnings"])
-
-
 class TestDimensionShape:
     """A model writes a calculated dimension the way it writes a measure.
 
@@ -277,21 +280,28 @@ class TestSetModifierFields:
     """A set modifier on a field that does not exist is the worst case.
 
     Qlik does not reject it — it drops the condition. The measure then
-    returns the unfiltered total: a number LARGER than the truth, which
-    the all-zero detector cannot see and a reader has no reason to
-    doubt.
+    returns the unfiltered total: a number larger than the truth, which
+    the all-zero detector cannot see and a reader has no reason to doubt.
+
+    `CheckExpression` does not see inside a modifier (measured), so this is
+    `GetFieldsFromExpression`: a modifier whose fields Engine does not
+    recognise is a modifier that will not filter.
     """
 
     def test_an_unknown_modifier_field_is_refused(self):
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
         assert result["error_category"] == "field_not_found"
-        assert "Regionn" in result["unknown_fields"]
 
     def test_the_refusal_explains_why_it_matters(self):
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
-        assert "UNFILTERED" in result["hint"]
+        assert "unfiltered total" in result["hint"]
+
+    def test_the_refusal_offers_the_described_filter_instead(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
+        assert any("filters" in action for action in result["next_actions"])
 
     def test_a_known_modifier_field_passes(self):
         result = _Engine()._validate_cube_inputs(
@@ -304,64 +314,40 @@ class TestSetModifierFields:
             1, _dims("Region"), _measures('Sum({<[Order Date]={">=1<2"}>} Sales)'))
         assert "error" not in result, result
 
-    def test_the_selection_operator_is_not_part_of_the_name(self):
-        """`Year*=` means "add to the current selection"."""
-        engine = _Engine(known=("Region", "Sales", "Year"))
-        result = engine._validate_cube_inputs(
-            1, _dims("Region"), _measures('Sum({<Year*={">2020"}>} Sales)'))
-        assert "error" not in result, result
-
-
-class TestQuotingTraps:
-    def test_a_comparison_in_single_quotes_is_flagged(self):
-        """'>=100' is a literal; it matches nothing and returns 0."""
+    def test_a_measure_without_a_modifier_is_not_asked_about(self):
+        """`GetFieldsFromExpression` returns nothing for a plain aggregation,
+        which must not read as a missing filter field."""
         result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Sales={'>=100'}>} Sales)"))
-        assert any("single quotes" in w for w in result["warnings"]), result
-
-    def test_a_spaced_range_is_not_flagged(self):
-        """The literature says a space breaks a range search. Measured on
-        31.62 it does not: `{">=5 <=9"}` and `{">=5<=9"}` both returned
-        12,497,302,308.36 against the same field. Warning about it would
-        send a caller to rewrite a query that works."""
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures('Sum({<Sales={">=100 <200"}>} Sales)'))
-        assert result["warnings"] == [], result
-
-    def test_a_correct_range_is_quiet(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures('Sum({<Sales={">=100<200"}>} Sales)'))
-        assert result["warnings"] == [], result
+            1, _dims("Region"), _measures("Sum(Sales)"))
+        assert "error" not in result
 
 
 class TestExpressionSyntax:
     """Engine's own parser, asked before anything is built."""
 
-    class _Parser(_Engine):
-        def __init__(self, errors=None, **kwargs):
-            super().__init__(**kwargs)
-            self.errors = errors or {}
-
-        def send_requests_pipelined(self, requests, raise_on_error=True):
-            if requests[0]["method"] == "CheckExpression":
-                return [{"qErrorMsg": self.errors.get(r["params"][0], "")}
-                        for r in requests]
-            return super().send_requests_pipelined(requests, raise_on_error)
-
     def test_a_parse_error_is_reported_with_qliks_own_words(self):
-        engine = self._Parser({"SUM(Sales) AS total": "Garbage after expression: 'AS'"})
+        engine = _Engine(syntax_errors={
+            "SUM(Sales) AS total": "Garbage after expression: 'AS'"})
         result = engine._validate_cube_inputs(
             1, _dims("Region"), _measures("SUM(Sales) AS total"))
         assert result["error_category"] == "invalid_expression"
         assert "Garbage after expression" in result["error"]
 
     def test_valid_syntax_passes_through(self):
-        engine = self._Parser()
-        result = engine._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Sales)"))
+        result = _Engine()._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Sales)"))
         assert "error" not in result
 
     def test_a_calculated_dimension_is_checked_too(self):
-        engine = self._Parser({"=Yearr(OrderDate)": "Yearr is not a valid function"})
+        engine = _Engine(syntax_errors={
+            "=Yearr(OrderDate)": "Yearr is not a valid function"})
         result = engine._validate_cube_inputs(
             1, [{"field": "=Yearr(OrderDate)"}], _measures("Sum(Sales)"))
         assert result["error_category"] == "invalid_expression"
+
+    def test_the_error_names_what_the_caller_wrote(self):
+        """Checks run on the expanded text; the reply must quote the
+        original, which is what the caller has to fix."""
+        engine = _Engine(syntax_errors={"Sum( Sales)": "some parser complaint"})
+        result = engine._validate_cube_inputs(
+            1, [], _measures("Sum($(vScope) Sales)"))
+        assert "Sum($(vScope) Sales)" in result["error"]

@@ -135,7 +135,7 @@ class JwtSession:
         Not called automatically. `DELETE /{vp}/qps/user` is the only
         logout a virtual proxy exposes — the per-session endpoint needs
         admin rights on port 4243 — and it ends every session this user
-        holds *on this virtual proxy*. Measured on Qlik 31.62: sessions
+        holds *on this virtual proxy*. Measured: sessions
         the same user has on other virtual proxies, a browser on the
         default one included, are untouched. Still a group operation, so
         call it where the prefix belongs to this server (a dedicated JWT

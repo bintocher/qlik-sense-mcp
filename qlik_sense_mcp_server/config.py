@@ -38,7 +38,7 @@ DEFAULT_WS_RETRIES = 2
 # the `/ttl/<n>` segment of the WebSocket URL. Without it Qlik holds the
 # session for its own inactivity timeout — minutes — so a handful of restarts
 # exhausts the per-user limit of five and the next connection is refused with
-# OnMaxParallelSessionsExceeded. Measured on 31.62. Not configurable: a long
+# OnMaxParallelSessionsExceeded. Measured:. Not configurable: a long
 # ttl only recreates the problem, and a zero one drops sessions mid-reconnect.
 WS_SESSION_TTL_SECONDS = 5
 

@@ -121,26 +121,32 @@ if MCP_SDK_MAJOR >= 2:
 else:
     mcp = _McpHost("qlik-sense-mcp-server", host=_mcp_host, port=_mcp_port)
 
-# Reload-task management talks to QRS endpoints (/qrs/reloadtask,
-# /qrs/executionresult, /qrs/reloadtask/{id}/scriptlog) that require
-# repository-admin rights. A JWT analyst reaches QRS through the virtual
-# proxy as an ordinary user and gets 403s there, so advertising those
-# tools in JWT mode only invites the LLM to burn turns on calls that
-# cannot succeed. They are therefore registered in certificate mode only.
+# The server registers the analysis tools and nothing else. Reload-task
+# administration is a separate job, done by a separate person, against QRS
+# endpoints (/qrs/reloadtask, /qrs/executionresult) that need
+# repository-admin rights — a JWT analyst reaches them through the virtual
+# proxy as an ordinary user and gets 403s.
 #
-# When the configuration failed to load at all (`config is None`) every
-# tool stays registered — that path is used by `--help` and the tests,
-# and hiding tools there would just be confusing.
-_CERT_ONLY_TOOLS_ENABLED = config is None or config.auth_mode != AUTH_MODE_JWT
+# Every tool the caller cannot use costs it something even unused: the
+# names and descriptions sit in its context, and a model that reads about
+# task administration tries it. So the fourteen task tools follow the
+# authentication that makes them work — present in certificate mode, absent
+# in JWT mode — and `QLIK_TASK_TOOLS=false` drops them from certificate
+# mode too, for an analyst who only ever reads data.
+_TASK_TOOLS_WANTED = os.getenv("QLIK_TASK_TOOLS", "").strip().lower() not in (
+    "false", "0", "no")
+_CERT_MODE = config is None or config.auth_mode != AUTH_MODE_JWT
+_CERT_ONLY_TOOLS_ENABLED = _TASK_TOOLS_WANTED and _CERT_MODE
 if not _CERT_ONLY_TOOLS_ENABLED:
     logger.info(
-        "JWT mode: reload-task tools are not registered (QRS task "
-        "administration requires certificate mode)."
+        "Reload-task tools are not registered (%s).",
+        "JWT mode: QRS task administration needs certificate authentication"
+        if not _CERT_MODE else "QLIK_TASK_TOOLS is off",
     )
 
 
 def _cert_only_tool():
-    """Register a tool only when QRS admin rights are actually available."""
+    """Register a tool only when task administration was asked for."""
     def decorator(fn):
         return mcp.tool()(fn) if _CERT_ONLY_TOOLS_ENABLED else fn
     return decorator

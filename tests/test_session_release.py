@@ -2,7 +2,7 @@
 
 The ttl segment is what stops sessions piling up: without it Qlik holds a
 session for its own inactivity timeout, and the sixth start of this server
-on one login is refused. Measured on 31.62 — five starts passed, the sixth
+on one login is refused. Measured: — five starts passed, the sixth
 did not, and adding the segment fixed it.
 
 Picking the session cookie is the other one. The conventional name is

@@ -151,7 +151,7 @@ class TestHypercubeDefinition:
         assert eng.cube_def["qInterColumnSortOrder"] == [0, 1]
 
     def test_cube_wide_missing_suppression_is_never_used(self):
-        """Measured on Qlik 31.62: qSuppressMissing drops exactly the
+        """Measured: qSuppressMissing drops exactly the
         NULL-dimension row and nothing else — the same row qNullSuppression
         already handles, but outside the caller's control. Two switches for
         one behaviour is how an explicit "keep the NULL group" ended up

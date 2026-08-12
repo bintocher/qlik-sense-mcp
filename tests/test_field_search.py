@@ -6,7 +6,7 @@ wrong in a way nothing in the reply revealed: a value at position 150k did
 not exist, `offset` past the prefix returned an empty page, and passing
 both search parameters made the second silently overwrite the first.
 
-Case is the one thing Qlik cannot filter for us. Verified on 31.62:
+Case is the one thing Qlik cannot filter for us. Verified:
 `Match()` respects case but takes no wildcards, `WildMatch()` takes
 wildcards but ignores case. So a case-sensitive search asks Engine for the
 case-insensitive superset and narrows it here — which is safe, because the

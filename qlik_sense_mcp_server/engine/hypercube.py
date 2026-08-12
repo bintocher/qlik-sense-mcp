@@ -12,38 +12,19 @@ from ..config import (
 from typing import Dict, List, Any, Optional
 import difflib
 import logging
-import re
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
 
-# Qlik evaluates an unknown name as an expression worth 0 rather than
-# refusing it, so a typo comes back as data. These patterns catch the shapes
-# that produce a confident, wrong answer.
-_DOLLAR_EXPANSION = re.compile(r"\$\([^)]*\)")
-# Field names and string values, which must not be scanned for SQL keywords:
-# `[Cost as planned]` is a perfectly good field name.
-_QUOTED_OR_BRACKETED = re.compile(r"\[[^\]]*\]|'[^']*'|\"[^\"]*\"")
-# Field names used inside a set modifier: `{<Region={'North'}>}`. A name
-# here that the model does not have is worse than a typo elsewhere — Qlik
-# drops the condition and returns the UNFILTERED total, a number that is
-# larger than the truth and looks entirely plausible.
-_SET_MODIFIER_FIELDS = re.compile(
-    r"[<,]\s*(?:\[([^\]]+)\]|([^\[\]\s=<>{},]+))\s*[-+*/]?=", re.UNICODE)
-# A comparison inside single quotes is a literal, so it matches nothing.
-_QUOTED_COMPARISON = re.compile(r"'\s*(<=|>=|<>|<|>)")
-_SQL_ISMS = (
-    # The alias may be bare, bracketed or quoted — `AS "total"` is the form
-    # a model writes most often, and it used to pass unnoticed.
-    (re.compile(r"\bas\s+[\w\[\"']", re.I | re.UNICODE),
-     "`AS <alias>` is SQL; in Qlik a measure is named with the `label` argument"),
-    (re.compile(r"\bselect\b", re.I), "`SELECT` is SQL; a measure is just the aggregation"),
-    (re.compile(r"\bgroup\s+by\b", re.I), "`GROUP BY` is SQL; grouping is what `dimensions` does"),
-    (re.compile(r"\bfrom\s+[A-Za-z_\[]", re.I), "`FROM` is SQL; a hypercube has no table clause"),
-    (re.compile(r"\bwhere\b", re.I), "`WHERE` is SQL; filter with set analysis, "
-                                     "e.g. Sum({<Year={2026}>} Amount)"),
-)
+# The opening of a set modifier. Its presence is the one thing this module
+# reads out of an expression itself; everything about the expression —
+# syntax, which names exist, which fields a modifier filters on — is
+# answered by Engine.
+_SET_MODIFIER_OPENER = "{<"
+
+# Where a described filter is written into a hand-written expression.
+_FILTER_MARKER = "{filter}"
 
 
 class EngineHypercubeMixin:
@@ -96,125 +77,6 @@ class EngineHypercubeMixin:
         ]
         return list(dict.fromkeys(names))
 
-    # How long a model that has already been read may vouch for a field
-    # name. The schema cache itself lives ten minutes, which is right for
-    # what it was built for — sample values and "did you mean" suggestions,
-    # where staleness costs nothing. Vouching for existence is different: a
-    # reload between the read and the query deletes a field, and a query
-    # naming a deleted field comes back as a plausible number, not an error.
-    # A minute keeps the saving for a normal conversation and bounds that.
-    FIELD_TRUST_SECONDS = 60.0
-
-    def _recent_field_names(self) -> set:
-        """Field names from a model read moments ago — never a fresh read.
-
-        Returns an empty set when nothing was read recently, which sends
-        the caller down the ordinary Engine path.
-        """
-        import time as _time
-
-        app_id = getattr(self, "_cached_app_id", "") or ""
-        store = getattr(self, "_schema_store", None)
-        if not app_id or store is None:
-            return set()
-        entry = store().get(app_id)
-        if not entry:
-            return set()
-        if (_time.monotonic() - entry.get("read_at", 0)) > self.FIELD_TRUST_SECONDS:
-            return set()
-        return {
-            f.get("field_name") or f.get("name")
-            for f in (entry.get("model", {}).get("fields") or [])
-            if f.get("field_name") or f.get("name")
-        }
-
-    def _fields_exist(self, app_handle: int, names: List[str]) -> Dict[str, bool]:
-        """Ask Engine which of these names the data model actually has.
-
-        `GetFieldDescription` is the cheap answer — no hypercube, no data
-        page — and the batch goes out in one pipelined round-trip.
-        """
-        if not names:
-            return {}
-
-        # A name the model was just seen to contain is known — no need to
-        # ask Qlik again. Measured over 440 hypercube calls: the caller
-        # reads the model first in nine cases out of ten, so this removes a
-        # round-trip from almost every query.
-        #
-        # Three deliberate limits, each closing a way to be wrong:
-        #   - only a *recently* read model counts (see _recent_field_names),
-        #     because a reload can delete a field and Qlik answers a query
-        #     naming it with a plausible number rather than an error;
-        #   - the cache may confirm a name, never deny one — it holds table
-        #     fields and Qlik knows others besides, so a name it lacks is
-        #     still verified against Engine;
-        #   - nothing is read here. If no model has been read, the old path
-        #     runs unchanged; fetching one would cost more than it saves.
-        cached = self._recent_field_names()
-        verdicts = {name: True for name in names if name in cached}
-        names = [name for name in names if name not in verdicts]
-        if not names:
-            return verdicts
-
-        try:
-            outcomes = self.send_requests_pipelined(
-                [{"method": "GetFieldDescription", "params": [name], "handle": app_handle}
-                 for name in names],
-                raise_on_error=False,
-            )
-        except Exception as exc:
-            # The check is a guard, not the query. If it cannot run, let the
-            # query through — refusing it would turn a diagnostic into an
-            # outage, and an unchecked name still gets the empty-measure
-            # warning after the fact.
-            logger.debug("Field existence check unavailable, skipping: %s", exc)
-            return verdicts
-        for name, outcome in zip(names, outcomes):
-            if isinstance(outcome, Exception):
-                # Engine answers "Invalid parameters" for an unknown field.
-                verdicts[name] = False
-                continue
-            info = (outcome or {}).get("qReturn") or {}
-            verdicts[name] = bool(info.get("qName"))
-        return verdicts
-
-    def _check_expressions(self, app_handle: int,
-                           expressions: List[Any]) -> Dict[str, str]:
-        """Ask Engine to parse each expression without evaluating it.
-
-        `CheckExpression` is the only authority on Qlik syntax, and it is
-        cheap. Measured on 31.62 it catches what no amount of lexing here
-        can: `SUM(x) AS total` -> "Garbage after expression: 'AS'",
-        `COUNTX(x)` -> "COUNTX is not a valid function", `Sum(Sum(x))` ->
-        "Nested aggregation not allowed", an unclosed paren -> "')' or ','
-        expected". It also returns the character range of any name the
-        model does not have.
-
-        Returns {expression: error text} for the ones that failed.
-        """
-        wanted = [e for e in expressions if e]
-        if not wanted:
-            return {}
-        try:
-            outcomes = self.send_requests_pipelined(
-                [{"method": "CheckExpression", "params": [expr], "handle": app_handle}
-                 for expr in wanted],
-                raise_on_error=False,
-            )
-        except Exception as exc:
-            logger.debug("CheckExpression unavailable, skipping: %s", exc)
-            return {}
-
-        broken = {}
-        for expr, outcome in zip(wanted, outcomes):
-            if isinstance(outcome, Exception):
-                continue
-            message = ((outcome or {}).get("qErrorMsg") or "").strip()
-            if message:
-                broken[expr] = " ".join(message.split())
-        return broken
-
     def _validate_cube_inputs(
         self, app_handle: int,
         dimensions: List[Dict[str, Any]],
@@ -222,87 +84,60 @@ class EngineHypercubeMixin:
     ) -> Dict[str, Any]:
         """Catch the mistakes Qlik answers with a number instead of an error.
 
-        A dimension naming a field that does not exist is fatal: Qlik
-        evaluates the name as an expression, which collapses the cube to a
-        single row carrying the grand total — a result that looks exactly
-        like a legitimate answer. Measured on 31.62: a cube on
-        `no_such_field` returned one row worth 49,989,556,885.52, the total
-        over all ten regions.
+        Every judgement here comes from Engine, in one pipelined batch that
+        costs about 4ms against 75ms for the smallest hypercube:
 
-        Measure expressions get warnings rather than errors, because the
-        field names inside them are found lexically and a false positive
-        must not block a working query.
+        `ExpandExpression` resolves `$(...)`, so the checks see the text
+        that will actually run rather than the variable reference.
+
+        `CheckExpression` reports syntax and, in `qBadFieldNames`, names the
+        data model does not have. Measured: it covers a bare
+        dimension field, a calculated dimension and an aggregation, and it
+        stops at the set modifier.
+
+        `GetFieldsFromExpression` covers what `CheckExpression` does not: the
+        fields a set modifier filters on. A modifier whose field Engine does
+        not recognise is dropped by Qlik, and the measure then returns the
+        unfiltered total — larger than the truth, with nothing to mark it as
+        wrong.
+
+        A dimension on a field that does not exist is the same class of
+        failure: Qlik evaluates the name as an expression and the cube
+        collapses to one row holding the grand total. Measured: a
+        cube on `no_such_field` came back as a single row worth
+        49,989,556,885.52 — the total over all ten regions.
         """
-        unknown_dimension_fields: List[str] = []
         warnings: List[str] = []
 
-        dimension_fields = []
-        calculated_dimension_fields: List[str] = []
-        for dim in dimensions:
-            field = (dim.get("field") or "").strip()
-            if not field:
-                continue
-            if field.startswith("="):
-                # A calculated dimension is an expression, so it is not a
-                # field name — but the names *inside* it are, and skipping
-                # them outright let `=Year(no_such_field)` back through the
-                # exact hole this check exists to close. Lexical, so a
-                # warning rather than a refusal.
-                calculated_dimension_fields.extend(
-                    self._extract_fields_from_expression(
-                        _DOLLAR_EXPANSION.sub(" ", field.lstrip("=")))
-                )
-                continue
-            dimension_fields.append(field.strip("[]"))
+        # Every expression that goes to Qlik, in one list: bare dimension
+        # fields, calculated dimensions, measure expressions. Engine reads
+        # all three the same way, so they are checked the same way.
+        dimension_texts = [
+            str(dim.get("field") or "").strip()
+            for dim in dimensions if str(dim.get("field") or "").strip()
+        ]
+        measure_texts = [
+            str(measure.get("expression") or "").strip()
+            for measure in measures if str(measure.get("expression") or "").strip()
+        ]
+        every_text = dimension_texts + measure_texts
+        if not every_text:
+            return {"warnings": warnings}
 
-        measure_fields: List[str] = []
-        modifier_fields: List[str] = []
-        for measure in measures:
-            expression = measure.get("expression") or ""
-            # Strip bracketed names and string literals before looking for
-            # SQL: a field legitimately called [Cost as planned] contains
-            # the word "as", and warning about it sends the caller to
-            # rewrite a query that works.
-            # Replaced by a placeholder rather than removed, so that
-            # `AS "total"` — the alias form a model writes most often —
-            # still reads as `AS X` and is caught.
-            for_sql_check = _QUOTED_OR_BRACKETED.sub("X", expression)
-            for pattern, explanation in _SQL_ISMS:
-                if pattern.search(for_sql_check):
-                    warnings.append(
-                        f"Measure {expression!r} looks like SQL: {explanation}. "
-                        f"Qlik does not refuse it — every row comes back as "
-                        f"'-' instead."
-                    )
-                    break
-            if _QUOTED_COMPARISON.search(expression):
-                warnings.append(
-                    f"Measure {expression!r} compares inside single quotes. "
-                    f"Qlik reads '>=100' as the literal text, matches "
-                    f'nothing and returns 0. Use double quotes: {{">=100"}}.'
-                )
-            for bracketed, bare in _SET_MODIFIER_FIELDS.findall(
-                    _DOLLAR_EXPANSION.sub(" ", expression)):
-                # `Year*=` is the "add to the selection" form; the
-                # operator is not part of the name.
-                name = (bracketed or bare).strip().strip("'\"").rstrip("*+-/")
-                if name:
-                    modifier_fields.append(name)
-            # Variable expansion is resolved by Qlik, not by us; the names
-            # inside it are not field names.
-            measure_fields.extend(
-                self._extract_fields_from_expression(_DOLLAR_EXPANSION.sub(" ", expression))
-            )
-        measure_fields.extend(calculated_dimension_fields)
+        expanded = self.expand_expressions(app_handle, every_text)
+        faults = self.check_expressions(
+            app_handle, [expanded.get(text, text) for text in every_text])
+        # Faults come back keyed by the expanded text; map them back to what
+        # the caller wrote, which is what it has to fix.
+        by_original = {
+            text: faults[expanded.get(text, text)]
+            for text in every_text if expanded.get(text, text) in faults
+        }
 
-        # Syntax first: an expression Qlik cannot parse is a refusal, not a
-        # warning, and its error text says exactly what is wrong.
-        broken = self._check_expressions(
-            app_handle,
-            [m.get("expression") for m in measures]
-            + [d.get("field") for d in dimensions
-               if str(d.get("field") or "").startswith("=")],
-        )
+        broken = {
+            text: fault["error"] for text, fault in by_original.items()
+            if fault.get("error")
+        }
         if broken:
             first_expression, first_error = next(iter(broken.items()))
             return {
@@ -319,47 +154,55 @@ class EngineHypercubeMixin:
                 ),
             }
 
-        to_check = list(dict.fromkeys(dimension_fields + measure_fields + modifier_fields))
-        exists = self._fields_exist(app_handle, to_check)
-
-        unknown_modifier_fields = [
-            f for f in dict.fromkeys(modifier_fields) if not exists.get(f, True)
+        # A set modifier Engine did not read is a filter that will not
+        # apply. Engine lists the modifier fields it recognised; an
+        # expression that carries a modifier and yields none of them is
+        # filtering on something this app does not have.
+        with_modifier = [
+            text for text in measure_texts
+            if _SET_MODIFIER_OPENER in expanded.get(text, text)
         ]
-        if unknown_modifier_fields:
-            known = self._known_field_names(app_handle)
-            folded = {name.casefold(): name for name in known}
-            suggestions = {}
-            for name in unknown_modifier_fields:
-                matches = difflib.get_close_matches(
-                    name.casefold(), list(folded), n=3, cutoff=0.6)
-                if matches:
-                    suggestions[name] = [folded[m] for m in matches]
-            return {
-                "error": (
-                    "Set analysis filters on field(s) this app does not have: "
-                    + ", ".join(repr(f) for f in unknown_modifier_fields)
-                ),
-                "error_category": "field_not_found",
-                "failed_step": "validate",
-                "unknown_fields": unknown_modifier_fields,
-                "did_you_mean": suggestions,
-                "next_actions": [
-                    "call get_app_details(app_id) and copy the field name exactly",
-                    "field names are case-sensitive",
-                ],
-                "hint": (
-                    "This one is worse than a plain typo: Qlik does not "
-                    "reject a set modifier on an unknown field, it drops the "
-                    "condition. The measure then returns the UNFILTERED "
-                    "total — a number larger than the truth, with nothing to "
-                    "mark it as wrong."
-                ),
-            }
+        if with_modifier:
+            recognised = self.fields_in_expressions(
+                app_handle, [expanded.get(text, text) for text in with_modifier])
+            unread = [
+                text for text in with_modifier
+                if expanded.get(text, text) in recognised
+                and not recognised[expanded.get(text, text)]
+            ]
+            if unread:
+                return {
+                    "error": (
+                        "Set analysis in " + ", ".join(repr(t) for t in unread)
+                        + " filters on a field this app does not have."
+                    ),
+                    "error_category": "field_not_found",
+                    "failed_step": "validate",
+                    "invalid_expressions": {t: "no filter field recognised"
+                                            for t in unread},
+                    "next_actions": [
+                        "call get_app_details(app_id) and copy the field name "
+                        "exactly — field names are case-sensitive",
+                        "or state the filter as `filters` and let the server "
+                        "write the set analysis",
+                    ],
+                    "hint": (
+                        "Qlik does not reject a set modifier on an unknown "
+                        "field, it drops the condition. The measure then "
+                        "returns the unfiltered total — a number larger than "
+                        "the truth, with nothing to mark it as wrong."
+                    ),
+                }
 
-        unknown_dimension_fields = [f for f in dimension_fields if not exists.get(f, True)]
+        unknown_dimension_fields = list(dict.fromkeys(
+            name for text in dimension_texts
+            for name in by_original.get(text, {}).get("bad_fields", [])
+        ))
         unknown_measure_fields = [
-            f for f in measure_fields
-            if not exists.get(f, True) and f not in unknown_dimension_fields
+            name for name in dict.fromkeys(
+                name for text in measure_texts
+                for name in by_original.get(text, {}).get("bad_fields", [])
+            ) if name not in unknown_dimension_fields
         ]
 
         if unknown_dimension_fields:
@@ -412,13 +255,36 @@ class EngineHypercubeMixin:
             }
 
         if unknown_measure_fields:
-            warnings.append(
-                "Measure expressions mention name(s) the data model does not "
-                "have: " + ", ".join(repr(f) for f in unknown_measure_fields)
-                + ". Qlik scores an unknown name as 0, so the measure will "
-                  "read as zero rather than fail. (If these are variables or "
-                  "function names, ignore this.)"
-            )
+            # Engine's verdict, not a guess at one: `qBadFieldNames` marks a
+            # name the data model does not have, and Qlik scores such a name
+            # as 0. The measure would come back as a column of zeros that
+            # reads as a real answer, so the query stops here.
+            known = self._known_field_names(app_handle)
+            folded = {name.casefold(): name for name in known}
+            suggestions = {}
+            for name in unknown_measure_fields:
+                matches = difflib.get_close_matches(
+                    name.casefold(), list(folded), n=3, cutoff=0.6)
+                if matches:
+                    suggestions[name] = [folded[m] for m in matches]
+            return {
+                "error": (
+                    "Unknown field(s) in measures: "
+                    + ", ".join(repr(f) for f in unknown_measure_fields)
+                ),
+                "error_category": "field_not_found",
+                "failed_step": "validate",
+                "unknown_fields": unknown_measure_fields,
+                "did_you_mean": {k: v for k, v in suggestions.items() if v},
+                "next_actions": [
+                    "call get_app_details(app_id) and read `fields[].name`",
+                    "field names are case-sensitive; copy them exactly",
+                ],
+                "hint": (
+                    "Qlik scores a name it does not have as 0, so this "
+                    "measure would return a column of zeros rather than fail."
+                ),
+            }
 
         return {"warnings": warnings}
 
@@ -490,10 +356,32 @@ class EngineHypercubeMixin:
             return {"qv": expression.get("qv", "")}
         return {"qv": expression or ""}
 
+    # Qlik's number-format types whose value is a point in time. A cell of
+    # one of these carries both a serial number and the text Qlik displays
+    # for it, and the two are different writings of the same thing.
+    _TEMPORAL_FORMATS = ("D", "T", "TS", "IV")
+
+    @classmethod
+    def _temporal_columns(cls, hypercube: Dict[str, Any]) -> set:
+        """Indexes of the columns holding a date, time or timestamp.
+
+        Engine says so itself, in each column's `qNumFormat.qType`. Column
+        order is fixed by the API: dimensions first, then measures.
+        """
+        temporal = set()
+        columns = ((hypercube.get("qDimensionInfo") or [])
+                   + (hypercube.get("qMeasureInfo") or []))
+        for index, info in enumerate(columns):
+            fmt = (info or {}).get("qNumFormat") or {}
+            if fmt.get("qType") in cls._TEMPORAL_FORMATS:
+                temporal.add(index)
+        return temporal
+
     @staticmethod
     def _matrix_to_rows(
         data_pages: List[Dict[str, Any]],
         column_names: List[str],
+        temporal_columns: set = None,
     ) -> List[List[Any]]:
         """
         Flatten Engine's qMatrix into plain rows of values.
@@ -503,14 +391,26 @@ class EngineHypercubeMixin:
         Engine's way of saying "this cell is text or empty". Returning
         numbers as numbers means an LLM can compare and sum them without
         first parsing locale-formatted strings like "95 552 568 044,926".
+
+        A date is the exception. Its number is a serial day count — `45292`
+        for the first of January 2024 — while every other reply about the
+        same field says `01.01.2024`: the sample values in
+        `get_app_details`, the values from `get_app_field`, the bounds from
+        `engine_get_field_range`. One value gets one writing everywhere, so
+        a temporal column returns the text Qlik displays.
         """
+        temporal = temporal_columns or set()
         rows: List[List[Any]] = []
         for page in data_pages or []:
             for matrix_row in page.get("qMatrix", []) or []:
                 row: List[Any] = []
-                for cell in matrix_row:
+                for index, cell in enumerate(matrix_row):
                     num = cell.get("qNum")
-                    row.append(cell.get("qText") if num == "NaN" or num is None else num)
+                    text = cell.get("qText")
+                    if index in temporal and text:
+                        row.append(text)
+                    else:
+                        row.append(text if num == "NaN" or num is None else num)
                 rows.append(row)
         return rows
 
@@ -565,6 +465,79 @@ class EngineHypercubeMixin:
                 return i
 
         return None
+
+    @staticmethod
+    def _hypercube_def(
+        converted_dimensions: List[Dict[str, Any]],
+        converted_measures: List[Dict[str, Any]],
+        page_offset: int,
+        page_height: int,
+        inter_column_sort_order: List[int],
+        suppress_zero: bool,
+        exclude_null_dimensions: bool,
+    ) -> Dict[str, Any]:
+        """The `qHyperCubeDef` Engine is asked to create.
+
+        One place builds it, so a single query and a batch of them cannot
+        drift apart in how they sort, page or suppress rows.
+        """
+        n_cols = len(converted_dimensions) + len(converted_measures)
+        return {
+            "qDimensions": [
+                {
+                    "qDef": {
+                        "qFieldDefs": [dim["field"]],
+                        "qSortCriterias": [
+                            {
+                                "qSortByState": 0,
+                                "qSortByFrequency": 0,
+                                "qSortByNumeric": dim["sort_by"].get("qSortByNumeric", 0),
+                                "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
+                                "qSortByLoadOrder": 0,
+                                "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
+                                "qExpression": EngineHypercubeMixin._as_value_expr(
+                                    dim["sort_by"].get("qExpression", "")
+                                ),
+                            }
+                        ],
+                    },
+                    "qNullSuppression": bool(exclude_null_dimensions),
+                    "qIncludeElemValue": True,
+                }
+                for dim in converted_dimensions
+            ],
+            "qMeasures": [
+                {
+                    "qDef": {"qDef": measure["expression"],
+                             "qLabel": measure.get("label", f"Measure_{i}")},
+                    "qSortBy": measure["sort_by"],
+                }
+                for i, measure in enumerate(converted_measures)
+            ],
+            "qInitialDataFetch": [
+                {
+                    # Paging starts where the caller asked. Without this
+                    # every page was the first page, so a result wider
+                    # than the row cap had no second page at all.
+                    "qTop": page_offset,
+                    "qLeft": 0,
+                    "qHeight": page_height,
+                    "qWidth": n_cols,
+                }
+            ],
+            "qSuppressZero": bool(suppress_zero),
+            # Always off. Measured: qSuppressMissing drops
+            # exactly one row — the NULL-dimension group (50002 rows to
+            # 50001 on a field with 50k values plus NULLs) — and leaves
+            # rows with a NULL *measure* alone. That is precisely what
+            # qNullSuppression on each dimension already does, under the
+            # caller's control via exclude_null_dimensions. Setting both
+            # only meant the cube-wide flag could override an explicit
+            # request to keep the NULL group.
+            "qSuppressMissing": False,
+            "qMode": "S",
+            "qInterColumnSortOrder": inter_column_sort_order,
+        }
 
     def _read_remaining_pages(self, cube_handle: int, n_cols: int,
                               rows_so_far: int, wanted_rows: int,
@@ -638,6 +611,7 @@ class EngineHypercubeMixin:
         include_raw_layout: bool = False,
         exclude_null_dimensions: bool = True,
         offset: int = 0,
+        filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
@@ -725,6 +699,49 @@ class EngineHypercubeMixin:
                 # measure is the leading column of qInterColumnSortOrder.
                 measure.setdefault("sort_by", {"qSortByNumeric": -1})
                 converted_measures.append(measure)
+
+            # A described filter is written as set analysis by the server
+            # and placed where the expression marks it. A set modifier
+            # belongs inside the aggregation it narrows, and only the
+            # author of the expression knows which aggregation that is —
+            # hence the marker rather than a guess.
+            filters_applied: List[Dict[str, Any]] = []
+            if filters:
+                step = "filters"
+                built = self.build_filters(
+                    app_handle, getattr(self, "_cached_app_id", "") or "",
+                    filters)
+                if built.get("error"):
+                    built.setdefault("failed_step", "filters")
+                    return built
+                marker_used = False
+                for measure in converted_measures:
+                    expression = measure.get("expression") or ""
+                    if _FILTER_MARKER in expression:
+                        measure["expression"] = expression.replace(
+                            _FILTER_MARKER, built["modifier"])
+                        marker_used = True
+                if not marker_used:
+                    return {
+                        "error": (
+                            "`filters` was given but no measure marks where "
+                            "the filter goes."
+                        ),
+                        "error_category": "invalid_argument",
+                        "failed_step": "filters",
+                        "next_actions": [
+                            "write the marker inside the aggregation: "
+                            "\"Sum({filter} Amount)\"",
+                            "or call engine_query, which writes the whole "
+                            "expression for you",
+                        ],
+                        "hint": (
+                            "A set modifier narrows the aggregation it sits "
+                            "in. Marking the place keeps that choice with "
+                            "whoever wrote the expression."
+                        ),
+                    }
+                filters_applied = built.get("applied", [])
 
             # Hard limits enforced in our layer — NOT in Qlik Engine.
             # The intent is to force the LLM to design narrow, focused
@@ -914,62 +931,11 @@ class EngineHypercubeMixin:
                         "qExpression": "",
                     }
 
-            # Create correct hypercube structure
-            hypercube_def = {
-                "qDimensions": [
-                    {
-                        "qDef": {
-                            "qFieldDefs": [dim["field"]],
-                            "qSortCriterias": [
-                                {
-                                    "qSortByState": 0,
-                                    "qSortByFrequency": 0,
-                                    "qSortByNumeric": dim["sort_by"].get("qSortByNumeric", 0),
-                                    "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
-                                    "qSortByLoadOrder": 0,
-                                    "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
-                                    "qExpression": self._as_value_expr(
-                                        dim["sort_by"].get("qExpression", "")
-                                    ),
-                                }
-                            ],
-                        },
-                        "qNullSuppression": bool(exclude_null_dimensions),
-                        "qIncludeElemValue": True,
-                    }
-                    for dim in converted_dimensions
-                ],
-                "qMeasures": [
-                    {
-                        "qDef": {"qDef": measure["expression"], "qLabel": measure.get("label", f"Measure_{i}")},
-                        "qSortBy": measure["sort_by"],
-                    }
-                    for i, measure in enumerate(converted_measures)
-                ],
-                "qInitialDataFetch": [
-                    {
-                        # Paging starts where the caller asked. Without this
-                        # every page was the first page, so a result wider
-                        # than the row cap had no second page at all.
-                        "qTop": page_offset,
-                        "qLeft": 0,
-                        "qHeight": first_page_height,
-                        "qWidth": n_cols,
-                    }
-                ],
-                "qSuppressZero": bool(suppress_zero),
-                # Always off. Measured on Qlik 31.62: qSuppressMissing drops
-                # exactly one row — the NULL-dimension group (50002 rows to
-                # 50001 on a field with 50k values plus NULLs) — and leaves
-                # rows with a NULL *measure* alone. That is precisely what
-                # qNullSuppression on each dimension already does, under the
-                # caller's control via exclude_null_dimensions. Setting both
-                # only meant the cube-wide flag could override an explicit
-                # request to keep the NULL group.
-                "qSuppressMissing": False,
-                "qMode": "S",
-                "qInterColumnSortOrder": inter_column_sort_order,
-            }
+            hypercube_def = self._hypercube_def(
+                converted_dimensions, converted_measures, page_offset,
+                first_page_height, inter_column_sort_order, suppress_zero,
+                exclude_null_dimensions,
+            )
 
             # The qId must be unique per call, not per request shape. Reusing
             # an id that was destroyed moments ago in the same Engine session
@@ -1108,7 +1074,9 @@ class EngineHypercubeMixin:
 
             timings["total_seconds"] = round(time.monotonic() - t0, 3)
 
-            rows = self._matrix_to_rows(initial_pages, column_names)
+            temporal_columns = self._temporal_columns(hypercube)
+            rows = self._matrix_to_rows(initial_pages, column_names,
+                                        temporal_columns)
             warnings = list(input_warnings)
             if not rows and converted_measures:
                 # No rows at all is the *strongest* version of the same
@@ -1151,13 +1119,17 @@ class EngineHypercubeMixin:
                     ("desc" if sort_direction == -1 else "asc")
                     if sort_column_index is not None else None
                 ),
-                # Same rule as the rows: a cell with no qNum at all is text,
-                # not a null. Checking only against the "NaN" sentinel put a
-                # JSON null in the totals wherever Engine omitted the key.
+                # Same rules as the rows: a cell with no qNum at all is text
+                # rather than a null, and a date reads as the text Qlik
+                # displays. The grand-total row holds measures only, so its
+                # column indexes start after the dimensions.
                 "grand_total": [
                     cell.get("qText")
-                    if cell.get("qNum") in (None, "NaN") else cell.get("qNum")
-                    for cell in hypercube.get("qGrandTotalRow", []) or []
+                    if (cell.get("qNum") in (None, "NaN")
+                        or (n_dims + index) in temporal_columns)
+                    else cell.get("qNum")
+                    for index, cell in enumerate(
+                        hypercube.get("qGrandTotalRow", []) or [])
                 ],
                 "hard_max_rows": HARD_MAX_ROWS,
                 "truncation_warning": truncation_warning,
@@ -1174,6 +1146,11 @@ class EngineHypercubeMixin:
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
             }
+            if filters_applied:
+                # What each described filter resolved to, including the
+                # period actually selected and how many values of the field
+                # fall inside it.
+                response["filters_applied"] = filters_applied
             if include_raw_layout:
                 # Opt-in: the full qHyperCube (qDimensionInfo, qMeasureInfo,
                 # qDataPages with qElemNumber/qState per cell). Costs several

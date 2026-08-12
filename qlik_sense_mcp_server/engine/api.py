@@ -26,8 +26,11 @@ from ..config import (
 from ..jwt_session import JwtSession
 from .app_model import EngineAppModelMixin
 from .connection import EngineConnectionMixin
+from .expressions import EngineExpressionsMixin
 from .fields import EngineFieldsMixin
+from .filters import EngineFiltersMixin
 from .hypercube import EngineHypercubeMixin
+from .queries import EngineQueriesMixin
 from .sheets import EngineSheetsMixin
 
 logger = logging.getLogger(__name__)
@@ -36,7 +39,10 @@ logger = logging.getLogger(__name__)
 class QlikEngineAPI(
     EngineConnectionMixin,
     EngineHypercubeMixin,
+    EngineQueriesMixin,
     EngineFieldsMixin,
+    EngineExpressionsMixin,
+    EngineFiltersMixin,
     EngineSheetsMixin,
     EngineAppModelMixin,
 ):

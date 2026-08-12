@@ -634,7 +634,7 @@ class QlikRepositoryAPI:
             "timeZone": time_zone,
             # Since Qlik November 2025 the IANA zone and DST are separate
             # fields and an offset inside startDate is deprecated.
-            # Measured on Qlik 31.62 with Europe/Berlin and a 03:00 local
+            # Measured: with Europe/Berlin and a 03:00 local
             # start in July: 0 fires at 01:00 UTC (the zone's DST rules are
             # observed), 1 fires at 02:00 UTC (standard time year-round).
             # 0 is therefore the right default — the schedule stays at the
