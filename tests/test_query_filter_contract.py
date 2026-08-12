@@ -286,3 +286,88 @@ class TestUnusableNumericBounds:
         plan = engine._plan_query(1, "app", _query(
             filters=[{"field": "Amount", "from": bound}]), 0)
         assert plan["error_category"] == "invalid_filter"
+
+
+class TestEmptyIntersection:
+    """Two filters that each select something can select nothing together.
+
+    Engine answers Min/Max over an empty set with the string "NaN".
+    Comparing that to a day number raised TypeError and took the whole
+    batch down with it — the one thing a batch promises not to do.
+    """
+
+    class _Empty(_Engine):
+        def _evaluate(self, expression):
+            if "Min(" in expression or "Max(" in expression:
+                return {"qText": "-", "qNumber": "NaN", "qIsNumeric": False}
+            return super()._evaluate(expression)
+
+    def test_the_batch_survives_and_says_so(self):
+        engine = self._Empty()
+        result = engine.run_queries(1, "app", [
+            _query(filters=[{"field": "OrderDate", "period": "2011"}]),
+            _query(),
+        ])
+        assert result["queries_run"] == 2
+        check = result["results"][0]["period_check"][0]
+        assert check["filter_applied"] is None
+        assert "no rows" in check["note"]
+
+    def test_a_number_that_arrives_as_text_is_still_a_number(self):
+        engine = _Engine()
+        engine._evaluate = lambda expr: {"qText": "5", "qNumber": "5",
+                                         "qIsNumeric": True}
+        values = engine.evaluate_expressions(1, ["=Count(1)"])
+        assert values[0]["number"] == 5.0
+
+
+class TestFilterValuesCountTowardsTheBudget:
+    def test_a_filter_holding_too_many_values_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSIONS_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Region",
+                      "values": [f"v{i}" for i in range(MAX_EXPRESSIONS_PER_CALL)]}])])
+        assert result["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_a_handful_of_values_still_works(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North", "South"]}])])
+        assert result["queries_failed"] == 0
+
+
+class TestFilterFieldNames:
+    def test_a_bracket_in_a_filter_field_is_refused(self):
+        """It is written into a set modifier, where Qlik has no escape
+        for one."""
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(
+            filters=[{"field": "pri]ce", "from": 400}]), 0)
+        assert plan["error_category"] == "invalid_filter"
+
+
+class TestRangeControl:
+    def test_a_numeric_range_reports_what_the_result_holds(self):
+        engine = _Engine(period_bounds=(410, 480))
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Amount", "from": 400, "to": 500}])])
+        check = result["results"][0]["period_check"][0]
+        assert check["filter_applied"] is True
+
+    def test_a_value_outside_the_range_says_the_filter_did_not_apply(self):
+        engine = _Engine(period_bounds=(10, 9000))
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Amount", "from": 400, "to": 500}])])
+        reply = result["results"][0]
+        assert reply["period_check"][0]["filter_applied"] is False
+        assert any("did not narrow" in w for w in reply["warnings"])
+
+    def test_the_named_upper_bound_is_included(self):
+        """`to: 500` means 500 counts; a period's upper bound does not."""
+        engine = _Engine(period_bounds=(400, 500))
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Amount", "from": 400, "to": 500}])])
+        assert result["results"][0]["period_check"][0]["filter_applied"] is True

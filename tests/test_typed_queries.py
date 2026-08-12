@@ -89,9 +89,17 @@ class _Engine(QlikEngineAPI):
 
     @staticmethod
     def _names(expression):
+        """Names Qlik would read as fields.
+
+        Measured on the real CheckExpression: a value in single quotes is
+        a literal and never a field, so `{<Region={'North'}>}` reports
+        nothing about North.
+        """
         import re
+        without_literals = re.sub(r"'[^']*'", "", expression)
         return [m.group(1) or m.group(2) for m in
-                re.finditer(r"\[([^\]]+)\]|\b([A-Z][A-Za-z]+)\b", expression)
+                re.finditer(r"\[([^\]]+)\]|\b([A-Z][A-Za-z]+)\b",
+                            without_literals)
                 if (m.group(1) or m.group(2)) not in
                 ("Sum", "Count", "Avg", "Min", "Max", "Text", "Num", "If",
                  "DISTINCT", "Median", "Stdev")]

@@ -230,8 +230,10 @@ def engine_query(
                 "filters": [{"field": "OrderDate", "from": "2023", "to": "2025"}]}
              ]}
 
-        There is no cap on how many. Plan the whole question in one call
-        rather than discovering it one round-trip at a time.
+        Up to 25 queries in one call, and up to 200 grouping fields,
+        measures and filter values between them — every one of those is
+        checked by Qlik before the batch runs. Plan the whole question in
+        one call rather than discovering it one round-trip at a time.
 
     WHEN NOT TO USE
         A calculation this vocabulary cannot state — a nested aggregation,

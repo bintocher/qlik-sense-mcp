@@ -462,6 +462,18 @@ class EngineFiltersMixin:
                     "error": f"Filter {entry!r} names no field.",
                     "error_category": "invalid_filter",
                 }
+            if "[" in field or "]" in field:
+                # The name is written into a set modifier, and Qlik has no
+                # escape for a bracket inside one. A name carrying one
+                # cannot be written unambiguously, so it is refused rather
+                # than sent as a broken modifier Qlik would quietly drop.
+                return {
+                    "error": (
+                        f"Field name {field!r} carries a bracket, which "
+                        f"cannot be written into a filter unambiguously."
+                    ),
+                    "error_category": "invalid_filter",
+                }
             has_period = any(k in entry for k in ("from", "to", "period"))
             values = entry.get("values")
             if has_period and values:

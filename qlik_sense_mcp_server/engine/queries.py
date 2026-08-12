@@ -19,6 +19,16 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _as_number(value: Any) -> Optional[float]:
+    """A stated bound as a number, or None when there is no bound."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 # Aggregations a metric may ask for, and the Qlik function behind each.
 # `count` counts values of the field, `count_distinct` counts different
 # ones — the pair a caller reaches for as "how many orders" against "how
@@ -228,17 +238,32 @@ class EngineQueriesMixin:
         """
         probes = []
         for applied in plan.get("filters_applied", []):
-            if "serial_from" not in applied:
+            # A period and a numeric range are both bounded filters, and
+            # both can silently fail to apply. Values outside the bounds
+            # in the result say so; a value list cannot fail this way,
+            # since each value was checked against the field.
+            if "serial_from" not in applied and "from" not in applied:
+                continue
+            if applied.get("from") is None and applied.get("to") is None:
                 continue
             field = f"[{applied['field']}]"
             modifier = plan.get("modifier", "")
             inner = f"{modifier} {field}" if modifier else field
+            # A period compares against day numbers; a range against the
+            # values themselves. Either way the question is the same: does
+            # the result hold anything outside what was asked for.
+            is_period = "serial_from" in applied
+            low_bound = (applied["serial_from"] if is_period
+                         else _as_number(applied.get("from")))
+            high_bound = (applied["serial_to_exclusive"] if is_period
+                          else _as_number(applied.get("to")))
             probes.append({
                 "field": applied["field"],
                 "expected_from": applied["from"],
                 "expected_to": applied["to"],
-                "serial_from": applied["serial_from"],
-                "serial_to_exclusive": applied["serial_to_exclusive"],
+                "serial_from": low_bound,
+                "serial_to_exclusive": high_bound,
+                "inclusive_upper": not is_period,
                 "earliest": f"=Text(Min({inner}))",
                 "latest": f"=Text(Max({inner}))",
                 "earliest_number": f"=Num(Min({inner}))",
@@ -260,10 +285,28 @@ class EngineQueriesMixin:
         }
         low = earliest_num.get("number")
         high = latest_num.get("number")
-        if low is None or high is None:
+        if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+            # Two filters that each select something can still select
+            # nothing together — January and a region with no January
+            # sales. Engine answers Min/Max over an empty set with its
+            # "NaN" sentinel, and comparing that to a day number raised
+            # TypeError and took the whole batch down.
+            check["filter_applied"] = None
+            check["note"] = (
+                "The filters together select no rows, so there is nothing "
+                "to check the period against."
+            )
             return check
-        outside = (low < probe["serial_from"]
-                   or high >= probe["serial_to_exclusive"])
+        lower = probe.get("serial_from")
+        upper = probe.get("serial_to_exclusive")
+        outside = False
+        if lower is not None:
+            outside = outside or low < lower
+        if upper is not None:
+            # A period's upper bound is the next day and excludes it; a
+            # numeric range includes the bound the caller named.
+            outside = outside or (high > upper if probe.get("inclusive_upper")
+                                  else high >= upper)
         check["filter_applied"] = not outside
         if outside:
             check["note"] = (
@@ -290,6 +333,12 @@ class EngineQueriesMixin:
         expressions = sum(
             len(q.get("group_by") or q.get("dimensions") or [])
             + len(q.get("metrics") or []) + len(q.get("measures") or [])
+            # Every filter value costs its own Engine call — each one is
+            # checked against the field before the query runs — so they
+            # count against the same budget as the expressions do.
+            + sum(len(f.get("values") or [])
+                  for f in (q.get("filters") or [])
+                  if isinstance(f, dict))
             for q in queries if isinstance(q, dict))
         if expressions > MAX_EXPRESSIONS_PER_CALL:
             return {

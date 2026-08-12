@@ -177,9 +177,22 @@ class EngineExpressionsMixin:
                                "is_numeric": False, "error": str(outcome)})
                 continue
             value = (outcome or {}).get("qValue") or {}
+            # Engine writes "no number here" as the string "NaN" — for a
+            # Null result, for text, for an expression it could not
+            # evaluate. Letting that through as a number reached a
+            # comparison as a string and raised TypeError; None is what
+            # every caller already handles.
+            number = value.get("qNumber")
+            if isinstance(number, str):
+                try:
+                    number = float(number)
+                except ValueError:
+                    number = None
+                else:
+                    number = None if number != number else number
             values.append({
                 "text": value.get("qText"),
-                "number": value.get("qNumber"),
+                "number": number,
                 "is_numeric": bool(value.get("qIsNumeric")),
                 "error": None,
             })
