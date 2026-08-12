@@ -55,6 +55,31 @@ def forget_app_details(app_id: str = None) -> None:
         _DETAILS_CACHE.pop(app_id, None)
 
 
+def _tags_text(tags: Any) -> str:
+    """Qlik's field tags as one plain string.
+
+    Qlik hands them out as `["$numeric", "$integer"]`. The `$` is on every
+    tag and carries no meaning of its own, and the brackets and quotes cost
+    more than the words. `"numeric integer"` says the same thing.
+    """
+    if isinstance(tags, str):
+        return tags
+    return " ".join(str(tag).lstrip("$") for tag in (tags or []))
+
+
+def _is_temporal(field: Dict[str, Any]) -> bool:
+    """Does this field hold a date or a timestamp?
+
+    Tags reach here as one string (`"numeric timestamp"`), so membership is
+    a word check, not a list lookup — and both spellings, with and without
+    Qlik's leading `$`, are accepted so the answer does not depend on where
+    the field came from.
+    """
+    tags = field.get("tags") or ""
+    words = tags.split() if isinstance(tags, str) else [str(t) for t in tags]
+    return any(w.lstrip("$") in ("date", "timestamp") for w in words)
+
+
 def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None:
     """Add `values` to low-cardinality fields, and `sample` to date fields.
 
@@ -71,11 +96,7 @@ def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None
     ]
     # Dates are the other guessing trap, and they are never low-cardinality;
     # a couple of values are enough to show the display format.
-    date_fields = [
-        f for f in fields
-        if f not in candidates
-        and any(tag in ("$date", "$timestamp") for tag in (f.get("tags") or []))
-    ]
+    date_fields = [f for f in fields if f not in candidates and _is_temporal(f)]
     wanted = (candidates + date_fields)[:SAMPLE_VALUES_MAX_FIELDS]
     results = {}
     if wanted:
@@ -370,14 +391,25 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
                 continue
             tname = f.get("table_name", "")
             table_map.setdefault(tname, []).append(f)
+            # Only what this field does not share with its table. `rows` is
+            # the table's row count repeated on every field; `is_key` is
+            # false for most of them; empty tags say nothing. Each omission
+            # is ~20 characters per field, and a model reads a shorter list
+            # more reliably than a longer one saying the same thing.
             entry = {
                 "name": f.get("field_name", ""),
                 "table": tname,
-                "is_key": f.get("is_key", False),
                 "distinct_values": f.get("distinct_values", 0),
-                "rows": f.get("rows_count", 0),
-                "tags": f.get("tags", []),
             }
+            if f.get("is_key"):
+                entry["is_key"] = True
+            # Qlik's own tags, minus the `$` every one of them carries and
+            # joined into one string: `["$numeric","$integer"]` is 26
+            # characters of JSON punctuation for 14 of meaning, and the same
+            # two words repeat down the whole model.
+            tags = _tags_text(f.get("tags", []))
+            if tags:
+                entry["tags"] = tags
             # COMMENT FIELD text, when the load script sets one. Emitted only
             # when non-empty: most apps comment a handful of fields, and an
             # empty key on every field is pure noise in the LLM context.
@@ -451,10 +483,7 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             f"set-analysis filters and keep max_rows small (15-50) for "
             f"top-N queries."
         )
-    has_date = any(
-        "$date" in f.get("tags", []) or "$timestamp" in f.get("tags", [])
-        for f in fields
-    )
+    has_date = any(_is_temporal(f) for f in fields)
     if has_date:
         warnings.append(
             "Date/timestamp fields present. To learn the loaded period, "

@@ -23,6 +23,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   16k instead of ~32k at 300 fields.
 - `get_app_details` now says in its own description that `get_about` is
   never a prerequisite and `get_apps` is only needed without a name.
+- Field metadata is tighter without losing anything a caller needs. Tags
+  come back as one string without Qlik's `$` (`"numeric integer"` for
+  `["$numeric", "$integer"]`); `rows` is no longer repeated on every field
+  when it is the table's row count, reported with the table; `is_key` and
+  `tags` appear only when they say something. The load-script comment is
+  returned as before — it is the only human description a column has.
+  Measured: 7.6k characters to 6.5k on a 33-field model.
 
 ### Fixed
 
