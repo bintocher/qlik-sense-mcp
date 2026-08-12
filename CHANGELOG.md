@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [Unreleased]
+## [2.0.0] - 2026-08-12
 
 ### Added
 
@@ -25,6 +25,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   too, applied wherever a measure carries the `{filter}` marker.
 - `QLIK_TASK_TOOLS=false` leaves the 14 reload-task tools out of
   certificate mode, for an identity that only reads data.
+
+- Filter bounds follow the field. On a date field `from` and `to` are days;
+  on any other field they are the values themselves, so
+  `{"field": "Discount", "from": 400}` is a discount of 400 or more.
+  Measured on a live app: read as a date, 400 became a day in 1901 and the
+  answer came back 18,774 where the truth was 1,898,591 — a plausible
+  number, and wrong.
+- `greater_than` and `less_than` exclude the bound they name. "More than
+  400" and "from 400" are different questions, and on a 10M-row app the
+  difference is the 184 orders discounted by exactly 400.
+- A numeric range reports its control values the way a period does: the
+  smallest and largest value inside the result, and whether they fall
+  within the bounds asked for.
 
 ### Changed
 
@@ -74,6 +87,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- A batch of queries no longer fails as a whole. Engine is asked about
+  every expression in the batch once, and each query is then judged on its
+  own: two mistakes of different kinds both land, and a query naming
+  `NopeAmount` is not refused because another named `Nope`.
+- Two filters that each select something but select nothing together took
+  the whole call down. Engine answers Min/Max over an empty set with a
+  "NaN" sentinel, which reached a numeric comparison as text; it is now
+  read as "no value" everywhere.
+- A field name written into an expression stays one name. `Amount]) +
+  Sum([Amount` turned one aggregation into two, the second without the
+  filter, while the reply reported the period as applied.
+- One call is bounded: 25 queries, and 200 grouping fields, measures and
+  filter values between them. Each of those costs an Engine call before
+  the batch runs.
+- Session objects are released on every path out, including a transport
+  failure part way through a batch.
+- A repository request is retried after a timeout only when it reads.
+  Retrying a POST could create a second task.
 - The first call after a quiet period no longer fails. A Qlik that has
   been idle answers slowly — measured through the virtual proxy, 15 to 21
   seconds to bootstrap a session and 3 to 15 for the first repository
