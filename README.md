@@ -66,6 +66,7 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
 | [`docs/development.md`](docs/development.md) | `make` targets, tests, versioning, how to add a new tool |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
+| [`docs/llm-behaviour.md`](docs/llm-behaviour.md) | What models actually do with this server, measured: calls per question, where they go wrong, session limits, how to benchmark honestly |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
 ## Key facts about the v1.9.0 line
