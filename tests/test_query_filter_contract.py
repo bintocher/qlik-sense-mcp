@@ -221,3 +221,68 @@ class TestObjectsAreAlwaysReleased:
         with pytest.raises(TimeoutError):
             engine.run_queries(1, "app", [_query()])
         assert engine.destroyed == []
+
+
+class TestFieldNamesAreOneIdentifier:
+    """A metric names a field. Written into an expression unchecked, a
+    name carrying a bracket turns one aggregation into two — and the
+    second one carries no filter while `period_check` reports success."""
+
+    @pytest.mark.parametrize("field", [
+        "Amount]) + Sum([Amount",
+        "Amount] , [Region",
+        "[Amount]) * 2 + Count([Amount",
+    ])
+    def test_a_name_with_a_bracket_is_refused_in_a_metric(self, field):
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(
+            metrics=[{"field": field, "agg": "sum"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+    def test_a_name_with_a_bracket_is_refused_in_a_grouping(self):
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(
+            group_by=["Region]) + ([Amount"]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+    def test_an_ordinary_name_still_works_bracketed_or_not(self):
+        engine = _Engine()
+        assert "error" not in engine._plan_query(1, "app", _query(
+            group_by=["[Region]"], metrics=[{"field": "[Amount]", "agg": "sum"}]), 0)
+
+
+class TestExpressionBudget:
+    def test_one_query_holding_too_many_measures_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSIONS_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "label": f"m{i}"}
+                     for i in range(MAX_EXPRESSIONS_PER_CALL + 1)])])
+        assert result["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_an_ordinary_batch_is_well_inside_it(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query() for _ in range(5)])
+        assert result["queries_run"] == 5
+
+
+class TestMarkerWithoutFilters:
+    def test_a_marker_with_no_filter_is_refused_rather_than_sent(self):
+        """Qlik has no meaning for it and would read it as text."""
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(
+            metrics=[], measures=[{"expression": "Sum({filter} [Amount])"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "drop the marker" in plan["hint"]
+
+
+class TestUnusableNumericBounds:
+    @pytest.mark.parametrize("bound", [float("inf"), float("-inf"),
+                                       float("nan"), "inf", "nan"])
+    def test_a_bound_qlik_cannot_compare_is_refused(self, bound):
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(
+            filters=[{"field": "Amount", "from": bound}]), 0)
+        assert plan["error_category"] == "invalid_filter"

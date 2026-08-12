@@ -22,6 +22,7 @@ only where it agrees.
 
 import datetime
 import logging
+import math
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,13 +98,20 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
         return None
 
 
-def _plain_number(value: Any) -> str:
+def _plain_number(value: Any) -> Optional[str]:
     """A bound as Qlik reads it: a plain number, no thousands separators.
 
     `400.0` is written `400`, because a search string is compared as text
-    and a trailing `.0` is text Qlik has no value for.
+    and a trailing `.0` is text Qlik has no value for. Infinity and
+    not-a-number are not bounds Qlik can compare against, so they come
+    back as None and are refused with everything else it cannot read.
     """
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
     return str(int(number)) if number == int(number) else repr(number)
 
 
@@ -183,12 +191,10 @@ class EngineFiltersMixin:
         The bounds are the values themselves and both ends are included:
         "discount from 400 to 500" is `>=400<=500`.
         """
-        try:
-            bounds = [float(v) for v in (low, high) if v is not None
-                      and not isinstance(v, bool)]
-        except (TypeError, ValueError):
-            bounds = []
-        if len(bounds) != len([v for v in (low, high) if v is not None]):
+        stated = [v for v in (low, high) if v is not None]
+        written = [_plain_number(v) for v in stated
+                   if not isinstance(v, bool)]
+        if len(written) != len(stated) or any(w is None for w in written):
             return {
                 "error": (
                     f"Bounds {low!r}..{high!r} on {field!r} are neither dates "

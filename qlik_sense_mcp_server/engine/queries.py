@@ -51,6 +51,21 @@ FILTER_MARKER = "{filter}"
 # real question and far below anything that hurts.
 MAX_QUERIES_PER_CALL = 25
 
+# Expressions one call may carry, counting every grouping field and every
+# measure of every query. Capping the queries alone left the inner lists
+# unbounded: one query holding ten thousand measures passed the check and
+# then sent ten thousand expressions to Engine twice over, holding the
+# single shared socket throughout.
+MAX_EXPRESSIONS_PER_CALL = 200
+
+# What a field name may look like when the server writes it into an
+# expression. Qlik has no escape for `]` inside a bracketed name, so a
+# name carrying one cannot be written safely — and `Amount]) + Sum([Amount`
+# is a valid-looking name that turns one aggregation into two. Such a name
+# is refused rather than quoted, and a genuine field with a bracket is
+# reachable through a hand-written measure.
+_UNSAFE_IN_FIELD_NAME = ("]", "[")
+
 
 class EngineQueriesMixin:
     """Run typed queries, several at a time, over one socket."""
@@ -72,6 +87,11 @@ class EngineQueriesMixin:
             if not field:
                 return {"id": query_id, "error": (
                     f"Query {query_id!r} lists a grouping field with no name."),
+                    "error_category": "invalid_argument"}
+            if any(ch in field.strip("[]") for ch in _UNSAFE_IN_FIELD_NAME):
+                return {"id": query_id, "error": (
+                    f"Grouping field {field!r} carries a bracket, which "
+                    f"cannot be written into an expression unambiguously."),
                     "error_category": "invalid_argument"}
             dimensions.append({"field": field})
 
@@ -137,6 +157,13 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"Metric {metric!r} names no field."),
                     "error_category": "invalid_argument"}
+            if any(ch in field for ch in _UNSAFE_IN_FIELD_NAME):
+                return [], {"id": query_id, "error": (
+                    f"Field name {field!r} carries a bracket, which cannot be "
+                    f"written into an expression unambiguously."),
+                    "error_category": "invalid_argument",
+                    "hint": ("A metric names one field. For an expression, "
+                             "use `measures`.")}
             expression = AGGREGATIONS[aggregation].format(
                 modifier=prefix.rstrip() if prefix else "",
                 field=f"[{field}]").replace("(  ", "(").replace("( ", "(")
@@ -159,6 +186,13 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"Measure {measure!r} carries no expression."),
                     "error_category": "invalid_argument"}
+            if not modifier and FILTER_MARKER in expression:
+                return [], {"id": query_id, "error": (
+                    f"Measure {expression!r} marks a place for a filter, but "
+                    f"the query states none."),
+                    "error_category": "invalid_argument",
+                    "hint": ("Add `filters`, or drop the marker — Qlik has no "
+                             "meaning for it and would read it as text.")}
             if modifier:
                 if FILTER_MARKER not in expression:
                     return [], {"id": query_id, "error": (
@@ -253,6 +287,20 @@ class EngineQueriesMixin:
         reason; the rest of the batch still answers.
         """
         started = time.monotonic()
+        expressions = sum(
+            len(q.get("group_by") or q.get("dimensions") or [])
+            + len(q.get("metrics") or []) + len(q.get("measures") or [])
+            for q in queries if isinstance(q, dict))
+        if expressions > MAX_EXPRESSIONS_PER_CALL:
+            return {
+                "error": (
+                    f"{expressions} grouping fields and measures in one call; "
+                    f"the cap is {MAX_EXPRESSIONS_PER_CALL}."
+                ),
+                "error_category": "limit_exceeded",
+                "hint": ("Every one of them is checked by Engine before the "
+                         "batch runs. Ask fewer things at a time."),
+            }
         if len(queries) > MAX_QUERIES_PER_CALL:
             # Refused before anything is planned or opened: the whole batch
             # goes to Engine before the first reply is read, and every
