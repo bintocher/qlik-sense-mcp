@@ -7,9 +7,9 @@
 
 [Model Context Protocol](https://modelcontextprotocol.io/) server for
 Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
-(WebSocket) APIs as **27 MCP tools** so an LLM client can discover apps,
-inspect data models, build hypercubes, and manage reload tasks through
-a single uniform interface. In JWT mode the 14 reload-task tools are
+(WebSocket) APIs as **28 MCP tools** so an LLM client can discover apps,
+inspect data models, query data, and manage reload tasks through a
+single uniform interface. In JWT mode the 14 reload-task tools are
 hidden, since QRS task administration needs certificate auth.
 
 ## What's in the box
@@ -17,26 +17,33 @@ hidden, since QRS task administration needs certificate auth.
 | Area | Tools | Used for |
 |------|-------|----------|
 | Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
-| Engine (data & script)       | `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `search_app`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics`, `engine_create_hypercube` | Read load script, list visualizations, query field values, build hypercubes |
+| Engine (data & script)       | `engine_query`, `engine_create_hypercube`, `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `search_app`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics` | Query data, read load script, list visualizations, inspect field values |
 | Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
 
 Full list with descriptions: [`docs/tools.md`](docs/tools.md).
 
-The main analysis call maps onto SQL one-to-one — `dimensions` is the
-`GROUP BY`, `measures` are the aggregates, `sort_by` / `sort_order` are
-the `ORDER BY`, `limit` is the `LIMIT`:
+The main analysis call takes the question, not the Qlik syntax for it:
 
 ```jsonc
-// engine_create_hypercube — "the 10 clients with the highest GGR"
+// engine_query — "revenue by region for 2024, biggest first"
 {
   "app_id": "<app guid>",
-  "dimensions": [{"field": "clientid"}],
-  "measures":   [{"expression": "Sum(ggr)", "label": "GGR"}],
-  "sort_by": "GGR",
-  "sort_order": "desc",
+  "group_by": ["region_name"],
+  "metrics":  [{"field": "amount", "agg": "sum", "label": "Revenue"}],
+  "filters":  [{"field": "order_date", "period": "2024"}],
+  "sort_by": "Revenue",
   "limit": 10
 }
 ```
+
+The server writes the set analysis, checks that the filter selects
+something, and answers with `period_check` — the earliest and latest
+date actually in the result — so a filter that failed to apply is
+visible instead of hiding behind a plausible number. Independent
+questions go in one call as `queries` and share three round-trips.
+
+`engine_create_hypercube` takes the same shape with the expressions
+written by hand, for calculations the typed form cannot state.
 
 ## Quick start
 
@@ -69,15 +76,26 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/llm-behaviour.md`](docs/llm-behaviour.md) | What models actually do with this server, measured: calls per question, where they go wrong, session limits, how to benchmark honestly |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
-## Key facts about the v1.9.0 line
+## Key facts
 
 - **A wrong query is refused, not answered.** Qlik evaluates an unknown
   field name as an expression worth 0, so a hypercube grouped by a typo
   came back as a single row holding the grand total — a plausible number
-  with nothing to mark it as wrong. Dimension fields are checked against
-  the data model first (about 10ms), and measures that come back entirely
-  zero, contain SQL, or mention names the model does not have are
-  reported in `warnings`.
+  with nothing to mark it as wrong. Every query is checked by Engine
+  before it runs: `ExpandExpression` resolves variables, `CheckExpression`
+  reports syntax and unknown names, `GetFieldsFromExpression` reports the
+  fields a set modifier actually filters on. The four checks cost about
+  4ms in one batch, against 75ms for the smallest hypercube.
+- **A period filter is measured, not assumed.** Comparison inside a set
+  modifier runs against the text Qlik displays for a value, so a serial
+  number range returns 0 on a field displayed as `01.01.2024` and works
+  on one displayed as `45292` — with no error either way. State the
+  period as a filter and the server tries the cheap numeric form against
+  a reference count, falls back to the form that always works, and
+  reports the period the result actually covers.
+- **One value, one writing.** A date in a query result reads as the text
+  Qlik displays for it, the same as the sample values in
+  `get_app_details` and the bounds from `engine_get_field_range`.
 - **Objects say which fields they use.** `get_app_sheet_objects` returns
   `fields_used`, including fields reached through master measures and the
   ones inside a filter pane's listboxes — so "what does this sheet work

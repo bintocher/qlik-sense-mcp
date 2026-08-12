@@ -6,16 +6,57 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Added
+
+- `engine_query`: a query stated rather than written. `group_by` names the
+  grouping fields, `metrics` the aggregations
+  (`{"field": "Amount", "agg": "sum"}`), `filters` the period or the
+  values to narrow to; the server writes the Qlik expressions. `queries`
+  takes a list of independent questions — different groupings, different
+  measures, different filters — and runs the whole list over three
+  round-trips rather than three per question, however many there are. A
+  question that fails takes only itself down.
+- A period filter reports what it selected. Every query filtered on a date
+  answers with `period_check`: the earliest and latest value of that field
+  inside the result, and whether the filter applied. Qlik reports neither —
+  it drops a condition it cannot honour and answers with the unfiltered
+  total, a number larger than the truth with nothing to mark it as wrong.
+- Filters described rather than written work in `engine_create_hypercube`
+  too, applied wherever a measure carries the `{filter}` marker.
+- `QLIK_TASK_TOOLS=false` leaves the 14 reload-task tools out of
+  certificate mode, for an identity that only reads data.
+
 ### Changed
 
-- Validating a hypercube no longer asks Qlik about field names a model
-  read moments ago already listed — one round-trip less on almost every
-  query, measured as two pipelined batches becoming one. A name the model
-  does not list is still verified against Engine, so an unknown field is
-  still refused and a system field still accepted; a model read more than
-  a minute ago vouches for nothing, because a reload in between deletes
-  fields and Qlik answers a query naming a deleted field with a plausible
-  number rather than an error.
+- Every check on a query is now made by Engine, in one batch that costs
+  about 4ms against 75ms for the smallest hypercube: `ExpandExpression`
+  resolves `$(...)` so the checks see what will run, `CheckExpression`
+  reports syntax and names the data model does not have,
+  `GetFieldsFromExpression` reports the fields a set modifier actually
+  filters on. The lexical scan that guessed at all three — set-modifier
+  field names, SQL keywords, quoted comparisons, variable expansion — is
+  removed. An unknown name in a measure is now refused rather than
+  warned about: it is Engine's verdict, and Qlik scores such a name as 0,
+  so the measure would come back as a column of zeros that reads as an
+  answer.
+- The form of a date filter is measured rather than assumed. Comparison
+  inside a set modifier runs against the text Qlik displays for a value,
+  so a serial-number range returns 0 on a field displayed as `01.01.2024`
+  and works on one displayed as `45292` — with no error either way.
+  Measured against a field carrying a time of day, the numeric form
+  selected nothing and the expression form was correct; on a field of bare
+  numbers both were correct and the numeric one sixty times cheaper. The
+  server now checks the cheap form against a reference count and uses it
+  only where it agrees, remembering the answer per field.
+- A date in a query result reads as the text Qlik displays for it, the
+  same writing as the sample values in `get_app_details`, the values from
+  `get_app_field` and the bounds from `engine_get_field_range`. It used to
+  come back as the serial number, so one value had two writings and a
+  filter written from the wrong one selected nothing.
+- Tool descriptions rewritten to one shape: what the tool does, when to
+  use it, when not to, what it returns and what it does not. The block
+  about Qlik's session limit repeated in eight of them is gone — it
+  described something the caller does not control.
 - `get_app_details` switches to a `columns` + `rows` table once a model has
   more than 60 fields, and skips reading sample values there. Narrow
   models — the normal case — keep the readable per-field form. Measured
@@ -33,6 +74,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Fixed
 
+- The first call after a quiet period no longer fails. A Qlik that has
+  been idle answers slowly — measured through the virtual proxy, 15 to 21
+  seconds to bootstrap a session and 3 to 15 for the first repository
+  call, against hundredths of a second once warm — and both ran under a
+  ten-second deadline. The bootstrap now has its own minute, and a
+  timed-out repository call is retried once with room to breathe.
 - The schema cache never noticed a reload: both callers passed `None`
   where the app's reload timestamp belonged, so the invalidation the
   cache was built around had never once fired and only the ten-minute

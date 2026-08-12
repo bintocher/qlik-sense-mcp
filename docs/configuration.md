@@ -67,6 +67,12 @@ Defaults match the standard
 |----------|---------|-------------|
 | `QLIK_VERIFY_SSL` | `false` | Verify TLS certificates. Off by default: Qlik Sense Enterprise serves its own self-signed certificate, so a correct installation fails verification. Set to `true` once Qlik presents a certificate your machine trusts (and point `QLIK_CA_CERT_PATH` at the CA if it is a private one). |
 
+## Which tools are registered
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QLIK_TASK_TOOLS` | `true` | Register the 14 reload-task tools. They need repository-admin rights, so they are registered in certificate mode only and this variable has no effect in JWT mode. Set to `false` to leave them out of certificate mode as well — an identity that only reads data has no use for them, and every registered tool takes up room in the model's context. |
+
 ## Logging
 
 | Variable | Default | Description |

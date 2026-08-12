@@ -152,19 +152,22 @@ def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None
 @_timed
 def get_about() -> str:
     """
-    Get Qlik Sense server info (version, build, node type) via QRS `/qrs/about` endpoint.
+    Which Qlik Sense this is: version, build and node type.
 
-    Use this to verify connectivity and identify the Qlik Sense release running on the server.
-    No parameters. Lightweight call, ~200ms.
+    WHEN TO USE
+        To check that the connection works, or when a behaviour depends on
+        the release.
+
+    WHEN NOT TO USE
+        As a first step before other calls — nothing here is needed to
+        list apps or read a data model.
 
     Returns:
-        JSON with fields: buildVersion, buildDate, databaseProvider, nodeType, sharedPersistence, requiresBootstrap.
-    
-    Example:
-        Call: {}
-        Returns: {"tool_call_seconds": 0.21, "buildVersion": "31.56.2.0",
-                  "buildDate": "10/24/2025 09:43:09 AM", "nodeType": 1,
-                  "sharedPersistence": true, "requiresBootstrap": false}
+        `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
+        `sharedPersistence`, `requiresBootstrap`.
+
+    Does not return:
+        Anything about apps, data or the current user.
     """
     e = _check()
     if e:
@@ -183,46 +186,36 @@ def get_apps(
     published: str = "true",
 ) -> str:
     """
-    List Qlik Sense applications from the QRS Repository (no data load — pure metadata).
+    Find apps by name or stream.
 
-    Use this as the entry point to discover apps when the user mentions an app by
-    fragment of its name. Always returns published apps only by default; pass
-    `published="false"` to include drafts from the user's personal sandbox.
+    WHEN TO USE
+        When the app is known by a fragment of its name, or when the task
+        is to survey what exists on the server.
+
+    WHEN NOT TO USE
+        When the name is known in full — `get_app_details(name=...)` looks
+        it up and reads the data model in the same call.
+        When the GUID is known — go straight to `get_app_details`.
 
     Args:
-        limit: Max number of apps to return. Default 25, hard cap 50. Use pagination
-            via `offset` for larger result sets instead of bumping this.
-        offset: Number of apps to skip for pagination. Default 0.
-        name: Case-insensitive substring filter on app name. No wildcards needed —
-            a substring search — `"Rev"` matches `"Revenue 2025"`. Omit to list all apps.
-        stream: Case-insensitive substring filter on the publication stream name
-            (e.g. `"Finance"`). Omit to search across all streams.
-        published: Publication state filter as a string. `"true"` (default) — only
-            published apps; `"false"` — unpublished; `"both"` (or any other
-            value) — no filter at all, published and unpublished together.
+        limit: apps per page. Default 25, cap 50; page with `offset`
+            rather than raising it.
+        offset: apps to skip.
+        name: substring of the app name, case insensitive. No wildcards
+            needed: "Rev" matches "Revenue 2025".
+        stream: substring of the publication stream name.
+        published: `"true"` (default) for published apps, `"false"` for
+            drafts in a personal space, `"both"` for either.
 
     Returns:
-        JSON with `apps` (list of {guid, name, description, stream,
-        modified_dttm, reload_dttm}) and `pagination` metadata.
-    
-    Example (find an app by a fragment of its name):
-        Call: {"name": "Sales", "limit": 5}
-        Returns: {"tool_call_seconds": 0.53,
-                  "apps": [{"guid": "a1b2c3d4-1111-2222-3333-444455556666",
-                            "name": "Sales Dashboard", "description": "...",
-                            "stream": "Finance",
-                            "modified_dttm": "2026-07-20T09:15:00.000Z",
-                            "reload_dttm": "2026-07-27T03:00:00.000Z"}],
-                  "pagination": {"limit": 5, "offset": 0, "returned": 1,
-                                 "total_found": 1, "has_more": false,
-                                 "next_offset": null}}
+        `apps`, each with `guid`, `name`, `description`, `stream`,
+        `modified_dttm`, `reload_dttm`; and `pagination` carrying
+        `total_found` — the real total on the server, not the page size —
+        plus `has_more` and `next_offset`.
 
-    Example (next page of all published apps):
-        Call: {"limit": 25, "offset": 25}
-        Returns: {"tool_call_seconds": 0.61, "apps": ["...25 items..."],
-                  "pagination": {"limit": 25, "offset": 25, "returned": 25,
-                                 "total_found": 1102, "has_more": true,
-                                 "next_offset": 50}}
+    Does not return:
+        Tables, fields or any data. Paging happens in Qlik, so nothing
+        past the record limit goes missing.
     """
     e = _check()
     if e:
@@ -239,59 +232,45 @@ def get_apps(
 @_engine_serialised
 def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) -> str:
     """
-    Get app overview — metadata + full list of tables and fields (cardinality, row counts, keys).
+    The app's data model: its tables, its fields, and what the values look
+    like.
 
-    Use this as the second step after `get_apps` to understand the data model before
-    writing hypercube expressions. Opens the application with data loaded, which
-    populates the server-side cache — any subsequent `engine_create_hypercube`,
-    `get_app_field*`, or `get_app_variables` call against the same `app_id` will
-    reuse the open connection and run much faster.
+    WHEN TO USE
+        First, before asking anything about the data. Field names are
+        case-sensitive and have to match exactly, and this is where they
+        come from. It also opens the app, so every later call against the
+        same `app_id` reuses the open connection.
+        Give it `name` when that is all you have — no separate lookup is
+        needed.
 
-    At least one of `app_id` or `name` must be provided. `app_id` is always preferred.
-
-    This is the first call to make. `get_about` is never a prerequisite, and
-    `get_apps` is only needed when you have neither the GUID nor the name —
-    given a name, call this directly and skip the lookup.
+    WHEN NOT TO USE
+        Repeatedly for the same app: the answer changes only when the app
+        reloads, and a repeat call is served from cache with
+        `from_cache: true`.
 
     Args:
-        app_id: Application GUID (e.g. `"a1b2c3d4-..."`). Preferred over `name`
-            because it uniquely identifies the app. Obtain it from `get_apps`.
-        name: App name to look up. Case-insensitive. If multiple apps match, the
-            exact match wins over partial matches, then the first result is used.
-            Prefer `app_id` when you already know it.
+        app_id: application GUID. Preferred, since it is unambiguous.
+        name: app name, case insensitive. An exact match wins over a
+            partial one. At least one of the two is required.
 
     Returns:
-        JSON with `metainfo` (app_id, name, description, stream, modified_dttm,
-        reload_dttm), `tables` (summary of each table), and `fields` (every
-        non-system, non-hidden field with its table, is_key flag, distinct_values,
-        row count, and tags). Tables and fields carrying a `COMMENT TABLE` /
-        `COMMENT FIELD` text from the load script also get a `comment` key —
-        that is the business description of the column, so read it before
-        guessing a field's meaning from its name. The key is absent when the
-        script sets no comment.
+        `metainfo` (app_id, name, description, stream, modified_dttm,
+        reload_dttm).
+        `tables`, each with `name`, `fields_count`, `rows` and the load
+        script's `COMMENT TABLE` text where there is one.
+        `fields`, each with `name`, `table`, `distinct_values`, Qlik's
+        `tags` as one string, `is_key` where true, and `comment` — the
+        script's `COMMENT FIELD` text, the only description a column
+        carries, worth reading before inferring meaning from a name.
+        Fields with few enough values list them in `values`; wider ones
+        show `lowest_values` and `highest_values`; a date field carries a
+        `sample`, which is the writing to match when naming a period.
+        `warnings` names the tables large enough to need a filter.
+        Past 60 fields the list becomes `columns` plus `rows` to keep the
+        reply small, and values and edges are left out.
 
-    Example:
-        Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
-        Returns: {"tool_call_seconds": 2.84,
-                  "metainfo": {"app_id": "a1b2...", "name": "Sales Dashboard",
-                               "stream": "Finance",
-                               "reload_dttm": "2026-07-27T03:00:00.000Z"},
-                  "warnings": ["Large fact table(s) detected ..."],
-                  "tables": [{"name": "Orders", "fields_count": 12,
-                              "rows": 91028794, "comment": "Order facts"}],
-                  "fields": [{"name": "Amount", "table": "Orders",
-                              "is_key": false, "distinct_values": 9797173,
-                              "rows": 91028794, "tags": ["$numeric"],
-                              "comment": "Order amount, net of refunds"}],
-                  "tables_count": 8, "fields_count": 120}
-
-    Read `warnings` first — it tells you which tables are too big to
-    aggregate without a set-analysis filter.
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Data, aggregates, or the load script — `get_app_script` has that.
     """
     e = _check()
     if e:
@@ -452,47 +431,33 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     high_card_fields = [
         f for f in fields if f.get("distinct_values", 0) >= HIGH_CARD_FIELD
     ]
-    if huge_tables:
-        count = len(huge_tables)
-        max_rows_found = max(t.get("rows", 0) for t in huge_tables)
+    if huge_tables or big_tables:
+        found = huge_tables or big_tables
+        max_rows_found = max(t.get("rows", 0) for t in found)
         warnings.append(
-            f"HUGE fact table(s) detected ({count} table(s), largest "
-            f"~{max_rows_found:,} rows). NEVER build hypercubes on these "
-            f"without a set-analysis filter in every measure (narrow by "
-            f"period / category / key). Unfiltered aggregates will time "
-            f"out. See engine_create_hypercube docstring for the correct "
-            f"set-analysis patterns."
-        )
-    elif big_tables:
-        count = len(big_tables)
-        max_rows_found = max(t.get("rows", 0) for t in big_tables)
-        warnings.append(
-            f"Large fact table(s) detected ({count} table(s), largest "
-            f"~{max_rows_found:,} rows). Always filter measures with set "
-            f"analysis to limit the period/scope and keep response times "
-            f"reasonable."
+            f"{len(found)} table(s) hold a lot of rows, the largest about "
+            f"{max_rows_found:,}. Give every query a filter — a period, a "
+            f"category, a key — so it reads part of the table rather than "
+            f"all of it. `filters` in engine_query is the shortest way to "
+            f"say so."
         )
     if high_card_fields:
-        count = len(high_card_fields)
         max_card = max(f.get("distinct_values", 0) for f in high_card_fields)
         warnings.append(
-            f"High-cardinality field(s) detected ({count} field(s), "
-            f"highest ~{max_card:,} distinct values). Sorting hypercube "
-            f"dimensions by these via qSortByExpression forces a full "
-            f"sort of the entire field — slow. Prefer narrow "
-            f"set-analysis filters and keep max_rows small (15-50) for "
-            f"top-N queries."
+            f"{len(high_card_fields)} field(s) hold many different values, "
+            f"the widest about {max_card:,}. Grouping by one of these "
+            f"produces as many rows; rank with `sort_by` and a small "
+            f"`limit` instead of returning every group."
         )
-    has_date = any(_is_temporal(f) for f in fields)
-    if has_date:
+    date_fields = [f["name"] for f in fields if _is_temporal(f)][:3]
+    if date_fields:
         warnings.append(
-            "Date/timestamp fields present. To learn the loaded period, "
-            "use engine_create_hypercube with measures `Min([<DimDate>])` "
-            "and `Max([<DimDate>])` (no dimensions, max_rows=1), "
-            "substituting <DimDate> with a real date field from the "
-            "`fields` list below. DO NOT call get_app_field_statistics on "
-            "date fields — it computes useless Sum/Avg/Stdev and is "
-            "extremely slow on big tables."
+            "Date field(s) present: " + ", ".join(date_fields)
+            + ". To learn the loaded period, call engine_get_field_range on "
+              "one of them. To ask about a period, state it as a filter — "
+              '{"field": "' + date_fields[0] + '", "period": "2024"} — and '
+              "the server writes the set analysis and reports the period it "
+              "actually selected."
         )
 
     result = {
