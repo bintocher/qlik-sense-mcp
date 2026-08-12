@@ -96,6 +96,38 @@ class EngineHypercubeMixin:
         ]
         return list(dict.fromkeys(names))
 
+    # How long a model that has already been read may vouch for a field
+    # name. The schema cache itself lives ten minutes, which is right for
+    # what it was built for — sample values and "did you mean" suggestions,
+    # where staleness costs nothing. Vouching for existence is different: a
+    # reload between the read and the query deletes a field, and a query
+    # naming a deleted field comes back as a plausible number, not an error.
+    # A minute keeps the saving for a normal conversation and bounds that.
+    FIELD_TRUST_SECONDS = 60.0
+
+    def _recent_field_names(self) -> set:
+        """Field names from a model read moments ago — never a fresh read.
+
+        Returns an empty set when nothing was read recently, which sends
+        the caller down the ordinary Engine path.
+        """
+        import time as _time
+
+        app_id = getattr(self, "_cached_app_id", "") or ""
+        store = getattr(self, "_schema_store", None)
+        if not app_id or store is None:
+            return set()
+        entry = store().get(app_id)
+        if not entry:
+            return set()
+        if (_time.monotonic() - entry.get("read_at", 0)) > self.FIELD_TRUST_SECONDS:
+            return set()
+        return {
+            f.get("field_name") or f.get("name")
+            for f in (entry.get("model", {}).get("fields") or [])
+            if f.get("field_name") or f.get("name")
+        }
+
     def _fields_exist(self, app_handle: int, names: List[str]) -> Dict[str, bool]:
         """Ask Engine which of these names the data model actually has.
 
@@ -105,15 +137,21 @@ class EngineHypercubeMixin:
         if not names:
             return {}
 
-        # A name the cached model already lists is known — no need to ask
-        # Qlik again. Measured over 440 hypercube calls: the caller reads
-        # the model first in nine cases out of ten, so this removes a
-        # round-trip from almost every query. Only presence is decided
-        # here: a name the cache does NOT list still goes to Engine,
-        # because the cache holds table fields and Qlik knows others
-        # besides. Answering "no such field" from an incomplete list would
-        # refuse a query that is perfectly valid.
-        cached = set(self._known_field_names(app_handle))
+        # A name the model was just seen to contain is known — no need to
+        # ask Qlik again. Measured over 440 hypercube calls: the caller
+        # reads the model first in nine cases out of ten, so this removes a
+        # round-trip from almost every query.
+        #
+        # Three deliberate limits, each closing a way to be wrong:
+        #   - only a *recently* read model counts (see _recent_field_names),
+        #     because a reload can delete a field and Qlik answers a query
+        #     naming it with a plausible number rather than an error;
+        #   - the cache may confirm a name, never deny one — it holds table
+        #     fields and Qlik knows others besides, so a name it lacks is
+        #     still verified against Engine;
+        #   - nothing is read here. If no model has been read, the old path
+        #     runs unchanged; fetching one would cost more than it saves.
+        cached = self._recent_field_names()
         verdicts = {name: True for name in names if name in cached}
         names = [name for name in names if name not in verdicts]
         if not names:

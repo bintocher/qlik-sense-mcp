@@ -348,8 +348,11 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         # anything that can read the model is enough.
         read_model = getattr(context.engine_api, "cached_fields", None)
         if read_model is not None:
-            fields_data = read_model(
-                app_handle, aid, (resolved.get("metainfo") or {}).get("reload_dttm"))
+            # `resolved` is flat — `metainfo` is assembled further down, so
+            # reading it here always yielded None and the cache never
+            # noticed a reload. `reload_stamp` above reads the same field
+            # correctly; use it.
+            fields_data = read_model(app_handle, aid, reload_stamp)
         else:
             fields_data = context.engine_api.get_fields(app_handle)
     except Exception as ex:

@@ -112,23 +112,17 @@ class TestMeasureWarnings:
             1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
         assert result["warnings"] == []
 
-    def test_a_known_field_is_not_checked_at_all(self):
-        """The cached model already lists it; asking Qlik again is waste.
+    def test_each_field_is_checked_once(self):
+        """Without a recently read model every name goes to Engine — once.
 
-        This used to assert "checked exactly once". Now a name the model
-        knows costs nothing, and only an unknown one reaches Engine.
+        The saving from the schema cache is covered in
+        tests/test_field_check_cache.py, where a model has actually been
+        read. Here nothing has, so this is the ordinary path.
         """
         engine = _Engine()
         engine._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum(Sales)", "Avg(Sales)", "Count(Sales)"))
-        assert engine.checked == []
-
-    def test_an_unknown_field_is_checked_once(self):
-        engine = _Engine()
-        engine._validate_cube_inputs(
-            1, _dims("Region"),
-            _measures("Sum(Mystery)", "Avg(Mystery)", "Count(Mystery)"))
-        assert engine.checked.count("Mystery") == 1
+        assert engine.checked.count("Sales") == 1
 
 
 class TestEmptyMeasureDetection:

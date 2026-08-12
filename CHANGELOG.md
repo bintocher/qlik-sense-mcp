@@ -8,16 +8,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
-- Validating a hypercube no longer asks Qlik about field names the cached
-  data model already lists — one round-trip less on almost every query,
-  measured as two pipelined batches becoming one. A name the cache does
-  not list is still verified against Engine, so an unknown field is still
-  refused and a system field is still accepted.
+- Validating a hypercube no longer asks Qlik about field names a model
+  read moments ago already listed — one round-trip less on almost every
+  query, measured as two pipelined batches becoming one. A name the model
+  does not list is still verified against Engine, so an unknown field is
+  still refused and a system field still accepted; a model read more than
+  a minute ago vouches for nothing, because a reload in between deletes
+  fields and Qlik answers a query naming a deleted field with a plausible
+  number rather than an error.
 - `get_app_details` switches to a `columns` + `rows` table once a model has
   more than 60 fields, and skips reading sample values there. Narrow
   models — the normal case — keep the readable per-field form.
 - `get_app_details` now says in its own description that `get_about` is
   never a prerequisite and `get_apps` is only needed without a name.
+
+### Fixed
+
+- The schema cache never noticed a reload: both callers passed `None`
+  where the app's reload timestamp belonged, so the invalidation the
+  cache was built around had never once fired and only the ten-minute
+  expiry limited it. It now receives the real timestamp.
 
 - Engine sessions are released about five seconds after the socket
   closes instead of lingering for the proxy's inactivity timeout. The
