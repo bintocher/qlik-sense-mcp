@@ -251,10 +251,16 @@ def engine_query(
         filters: what to narrow to. Two shapes:
             {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
             {"field": "Region", "values": ["North", "South"]}
-            A period bound may be a day (2024-01-31 or 31.01.2024), a month
-            (2024-01), a year (2024) or a Qlik serial number. `from` and
-            `to` include both ends. `{"field": "OrderDate", "period":
-            "2024"}` is the whole year in one key. Filters combine with AND.
+            `from` and `to` include both ends, and either may be left out
+            for an open end. What they mean follows the field: on a date
+            field they are days — written as 2024-01-31, 31.01.2024,
+            2024-01 for a whole month, 2024 for a whole year, or a Qlik
+            serial number — and on any other field they are the values
+            themselves, so {"field": "Discount", "from": 400} is a
+            discount over 400. `{"field": "OrderDate", "period": "2024"}`
+            is the whole year in one key. Filters combine with AND.
+            A filter that selects nothing is refused with what the field
+            does hold, rather than answered with a zero.
         sort_by: a metric label or a grouping field. Set it whenever
             `limit` might cut the result, otherwise the rows that come back
             are arbitrary rather than the largest.
@@ -459,8 +465,9 @@ def engine_create_hypercube(
         filters: Filters described rather than written, applied wherever a
             measure carries the `{filter}` marker. Same shapes as
             `engine_query`: `{"field": "OrderDate", "from": "2024-01-01",
-            "to": "2024-12-31"}` or `{"field": "Region", "values":
-            ["North"]}`.
+            "to": "2024-12-31"}` for a period, `{"field": "Discount",
+            "from": 400}` for a range of any other field, or
+            `{"field": "Region", "values": ["North"]}` for named values.
 
     Returns:
           - `columns`: column names, in row order.

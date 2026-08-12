@@ -96,6 +96,11 @@ class _Engine(QlikEngineAPI):
                 ("Sum", "Count", "Avg", "Min", "Max", "Text", "Num", "If",
                  "DISTINCT", "Median", "Stdev")]
 
+    def get_field_description(self, app_handle, field_name):
+        """Qlik's tags decide whether a bound is a day or a value."""
+        tags = ["$numeric", "$date"] if "Date" in field_name else ["$numeric"]
+        return {"name": field_name, "tags": tags}
+
     def get_fields(self, app_handle):
         return {"fields": [{"field_name": n} for n in sorted(self.known)]}
 

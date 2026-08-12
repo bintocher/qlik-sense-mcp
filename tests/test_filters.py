@@ -33,8 +33,9 @@ class _Engine(QlikEngineAPI):
     """
 
     def __init__(self, days=(40544, 40545, 40910), numeric_text=True,
-                 values=("North", "South")):
+                 values=("North", "South"), date_fields=("F",)):
         self.days = set(days)
+        self.date_fields = set(date_fields)
         self.numeric_text = numeric_text
         self.values = set(values)
         self.asked = []
@@ -71,6 +72,11 @@ class _Engine(QlikEngineAPI):
         import re
         numbers = [int(n) for n in re.findall(r"\d+", expression)]
         return numbers[-2], numbers[-1]
+
+    def get_field_description(self, app_handle, field_name):
+        """Qlik's tags decide whether a bound is a day or a value."""
+        tags = ["$numeric", "$date"] if field_name in self.date_fields else ["$text"]
+        return {"name": field_name, "tags": tags}
 
     def search_app(self, app_handle, term, fields=None, max_fields=8,
                    max_values=5):
@@ -292,3 +298,56 @@ class TestImpossibleBounds:
     @pytest.mark.parametrize("text", ["2024-02-29", "29.02.2024", "2024-12"])
     def test_a_date_that_does_exist_is_read(self, text):
         assert _parse_bound(text, upper=False) is not None
+
+
+class TestNumericRanges:
+    """The same two keys mean days on a date field and values elsewhere.
+
+    Measured against a live model: `{"field": "discount", "from": 400}`
+    read as a date turned "more than 400 off" into "some time in 1901" and
+    answered 18,774 where the truth was 1,898,591.
+    """
+
+    def test_a_bound_on_a_field_that_is_not_a_date_is_a_value(self):
+        engine = _Engine(values=(), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 12, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [
+            {"field": "discount", "from": 400, "to": 500}])
+        assert result["modifier"] == '{<[discount]={">=400<=500"}>}'
+
+    def test_one_open_end_is_allowed(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 7, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [{"field": "price", "from": 400}])
+        assert result["modifier"] == '{<[price]={">=400"}>}'
+
+    def test_a_range_holding_nothing_is_refused(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 0, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [{"field": "price", "from": 1e9}])
+        assert result["error_category"] == "empty_range"
+
+    def test_a_whole_number_keeps_no_decimal_tail(self):
+        """`400.0` is text Qlik has no value for."""
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [{"field": "price", "from": 400.0}])
+        assert '">=400"' in result["modifier"]
+
+    def test_a_bound_that_is_neither_a_date_nor_a_number_is_refused(self):
+        engine = _Engine(date_fields=("F",))
+        result = engine.build_filters(1, "app", [{"field": "price", "from": "cheap"}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_a_date_field_still_reads_its_bounds_as_days(self):
+        engine = _Engine(date_fields=("F",))
+        result = engine.build_filters(1, "app", [{"field": "F", "period": "2011"}])
+        assert "40544" in result["modifier"]

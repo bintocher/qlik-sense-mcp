@@ -97,6 +97,16 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
         return None
 
 
+def _plain_number(value: Any) -> str:
+    """A bound as Qlik reads it: a plain number, no thousands separators.
+
+    `400.0` is written `400`, because a search string is compared as text
+    and a trailing `.0` is text Qlik has no value for.
+    """
+    number = float(value)
+    return str(int(number)) if number == int(number) else repr(number)
+
+
 def quote_value(value: Any) -> str:
     """One literal value inside a set modifier.
 
@@ -147,6 +157,77 @@ class EngineFiltersMixin:
             return
         for key in [k for k in store if k[0] == app_id]:
             store.pop(key, None)
+
+    def _is_temporal_field(self, app_handle: int, field: str) -> bool:
+        """Does this field hold dates, according to Qlik's own tags?
+
+        What `from` and `to` mean depends on the answer. On a date field
+        they are days; on any other field they are the values themselves.
+        Reading `{"field": "discount", "from": 400}` as a date turned "more
+        than 400 off" into "some time in 1901" and answered 18,774 where
+        the truth was 1,898,591 — a plausible number, and wrong.
+        """
+        try:
+            description = self.get_field_description(app_handle, field)
+        except Exception as exc:
+            logger.debug("Could not describe %r: %s", field, exc)
+            return False
+        tags = description.get("tags") or []
+        return any(str(tag).lstrip("$") in ("date", "timestamp")
+                   for tag in tags)
+
+    def range_modifier(self, app_handle: int, app_id: str, field: str,
+                       low: Any, high: Any) -> Dict[str, Any]:
+        """A set modifier selecting a range of a field that is not a date.
+
+        The bounds are the values themselves and both ends are included:
+        "discount from 400 to 500" is `>=400<=500`.
+        """
+        try:
+            bounds = [float(v) for v in (low, high) if v is not None
+                      and not isinstance(v, bool)]
+        except (TypeError, ValueError):
+            bounds = []
+        if len(bounds) != len([v for v in (low, high) if v is not None]):
+            return {
+                "error": (
+                    f"Bounds {low!r}..{high!r} on {field!r} are neither dates "
+                    f"nor numbers."
+                ),
+                "error_category": "invalid_filter",
+                "accepted_forms": list(BOUND_FORMS) + ["400", "400.5"],
+            }
+        name = f"[{field}]"
+        parts = []
+        if low is not None:
+            parts.append(f">={_plain_number(low)}")
+        if high is not None:
+            parts.append(f"<={_plain_number(high)}")
+        if not parts:
+            return {"error": f"Filter on {field!r} states no bound.",
+                    "error_category": "invalid_filter"}
+        modifier = f'{name}={{"{"".join(parts)}"}}'
+        counted = self.evaluate_expressions(
+            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
+        matched = counted[0].get("number") if counted else None
+        if matched is not None and int(matched) == 0:
+            return {
+                "error": (
+                    f"No value of {field!r} falls in "
+                    f"{_plain_number(low) if low is not None else '-inf'}.."
+                    f"{_plain_number(high) if high is not None else '+inf'}."
+                ),
+                "error_category": "empty_range",
+                "next_actions": [
+                    f"read the range with engine_get_field_range on {field!r}",
+                    "then ask for bounds inside it",
+                ],
+            }
+        return {
+            "modifier": modifier, "field": field,
+            "from": low, "to": high,
+            "distinct_values_in_range": int(matched) if matched is not None else None,
+        }
 
     def period_modifier(self, app_handle: int, app_id: str, field: str,
                         start: Any, end: Any) -> Dict[str, Any]:
@@ -388,9 +469,20 @@ class EngineFiltersMixin:
                 }
             if has_period:
                 period = entry.get("period")
-                outcome = self.period_modifier(
-                    app_handle, app_id, field,
-                    entry.get("from", period), entry.get("to", period))
+                low = entry.get("from", period)
+                high = entry.get("to", period)
+                # The same two keys mean days on a date field and values on
+                # any other. Asking Qlik which this is costs one cheap call
+                # and is the difference between "more than 400 off" and
+                # "some time in 1901".
+                if self._is_temporal_field(app_handle, field):
+                    outcome = self.period_modifier(
+                        app_handle, app_id, field, low, high)
+                else:
+                    outcome = self.range_modifier(
+                        app_handle, app_id, field,
+                        low if low is not None else None,
+                        high if high is not None else None)
             elif values is not None:
                 outcome = self.values_modifier(
                     app_handle, field,
