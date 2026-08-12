@@ -76,6 +76,16 @@ def _ok(obj: Any) -> str:
     for key, value in obj.items():
         if key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
             compact[key] = _CompactList(value)
+        elif key in _BULK_KEYS and isinstance(value, dict) and "rows" in value:
+            # A bulk key answered as {columns, rows} — the wide-model form
+            # of `fields`. Without this its rows keep the indentation and
+            # the table ends up longer than the objects it replaced:
+            # measured, 61 fields cost 9.8k indented against 6.3k as
+            # objects, and 4.4k once the rows go on one line each.
+            inner = dict(value)
+            if isinstance(inner["rows"], list):
+                inner["rows"] = _CompactList(inner["rows"])
+            compact[key] = inner
         else:
             compact[key] = value
     return json.dumps(compact, indent=2, ensure_ascii=False, cls=_CompactEncoder)

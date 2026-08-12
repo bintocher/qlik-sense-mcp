@@ -113,3 +113,26 @@ class TestNarrowModelIsUntouched:
         engine = stand(5)
         repository.get_app_details("app-1")
         assert engine.sampled == 1
+
+
+class TestTheTableIsActuallySmaller:
+    """A compact form that is not compact is worse than none at all."""
+
+    def test_a_field_costs_less_in_the_table_than_as_an_object(self, stand):
+        stand(WIDE_MODEL_FIELDS - 1)
+        as_objects = len(repository.get_app_details("app-1"))
+        per_object = as_objects / (WIDE_MODEL_FIELDS - 1)
+
+        stand(WIDE_MODEL_FIELDS + 1)
+        as_table = len(repository.get_app_details("app-1"))
+        per_row = as_table / (WIDE_MODEL_FIELDS + 1)
+
+        assert per_row < per_object, (
+            f"таблица дороже списка: {per_row:.0f} против {per_object:.0f} "
+            "знаков на поле")
+
+    def test_rows_are_written_one_per_line(self, stand):
+        """Indented rows were what made the table longer than the objects."""
+        stand(WIDE_MODEL_FIELDS + 1)
+        raw = repository.get_app_details("app-1")
+        assert '["field_0"' in raw.replace(" ", ""), "строки печатаются с отступами"

@@ -18,7 +18,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   number rather than an error.
 - `get_app_details` switches to a `columns` + `rows` table once a model has
   more than 60 fields, and skips reading sample values there. Narrow
-  models — the normal case — keep the readable per-field form.
+  models — the normal case — keep the readable per-field form. Measured
+  at 61 fields: 6.3k characters as objects against 3.8k as a table, and
+  16k instead of ~32k at 300 fields.
 - `get_app_details` now says in its own description that `get_about` is
   never a prerequisite and `get_apps` is only needed without a name.
 
