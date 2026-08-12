@@ -1,8 +1,13 @@
-"""Tool visibility per authentication mode (since v1.6.0).
+"""Which tools the server advertises.
 
-Reload-task tools hit QRS endpoints that need repository-admin rights, so
-they are registered in certificate mode only. Advertising them to a JWT
-analyst just invites calls that can only ever return 403.
+The default surface is the analysis tools and nothing else. Reload-task
+administration is registered only when asked for by QLIK_TASK_TOOLS, and
+only in certificate mode — those endpoints need repository-admin rights,
+and a JWT analyst reaching them through the virtual proxy gets 403s.
+
+A tool the caller cannot use is not free: its name and description sit in
+the model's context, and a model that reads about task administration
+tries it.
 """
 
 import importlib
@@ -16,7 +21,7 @@ from qlik_sense_mcp_server.tools import repository as repository_tools
 from qlik_sense_mcp_server.tools import tasks as task_tools
 
 
-CERT_ONLY_TOOLS = {
+TASK_TOOLS = {
     "get_tasks", "get_task_details", "start_task", "create_task",
     "update_task", "delete_task", "get_task_schedule",
     "create_task_schedule", "get_task_executions", "get_task_script_log",
@@ -24,11 +29,12 @@ CERT_ONLY_TOOLS = {
     "update_task_schedule", "delete_task_schedule",
 }
 
-ALWAYS_AVAILABLE_TOOLS = {
+ANALYSIS_TOOLS = {
     "get_about", "get_apps", "get_app_details", "get_app_script",
     "get_app_field_statistics", "engine_get_field_range", "get_app_field",
     "get_app_variables", "get_app_sheets", "get_app_sheet_objects",
-    "get_app_object", "engine_create_hypercube",
+    "get_app_object", "engine_query", "engine_create_hypercube",
+    "search_app",
 }
 
 
@@ -52,7 +58,8 @@ def reload_server(monkeypatch):
     """Re-import the server under a given environment, then restore it."""
     def _reload(**env):
         for key in ("QLIK_SERVER_URL", "QLIK_JWT_TOKEN", "QLIK_USER_DIRECTORY",
-                    "QLIK_USER_ID", "QLIK_CLIENT_CERT_PATH", "QLIK_CLIENT_KEY_PATH"):
+                    "QLIK_USER_ID", "QLIK_CLIENT_CERT_PATH",
+                    "QLIK_CLIENT_KEY_PATH", "QLIK_TASK_TOOLS"):
             monkeypatch.delenv(key, raising=False)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
@@ -64,33 +71,60 @@ def reload_server(monkeypatch):
     _reimport()
 
 
-def test_jwt_mode_hides_reload_task_tools(reload_server):
-    module = reload_server(
-        QLIK_SERVER_URL="https://qlik.example.com/jwt",
-        QLIK_JWT_TOKEN="header.payload.signature",
-    )
-    assert module.config.auth_mode == "jwt"
-    names = set(module.mcp._tool_manager._tools)
-    assert not (names & CERT_ONLY_TOOLS), "task tools must be hidden in JWT mode"
-    assert ALWAYS_AVAILABLE_TOOLS <= names
-    assert len(names) == len(ALWAYS_AVAILABLE_TOOLS)
+class TestDefaultSurface:
+    def test_jwt_mode_registers_the_analysis_tools_only(self, reload_server):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/jwt",
+            QLIK_JWT_TOKEN="header.payload.signature",
+        )
+        assert module.config.auth_mode == "jwt"
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
+
+    def test_certificate_mode_adds_task_administration(self, reload_server):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="svc_mcp",
+        )
+        assert module.config.auth_mode == "certificate"
+        names = set(module.mcp._tool_manager._tools)
+        assert TASK_TOOLS <= names
+        assert ANALYSIS_TOOLS <= names
+
+    def test_an_unconfigured_server_shows_everything(self, reload_server):
+        """`--help` and a misconfigured host must not silently lose tools."""
+        names = set(reload_server().mcp._tool_manager._tools)
+        assert TASK_TOOLS <= names
+        assert ANALYSIS_TOOLS <= names
 
 
-def test_certificate_mode_exposes_every_tool(reload_server):
-    module = reload_server(
-        QLIK_SERVER_URL="https://qlik.example.com",
-        QLIK_USER_DIRECTORY="COMPANY",
-        QLIK_USER_ID="svc_mcp",
-    )
-    assert module.config.auth_mode == "certificate"
-    names = set(module.mcp._tool_manager._tools)
-    assert CERT_ONLY_TOOLS <= names
-    assert ALWAYS_AVAILABLE_TOOLS <= names
+class TestTaskToolsSwitch:
+    def test_jwt_mode_leaves_them_out_even_when_asked_for(self, reload_server):
+        """QRS task administration cannot work as a JWT analyst identity."""
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/jwt",
+            QLIK_JWT_TOKEN="header.payload.signature",
+            QLIK_TASK_TOOLS="true",
+        )
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
+    @pytest.mark.parametrize("value", ["false", "0", "no", "FALSE"])
+    def test_turning_it_off_drops_them_from_certificate_mode(
+            self, reload_server, value):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="svc_mcp",
+            QLIK_TASK_TOOLS=value,
+        )
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
-def test_unconfigured_server_still_exposes_every_tool(reload_server):
-    """`--help` and a misconfigured host must not silently lose tools."""
-    module = reload_server()
-    names = set(module.mcp._tool_manager._tools)
-    assert CERT_ONLY_TOOLS <= names
-    assert ALWAYS_AVAILABLE_TOOLS <= names
+    @pytest.mark.parametrize("value", ["true", "1", "yes", ""])
+    def test_anything_else_keeps_them(self, reload_server, value):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="svc_mcp",
+            QLIK_TASK_TOOLS=value,
+        )
+        assert TASK_TOOLS <= set(module.mcp._tool_manager._tools)

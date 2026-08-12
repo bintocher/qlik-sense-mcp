@@ -20,24 +20,154 @@ from ..config import (
     MAX_APPS_LIMIT,
 )
 
+logger = context.logger
+
+# A field with few enough distinct values to list them outright. Above this
+# the list stops being an aid and starts being a wall of text.
+SAMPLE_VALUES_MAX_CARDINALITY = 25
+# How many fields to sample in one reply. Sampling is one pipelined batch,
+# but the values still cost context.
+SAMPLE_VALUES_MAX_FIELDS = 20
+# For fields too wide to list, show the ends instead: five smallest and
+# five largest values, sorted by Qlik so text sorts as text.
+EDGE_VALUES_COUNT = 5
+EDGE_VALUES_MAX_FIELDS = 12
+
+# Past this many fields the reply switches from a list of objects to a
+# header plus rows. Measured: as objects, 33 fields cost 7.6k characters and
+# the repeated key names are most of it. Below the threshold the readable
+# form is worth its size; a 300-field warehouse model is not.
+WIDE_MODEL_FIELDS = 60
+WIDE_MODEL_COLUMNS = ["name", "table", "is_key", "distinct_values", "rows",
+                      "tags", "comment"]
+
+# The finished `get_app_details` payload per app, keyed by the app's last
+# reload. Everything in it — tables, fields, sample values, edges — changes
+# only when the app reloads.
+_DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def forget_app_details(app_id: str = None) -> None:
+    """Drop the cached model for one app, or for all of them."""
+    if app_id is None:
+        _DETAILS_CACHE.clear()
+    else:
+        _DETAILS_CACHE.pop(app_id, None)
+
+
+def _tags_text(tags: Any) -> str:
+    """Qlik's field tags as one plain string.
+
+    Qlik hands them out as `["$numeric", "$integer"]`. The `$` is on every
+    tag and carries no meaning of its own, and the brackets and quotes cost
+    more than the words. `"numeric integer"` says the same thing.
+    """
+    if isinstance(tags, str):
+        return tags
+    return " ".join(str(tag).lstrip("$") for tag in (tags or []))
+
+
+def _is_temporal(field: Dict[str, Any]) -> bool:
+    """Does this field hold a date or a timestamp?
+
+    Tags reach here as one string (`"numeric timestamp"`), so membership is
+    a word check, not a list lookup — and both spellings, with and without
+    Qlik's leading `$`, are accepted so the answer does not depend on where
+    the field came from.
+    """
+    tags = field.get("tags") or ""
+    words = tags.split() if isinstance(tags, str) else [str(t) for t in tags]
+    return any(w.lstrip("$") in ("date", "timestamp") for w in words)
+
+
+def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None:
+    """Add `values` to low-cardinality fields, and `sample` to date fields.
+
+    Filtering is written against the values Qlik holds, not against the
+    ones a caller assumes — and the two differ constantly: `Moskva` for
+    Moscow, `01.01.2024` for a date that a model will otherwise filter as
+    a serial number. Both mistakes return zeros rather than an error, so
+    the cheapest fix is to put the real values in front of the caller
+    before any expression is written.
+    """
+    candidates = [
+        f for f in fields
+        if 0 < (f.get("distinct_values") or 0) <= SAMPLE_VALUES_MAX_CARDINALITY
+    ]
+    # Dates are the other guessing trap, and they are never low-cardinality;
+    # a couple of values are enough to show the display format.
+    date_fields = [f for f in fields if f not in candidates and _is_temporal(f)]
+    wanted = (candidates + date_fields)[:SAMPLE_VALUES_MAX_FIELDS]
+    results = {}
+    if wanted:
+        try:
+            results = context.engine_api.get_field_values_batch(
+                app_handle,
+                [(f["name"], SAMPLE_VALUES_MAX_CARDINALITY if f in candidates else 3)
+                 for f in wanted],
+            )
+        except Exception as exc:
+            # An aid, not the answer: if it cannot be produced, the reply is
+            # still correct without it.
+            logger.debug("Could not sample field values: %s", exc)
+            results = {}
+
+    for field in wanted:
+        values = results.get(field["name"])
+        if not values:
+            continue
+        if field in candidates:
+            field["values"] = values
+        else:
+            field["sample"] = values[:3]
+
+    # Fields with too many values to list still need to show their shape.
+    # The two ends answer the questions that actually get asked — what does
+    # a value look like, and what range is it in — where a bare count of
+    # distinct values answers neither.
+    wide = [
+        f for f in fields
+        if (f.get("distinct_values") or 0) > SAMPLE_VALUES_MAX_CARDINALITY
+        and not f.get("sample")
+    ][:EDGE_VALUES_MAX_FIELDS]
+    if not wide:
+        return
+    try:
+        edges = context.engine_api.get_field_edges_batch(
+            app_handle, [f["name"] for f in wide], count=EDGE_VALUES_COUNT)
+    except Exception as exc:
+        logger.debug("Could not read field edges: %s", exc)
+        return
+    for field in wide:
+        ends = edges.get(field["name"])
+        if not ends:
+            continue
+        if ends.get("lowest"):
+            field["lowest_values"] = ends["lowest"]
+        if ends.get("highest"):
+            field["highest_values"] = ends["highest"]
+
 
 @mcp.tool()
 @_timed
 def get_about() -> str:
     """
-    Get Qlik Sense server info (version, build, node type) via QRS `/qrs/about` endpoint.
+    Which Qlik Sense this is: version, build and node type.
 
-    Use this to verify connectivity and identify the Qlik Sense release running on the server.
-    No parameters. Lightweight call, ~200ms.
+    WHEN TO USE
+        To check that the connection works, or when a behaviour depends on
+        the release.
+
+    WHEN NOT TO USE
+        As a first step before other calls — nothing here is needed to
+        list apps or read a data model.
 
     Returns:
-        JSON with fields: buildVersion, buildDate, databaseProvider, nodeType, sharedPersistence, requiresBootstrap.
-    
-    Example:
-        Call: {}
-        Returns: {"tool_call_seconds": 0.21, "buildVersion": "31.56.2.0",
-                  "buildDate": "10/24/2025 09:43:09 AM", "nodeType": 1,
-                  "sharedPersistence": true, "requiresBootstrap": false}
+        `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
+        `sharedPersistence`, `requiresBootstrap`.
+
+    Does not return:
+        Anything about apps, data or the current user.
     """
     e = _check()
     if e:
@@ -56,46 +186,36 @@ def get_apps(
     published: str = "true",
 ) -> str:
     """
-    List Qlik Sense applications from the QRS Repository (no data load — pure metadata).
+    Find apps by name or stream.
 
-    Use this as the entry point to discover apps when the user mentions an app by
-    fragment of its name. Always returns published apps only by default; pass
-    `published="false"` to include drafts from the user's personal sandbox.
+    WHEN TO USE
+        When the app is known by a fragment of its name, or when the task
+        is to survey what exists on the server.
+
+    WHEN NOT TO USE
+        When the name is known in full — `get_app_details(name=...)` looks
+        it up and reads the data model in the same call.
+        When the GUID is known — go straight to `get_app_details`.
 
     Args:
-        limit: Max number of apps to return. Default 25, hard cap 50. Use pagination
-            via `offset` for larger result sets instead of bumping this.
-        offset: Number of apps to skip for pagination. Default 0.
-        name: Case-insensitive substring filter on app name. No wildcards needed —
-            a substring search — `"Rev"` matches `"Revenue 2025"`. Omit to list all apps.
-        stream: Case-insensitive substring filter on the publication stream name
-            (e.g. `"Finance"`). Omit to search across all streams.
-        published: Publication state filter as a string. `"true"` (default) — only
-            published apps; `"false"` — unpublished; `"both"` (or any other
-            value) — no filter at all, published and unpublished together.
+        limit: apps per page. Default 25, cap 50; page with `offset`
+            rather than raising it.
+        offset: apps to skip.
+        name: substring of the app name, case insensitive. No wildcards
+            needed: "Rev" matches "Revenue 2025".
+        stream: substring of the publication stream name.
+        published: `"true"` (default) for published apps, `"false"` for
+            drafts in a personal space, `"both"` for either.
 
     Returns:
-        JSON with `apps` (list of {guid, name, description, stream,
-        modified_dttm, reload_dttm}) and `pagination` metadata.
-    
-    Example (find an app by a fragment of its name):
-        Call: {"name": "Sales", "limit": 5}
-        Returns: {"tool_call_seconds": 0.53,
-                  "apps": [{"guid": "a1b2c3d4-1111-2222-3333-444455556666",
-                            "name": "Sales Dashboard", "description": "...",
-                            "stream": "Finance",
-                            "modified_dttm": "2026-07-20T09:15:00.000Z",
-                            "reload_dttm": "2026-07-27T03:00:00.000Z"}],
-                  "pagination": {"limit": 5, "offset": 0, "returned": 1,
-                                 "total_found": 1, "has_more": false,
-                                 "next_offset": null}}
+        `apps`, each with `guid`, `name`, `description`, `stream`,
+        `modified_dttm`, `reload_dttm`; and `pagination` carrying
+        `total_found` — the real total on the server, not the page size —
+        plus `has_more` and `next_offset`.
 
-    Example (next page of all published apps):
-        Call: {"limit": 25, "offset": 25}
-        Returns: {"tool_call_seconds": 0.61, "apps": ["...25 items..."],
-                  "pagination": {"limit": 25, "offset": 25, "returned": 25,
-                                 "total_found": 1102, "has_more": true,
-                                 "next_offset": 50}}
+    Does not return:
+        Tables, fields or any data. Paging happens in Qlik, so nothing
+        past the record limit goes missing.
     """
     e = _check()
     if e:
@@ -112,55 +232,45 @@ def get_apps(
 @_engine_serialised
 def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) -> str:
     """
-    Get app overview — metadata + full list of tables and fields (cardinality, row counts, keys).
+    The app's data model: its tables, its fields, and what the values look
+    like.
 
-    Use this as the second step after `get_apps` to understand the data model before
-    writing hypercube expressions. Opens the application with data loaded, which
-    populates the server-side cache — any subsequent `engine_create_hypercube`,
-    `get_app_field*`, or `get_app_variables` call against the same `app_id` will
-    reuse the open connection and run much faster.
+    WHEN TO USE
+        First, before asking anything about the data. Field names are
+        case-sensitive and have to match exactly, and this is where they
+        come from. It also opens the app, so every later call against the
+        same `app_id` reuses the open connection.
+        Give it `name` when that is all you have — no separate lookup is
+        needed.
 
-    At least one of `app_id` or `name` must be provided. `app_id` is always preferred.
+    WHEN NOT TO USE
+        Repeatedly for the same app: the answer changes only when the app
+        reloads, and a repeat call is served from cache with
+        `from_cache: true`.
 
     Args:
-        app_id: Application GUID (e.g. `"a1b2c3d4-..."`). Preferred over `name`
-            because it uniquely identifies the app. Obtain it from `get_apps`.
-        name: App name to look up. Case-insensitive. If multiple apps match, the
-            exact match wins over partial matches, then the first result is used.
-            Prefer `app_id` when you already know it.
+        app_id: application GUID. Preferred, since it is unambiguous.
+        name: app name, case insensitive. An exact match wins over a
+            partial one. At least one of the two is required.
 
     Returns:
-        JSON with `metainfo` (app_id, name, description, stream, modified_dttm,
-        reload_dttm), `tables` (summary of each table), and `fields` (every
-        non-system, non-hidden field with its table, is_key flag, distinct_values,
-        row count, and tags). Tables and fields carrying a `COMMENT TABLE` /
-        `COMMENT FIELD` text from the load script also get a `comment` key —
-        that is the business description of the column, so read it before
-        guessing a field's meaning from its name. The key is absent when the
-        script sets no comment.
+        `metainfo` (app_id, name, description, stream, modified_dttm,
+        reload_dttm).
+        `tables`, each with `name`, `fields_count`, `rows` and the load
+        script's `COMMENT TABLE` text where there is one.
+        `fields`, each with `name`, `table`, `distinct_values`, Qlik's
+        `tags` as one string, `is_key` where true, and `comment` — the
+        script's `COMMENT FIELD` text, the only description a column
+        carries, worth reading before inferring meaning from a name.
+        Fields with few enough values list them in `values`; wider ones
+        show `lowest_values` and `highest_values`; a date field carries a
+        `sample`, which is the writing to match when naming a period.
+        `warnings` names the tables large enough to need a filter.
+        Past 60 fields the list becomes `columns` plus `rows` to keep the
+        reply small, and values and edges are left out.
 
-    Example:
-        Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
-        Returns: {"tool_call_seconds": 2.84,
-                  "metainfo": {"app_id": "a1b2...", "name": "Sales Dashboard",
-                               "stream": "Finance",
-                               "reload_dttm": "2026-07-27T03:00:00.000Z"},
-                  "warnings": ["Large fact table(s) detected ..."],
-                  "tables": [{"name": "Orders", "fields_count": 12,
-                              "rows": 91028794, "comment": "Order facts"}],
-                  "fields": [{"name": "Amount", "table": "Orders",
-                              "is_key": false, "distinct_values": 9797173,
-                              "rows": 91028794, "tags": ["$numeric"],
-                              "comment": "Order amount, net of refunds"}],
-                  "tables_count": 8, "fields_count": 120}
-
-    Read `warnings` first — it tells you which tables are too big to
-    aggregate without a set-analysis filter.
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Data, aggregates, or the load script — `get_app_script` has that.
     """
     e = _check()
     if e:
@@ -218,10 +328,33 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         return _ok(resolved)
     aid = resolved["app_id"]
 
-    # Get tables and fields via Engine API (WebSocket)
+    reload_stamp = resolved.get("reload_dttm", "")
+    cached = _DETAILS_CACHE.get(aid)
+    if cached and cached["reload_stamp"] == reload_stamp:
+        # Everything below — the model read, the sample values, the edges —
+        # depends only on the app and its last reload. Answer from the
+        # cache and say so, rather than paying for it on every question
+        # about the same app.
+        reply = dict(cached["result"])
+        reply["from_cache"] = True
+        return _ok(reply)
+
+    # Get tables and fields via Engine API (WebSocket). The model is cached
+    # per app and dropped when the app reloads — `reload_dttm` is exactly
+    # the stamp that moves when it does.
     try:
         app_handle = context.engine_api.ensure_app(aid, no_data=False)
-        fields_data = context.engine_api.get_fields(app_handle)
+        # The cache is an optimisation, not part of the client contract:
+        # anything that can read the model is enough.
+        read_model = getattr(context.engine_api, "cached_fields", None)
+        if read_model is not None:
+            # `resolved` is flat — `metainfo` is assembled further down, so
+            # reading it here always yielded None and the cache never
+            # noticed a reload. `reload_stamp` above reads the same field
+            # correctly; use it.
+            fields_data = read_model(app_handle, aid, reload_stamp)
+        else:
+            fields_data = context.engine_api.get_fields(app_handle)
     except Exception as ex:
         fields_data = {"error": str(ex)}
 
@@ -237,20 +370,43 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
                 continue
             tname = f.get("table_name", "")
             table_map.setdefault(tname, []).append(f)
+            # Only what this field does not share with its table. `rows` is
+            # the table's row count repeated on every field; `is_key` is
+            # false for most of them; empty tags say nothing. Each omission
+            # is ~20 characters per field, and a model reads a shorter list
+            # more reliably than a longer one saying the same thing.
             entry = {
                 "name": f.get("field_name", ""),
                 "table": tname,
-                "is_key": f.get("is_key", False),
                 "distinct_values": f.get("distinct_values", 0),
-                "rows": f.get("rows_count", 0),
-                "tags": f.get("tags", []),
             }
+            if f.get("is_key"):
+                entry["is_key"] = True
+            # Qlik's own tags, minus the `$` every one of them carries and
+            # joined into one string: `["$numeric","$integer"]` is 26
+            # characters of JSON punctuation for 14 of meaning, and the same
+            # two words repeat down the whole model.
+            tags = _tags_text(f.get("tags", []))
+            if tags:
+                entry["tags"] = tags
             # COMMENT FIELD text, when the load script sets one. Emitted only
             # when non-empty: most apps comment a handful of fields, and an
             # empty key on every field is pure noise in the LLM context.
             if f.get("comment"):
                 entry["comment"] = f["comment"]
             fields.append(entry)
+
+        # Show what the values actually look like. Without this the caller
+        # has to guess them, and Qlik answers a wrong guess with a number
+        # rather than an error: a filter on 'Moscow' where the data says
+        # 'Moskva' returns a clean table of zeros. Measured against a real
+        # LLM, guessing cost ten tool calls and two minutes on a question
+        # that needs two calls once the values are visible.
+        # Skipped on a wide model: the reply drops values and edges there
+        # anyway, and reading them would be two pipelined batches paid for
+        # nothing.
+        if len(fields) <= WIDE_MODEL_FIELDS:
+            _attach_sample_values(app_handle, fields)
         for tname, tfields in table_map.items():
             rows = max((f.get("rows_count", 0) for f in tfields), default=0)
             entry = {
@@ -275,50 +431,33 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     high_card_fields = [
         f for f in fields if f.get("distinct_values", 0) >= HIGH_CARD_FIELD
     ]
-    if huge_tables:
-        count = len(huge_tables)
-        max_rows_found = max(t.get("rows", 0) for t in huge_tables)
+    if huge_tables or big_tables:
+        found = huge_tables or big_tables
+        max_rows_found = max(t.get("rows", 0) for t in found)
         warnings.append(
-            f"HUGE fact table(s) detected ({count} table(s), largest "
-            f"~{max_rows_found:,} rows). NEVER build hypercubes on these "
-            f"without a set-analysis filter in every measure (narrow by "
-            f"period / category / key). Unfiltered aggregates will time "
-            f"out. See engine_create_hypercube docstring for the correct "
-            f"set-analysis patterns."
-        )
-    elif big_tables:
-        count = len(big_tables)
-        max_rows_found = max(t.get("rows", 0) for t in big_tables)
-        warnings.append(
-            f"Large fact table(s) detected ({count} table(s), largest "
-            f"~{max_rows_found:,} rows). Always filter measures with set "
-            f"analysis to limit the period/scope and keep response times "
-            f"reasonable."
+            f"{len(found)} table(s) hold a lot of rows, the largest about "
+            f"{max_rows_found:,}. Give every query a filter — a period, a "
+            f"category, a key — so it reads part of the table rather than "
+            f"all of it. `filters` in engine_query is the shortest way to "
+            f"say so."
         )
     if high_card_fields:
-        count = len(high_card_fields)
         max_card = max(f.get("distinct_values", 0) for f in high_card_fields)
         warnings.append(
-            f"High-cardinality field(s) detected ({count} field(s), "
-            f"highest ~{max_card:,} distinct values). Sorting hypercube "
-            f"dimensions by these via qSortByExpression forces a full "
-            f"sort of the entire field — slow. Prefer narrow "
-            f"set-analysis filters and keep max_rows small (15-50) for "
-            f"top-N queries."
+            f"{len(high_card_fields)} field(s) hold many different values, "
+            f"the widest about {max_card:,}. Grouping by one of these "
+            f"produces as many rows; rank with `sort_by` and a small "
+            f"`limit` instead of returning every group."
         )
-    has_date = any(
-        "$date" in f.get("tags", []) or "$timestamp" in f.get("tags", [])
-        for f in fields
-    )
-    if has_date:
+    date_fields = [f["name"] for f in fields if _is_temporal(f)][:3]
+    if date_fields:
         warnings.append(
-            "Date/timestamp fields present. To learn the loaded period, "
-            "use engine_create_hypercube with measures `Min([<DimDate>])` "
-            "and `Max([<DimDate>])` (no dimensions, max_rows=1), "
-            "substituting <DimDate> with a real date field from the "
-            "`fields` list below. DO NOT call get_app_field_statistics on "
-            "date fields — it computes useless Sum/Avg/Stdev and is "
-            "extremely slow on big tables."
+            "Date field(s) present: " + ", ".join(date_fields)
+            + ". To learn the loaded period, call engine_get_field_range on "
+              "one of them. To ask about a period, state it as a filter — "
+              '{"field": "' + date_fields[0] + '", "period": "2024"} — and '
+              "the server writes the set analysis and reports the period it "
+              "actually selected."
         )
 
     result = {
@@ -336,8 +475,30 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         "tables_count": len(tables),
         "fields_count": len(fields),
     }
+    if len(fields) > WIDE_MODEL_FIELDS:
+        # A model this wide spends most of the reply repeating the same keys.
+        # Measured: 33 fields cost 7.6k characters as objects, and the key
+        # names are two thirds of that. Past the threshold the same content
+        # goes out as a header plus rows — no information lost, and the
+        # narrow models that make up the normal case keep the readable form.
+        result["fields"] = {
+            "columns": WIDE_MODEL_COLUMNS,
+            "rows": [[field.get(key) for key in WIDE_MODEL_COLUMNS]
+                     for field in fields],
+            "note": ("Модель широкая, поэтому поля отданы таблицей: "
+                     "columns задаёт порядок значений в каждой строке rows."),
+        }
+        result.setdefault("warnings", []).append(
+            f"{len(fields)} fields — listed as columns+rows to keep the reply "
+            f"small. Values and edges are omitted for the same reason; ask "
+            f"about a specific field with get_app_field."
+        )
     if isinstance(fields_data, dict) and "error" in fields_data:
         result["engine_error"] = fields_data["error"]
+    else:
+        # Only cache a complete answer. A reply that lost its data model to
+        # a refused session must not become the cached truth.
+        _DETAILS_CACHE[aid] = {"reload_stamp": reload_stamp, "result": result}
     return _ok(result)
 
 

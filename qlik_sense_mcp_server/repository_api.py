@@ -4,7 +4,6 @@ import ssl
 from typing import Dict, List, Any, Optional
 import httpx
 import logging
-import os
 from .config import (
     QlikSenseConfig,
     DEFAULT_HTTP_TIMEOUT,
@@ -17,6 +16,11 @@ from .utils import generate_xrfkey
 from .exceptions import QlikConnectionError
 
 logger = logging.getLogger(__name__)
+
+# Deadline for the one retry a timed-out request is given. Wide enough for
+# a Qlik loading itself back into memory, and paid only when the ordinary
+# deadline has already passed.
+COLD_START_TIMEOUT = 60.0
 
 
 class QlikRepositoryAPI:
@@ -45,11 +49,7 @@ class QlikRepositoryAPI:
             ssl_context.verify_mode = ssl.CERT_NONE
 
         # Timeouts from env (seconds)
-        http_timeout_env = os.getenv("QLIK_HTTP_TIMEOUT")
-        try:
-            timeout_val = float(http_timeout_env) if http_timeout_env else DEFAULT_HTTP_TIMEOUT
-        except ValueError:
-            timeout_val = DEFAULT_HTTP_TIMEOUT
+        timeout_val = DEFAULT_HTTP_TIMEOUT
 
         # Build per-mode client config. JWT mode uses neither client certs
         # nor X-Qlik-User impersonation — identity comes from the signed
@@ -122,7 +122,29 @@ class QlikRepositoryAPI:
 
             kwargs['headers'] = headers
 
-            response = self.client.request(method, url, **kwargs)
+            try:
+                response = self.client.request(method, url, **kwargs)
+            except httpx.TimeoutException:
+                # A Qlik that has been idle answers its first request
+                # slowly: measured through the virtual proxy, 3 to 15
+                # seconds cold against hundredths of a second once warm.
+                # The ordinary deadline is right for a working server and
+                # wrong for a waking one, so the first timeout buys one
+                # retry with room to breathe rather than failing the call.
+                #
+                # Reading only. A timeout says nothing about whether the
+                # server acted: a POST that created a task and then timed
+                # out while answering would be sent again and create a
+                # second one. Those report the timeout instead, which the
+                # caller can resolve by looking at what exists.
+                if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+                    raise
+                logger.info(
+                    "QRS did not answer %s within %.0fs, retrying once with "
+                    "%.0fs", endpoint, DEFAULT_HTTP_TIMEOUT,
+                    COLD_START_TIMEOUT)
+                response = self.client.request(
+                    method, url, timeout=COLD_START_TIMEOUT, **kwargs)
 
             # If the session cookie expired mid-flight, invalidate and retry
             # once — this is cheaper than a proactive per-request check and
@@ -341,6 +363,23 @@ class QlikRepositoryAPI:
     # 1 Triggered, 2 Started, 3 Queued, 13 DistributionQueue,
     # 14 DistributionRunning — a task in any of these is still working.
     RUNNING_EXECUTION_STATUSES = (1, 2, 3, 13, 14)
+
+    # The whole enum, so a reply can say what a status means. `status: 8`
+    # is not something a reader should have to look up, and the two codes
+    # that matter most — 8 FinishedFail and 6 Aborted — look nothing alike
+    # as numbers while meaning almost the same thing to an operator.
+    EXECUTION_STATUS_NAMES = {
+        0: "NeverStarted", 1: "Triggered", 2: "Started", 3: "Queued",
+        4: "AbortInitiated", 5: "Aborting", 6: "Aborted",
+        7: "FinishedSuccess", 8: "FinishedFail", 9: "Skipped",
+        10: "Retry", 11: "Error", 12: "Reset",
+        13: "DistributionQueue", 14: "DistributionRunning",
+    }
+
+    @classmethod
+    def execution_status_name(cls, status: Any) -> str:
+        """Human-readable name for a QRS TaskExecutionStatus code."""
+        return cls.EXECUTION_STATUS_NAMES.get(status, f"Unknown({status})")
 
     _TASK_COLUMNS = [
         ("id", "id"),
@@ -622,7 +661,7 @@ class QlikRepositoryAPI:
             "timeZone": time_zone,
             # Since Qlik November 2025 the IANA zone and DST are separate
             # fields and an offset inside startDate is deprecated.
-            # Measured on Qlik 31.62 with Europe/Berlin and a 03:00 local
+            # Measured: with Europe/Berlin and a 03:00 local
             # start in July: 0 fires at 01:00 UTC (the zone's DST rules are
             # observed), 1 fires at 02:00 UTC (standard time year-round).
             # 0 is therefore the right default — the schedule stays at the

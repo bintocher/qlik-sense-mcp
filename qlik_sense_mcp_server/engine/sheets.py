@@ -123,7 +123,7 @@ class EngineSheetsMixin:
             layout_by_index = dict(zip(layout_indices, layout_outcomes))
 
             # Wave 3: the layout does NOT carry measure expressions. Verified
-            # on 31.62 against a live sheet: `qMeasureInfo` has
+            # against a live sheet: `qMeasureInfo` has
             # qFallbackTitle, formatting and statistics, but no `qDef` —
             # reading the expression from the layout found nothing on every
             # real object. The definition lives in the properties, under

@@ -142,7 +142,7 @@ class TestExpressions:
 class TestExpressionsFromProperties:
     """The layout has no measure expressions — the properties do.
 
-    Measured on 31.62: `qMeasureInfo` in a GetLayout reply carries
+    Measured: `qMeasureInfo` in a GetLayout reply carries
     qFallbackTitle, formatting and statistics, and no `qDef` at all. Reading
     the expression from the layout therefore found nothing on every real
     object, while the tests passed against a hand-written layout that had a

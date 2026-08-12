@@ -402,7 +402,9 @@ def get_task_executions(task_id: str, top: int = 10) -> str:
         JSON `{ "task_id": ..., "executions": [...], "count": N }`. Entries
         are raw QRS objects in camelCase: status (7 = OK, 8 = failed),
         startTime, stopTime, duration (MILLISECONDS), executingNodeName,
-        scriptLogAvailable, details.
+        scriptLogAvailable, details — plus `status_name`, this server's
+        decoding of the status number ("FinishedSuccess", "FinishedFail",
+        "Aborted", "Error", ...).
     
     Example (raw QRS objects, newest first — note the camelCase keys and
     that `duration` is in MILLISECONDS):
@@ -427,6 +429,12 @@ def get_task_executions(task_id: str, top: int = 10) -> str:
     if isinstance(results, dict) and "error" in results:
         return _err(f"Repository lookup failed: {results['error']}",
                     error_category="repository_error")
+    # QRS reports the outcome as a bare number. Adding the name costs
+    # nothing and saves the reader looking up whether 8 is worse than 6
+    # (it is not — both are failures).
+    for entry in results:
+        if isinstance(entry, dict) and "status" in entry:
+            entry["status_name"] = context.repo_api.execution_status_name(entry["status"])
     return _ok({"task_id": task_id, "executions": results, "count": len(results)})
 
 

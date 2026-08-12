@@ -64,11 +64,17 @@ class TestSilentlyEmptyMeasures:
         assert any("0 or '-'" in w for w in cube.get("warnings", [])), (
             f"a table of zeros passed without comment: {cube.get('rows')}")
 
-    def test_sql_syntax_is_named_as_such(self, call, app, a_real_field):
-        cube = call("engine_create_hypercube", app_id=app,
-                    dimensions=[a_real_field],
-                    measures=["COUNT(1) AS total"], limit=5)
-        assert any("SQL" in w for w in cube.get("warnings", [])), cube.get("warnings")
+    def test_sql_syntax_is_refused_by_qliks_own_parser(self, raw_call, app, a_real_field):
+        """This used to run and come back as a column of '-' with a warning.
+
+        Now `CheckExpression` sees it first and the query never runs — a
+        refusal naming what Qlik objected to beats a table of dashes.
+        """
+        result = raw_call("engine_create_hypercube", app_id=app,
+                          dimensions=[a_real_field],
+                          measures=["COUNT(1) AS total"], limit=5)
+        assert result.get("error_category") == "invalid_expression", result
+        assert "AS" in result.get("error", "")
 
     def test_an_unknown_name_inside_a_measure_warns(self, call, app, a_real_field):
         cube = call("engine_create_hypercube", app_id=app,

@@ -43,6 +43,7 @@ from .tools.repository import get_about, get_apps, get_app_details  # noqa: F401
 from .tools.engine import (  # noqa: F401
     engine_create_hypercube,
     engine_get_field_range,
+    engine_query,
     get_app_field,
     get_app_field_statistics,
     get_app_object,
@@ -50,6 +51,7 @@ from .tools.engine import (  # noqa: F401
     get_app_sheet_objects,
     get_app_sheets,
     get_app_variables,
+    search_app,
 )
 from .tools.tasks import (  # noqa: F401
     create_task,
@@ -135,7 +137,8 @@ TOOLS ({len(mcp._tool_manager._tools)} registered in the current auth mode):
     Repository: get_about, get_apps, get_app_details
     Engine:     get_app_script, get_app_field_statistics, engine_get_field_range,
                 engine_create_hypercube, get_app_field, get_app_variables,
-                get_app_sheets, get_app_sheet_objects, get_app_object
+                get_app_sheets, get_app_sheet_objects, get_app_object,
+                search_app
     Tasks:      get_tasks, get_task_details, get_task_dependencies, start_task,
                 create_task, update_task, delete_task, get_task_schedule,
                 create_task_schedule, update_task_schedule, delete_task_schedule,

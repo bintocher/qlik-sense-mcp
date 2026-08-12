@@ -4,408 +4,251 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [2.0.0] - 2026-08-12
+
+### Added
+
+- `engine_query`: a query stated rather than written. `group_by` names the
+  grouping fields, `metrics` the aggregations
+  (`{"field": "Amount", "agg": "sum"}`), `filters` the period or the
+  values to narrow to; the server writes the Qlik expressions. `queries`
+  takes a list of independent questions — different groupings, different
+  measures, different filters — and runs the whole list over three
+  round-trips rather than three per question, however many there are. A
+  question that fails takes only itself down.
+- A period filter reports what it selected. Every query filtered on a date
+  answers with `period_check`: the earliest and latest value of that field
+  inside the result, and whether the filter applied. Qlik reports neither —
+  it drops a condition it cannot honour and answers with the unfiltered
+  total, a number larger than the truth with nothing to mark it as wrong.
+- Filters described rather than written work in `engine_create_hypercube`
+  too, applied wherever a measure carries the `{filter}` marker.
+- `QLIK_TASK_TOOLS=false` leaves the 14 reload-task tools out of
+  certificate mode, for an identity that only reads data.
+
+- Filter bounds follow the field. On a date field `from` and `to` are days;
+  on any other field they are the values themselves, so
+  `{"field": "Discount", "from": 400}` is a discount of 400 or more.
+  Measured on a live app: read as a date, 400 became a day in 1901 and the
+  answer came back 18,774 where the truth was 1,898,591 — a plausible
+  number, and wrong.
+- `greater_than` and `less_than` exclude the bound they name. "More than
+  400" and "from 400" are different questions, and on a 10M-row app the
+  difference is the 184 orders discounted by exactly 400.
+- A numeric range reports its control values the way a period does: the
+  smallest and largest value inside the result, and whether they fall
+  within the bounds asked for.
+
+### Changed
+
+- Every check on a query is now made by Engine, in one batch that costs
+  about 4ms against 75ms for the smallest hypercube: `ExpandExpression`
+  resolves `$(...)` so the checks see what will run, `CheckExpression`
+  reports syntax and names the data model does not have,
+  `GetFieldsFromExpression` reports the fields a set modifier actually
+  filters on. The lexical scan that guessed at all three — set-modifier
+  field names, SQL keywords, quoted comparisons, variable expansion — is
+  removed. An unknown name in a measure is now refused rather than
+  warned about: it is Engine's verdict, and Qlik scores such a name as 0,
+  so the measure would come back as a column of zeros that reads as an
+  answer.
+- The form of a date filter is measured rather than assumed. Comparison
+  inside a set modifier runs against the text Qlik displays for a value,
+  so a serial-number range returns 0 on a field displayed as `01.01.2024`
+  and works on one displayed as `45292` — with no error either way.
+  Measured against a field carrying a time of day, the numeric form
+  selected nothing and the expression form was correct; on a field of bare
+  numbers both were correct and the numeric one sixty times cheaper. The
+  server now checks the cheap form against a reference count and uses it
+  only where it agrees, remembering the answer per field.
+- A date in a query result reads as the text Qlik displays for it, the
+  same writing as the sample values in `get_app_details`, the values from
+  `get_app_field` and the bounds from `engine_get_field_range`. It used to
+  come back as the serial number, so one value had two writings and a
+  filter written from the wrong one selected nothing.
+- Tool descriptions rewritten to one shape: what the tool does, when to
+  use it, when not to, what it returns and what it does not. The block
+  about Qlik's session limit repeated in eight of them is gone — it
+  described something the caller does not control.
+- `get_app_details` switches to a `columns` + `rows` table once a model has
+  more than 60 fields, and skips reading sample values there. Narrow
+  models — the normal case — keep the readable per-field form. Measured
+  at 61 fields: 6.3k characters as objects against 3.8k as a table, and
+  16k instead of ~32k at 300 fields.
+- `get_app_details` now says in its own description that `get_about` is
+  never a prerequisite and `get_apps` is only needed without a name.
+- Field metadata is tighter without losing anything a caller needs. Tags
+  come back as one string without Qlik's `$` (`"numeric integer"` for
+  `["$numeric", "$integer"]`); `rows` is no longer repeated on every field
+  when it is the table's row count, reported with the table; `is_key` and
+  `tags` appear only when they say something. The load-script comment is
+  returned as before — it is the only human description a column has.
+  Measured: 7.6k characters to 6.5k on a 33-field model.
+
+### Fixed
+
+- A batch of queries no longer fails as a whole. Engine is asked about
+  every expression in the batch once, and each query is then judged on its
+  own: two mistakes of different kinds both land, and a query naming
+  `NopeAmount` is not refused because another named `Nope`.
+- Two filters that each select something but select nothing together took
+  the whole call down. Engine answers Min/Max over an empty set with a
+  "NaN" sentinel, which reached a numeric comparison as text; it is now
+  read as "no value" everywhere.
+- A field name written into an expression stays one name. `Amount]) +
+  Sum([Amount` turned one aggregation into two, the second without the
+  filter, while the reply reported the period as applied.
+- One call is bounded: 25 queries, and 200 grouping fields, measures and
+  filter values between them. Each of those costs an Engine call before
+  the batch runs.
+- Session objects are released on every path out, including a transport
+  failure part way through a batch.
+- A repository request is retried after a timeout only when it reads.
+  Retrying a POST could create a second task.
+- The first call after a quiet period no longer fails. A Qlik that has
+  been idle answers slowly — measured through the virtual proxy, 15 to 21
+  seconds to bootstrap a session and 3 to 15 for the first repository
+  call, against hundredths of a second once warm — and both ran under a
+  ten-second deadline. The bootstrap now has its own minute, and a
+  timed-out repository call is retried once with room to breathe.
+- The schema cache never noticed a reload: both callers passed `None`
+  where the app's reload timestamp belonged, so the invalidation the
+  cache was built around had never once fired and only the ten-minute
+  expiry limited it. It now receives the real timestamp.
+
+- Engine sessions are released about five seconds after the socket
+  closes instead of lingering for the proxy's inactivity timeout. The
+  WebSocket URL now carries a `ttl` segment, so restarting the server
+  no longer walks into Qlik's limit of five sessions per user.
+- Ten environment variables removed, leaving 15 `QLIK_*` settings:
+  `QLIK_HTTP_TIMEOUT`, `QLIK_WS_RETRIES`, `QLIK_WS_IDLE_PROBE_AFTER`,
+  `QLIK_WS_PROBE_TIMEOUT`, `QLIK_WS_GREETING_TIMEOUT`,
+  `QLIK_LOG_REPLY_CHARS`, `QLIK_JWT_SESSION_TTL`,
+  `QLIK_JWT_SESSION_COOKIE`, `QLIK_JWT_USER_ID_CLAIM`,
+  `QLIK_JWT_USER_DIR_CLAIM`. The first six are now fixed values; the last
+  two were never read by the server.
+- The virtual proxy session cookie is recognised even when QMC renames it:
+  the conventional `X-Qlik-Session*` first, then any name containing
+  "qlik", then a lone cookie. Previously a renamed cookie arriving
+  alongside a load-balancer cookie left no way to connect, since the
+  override that covered it was removed. The error now lists the cookies
+  that did arrive.
+
 ## [1.9.0] - 2026-08-11
 
 ### Added
 
-- **A query that names something that does not exist is now refused.**
-  Qlik evaluates an unknown name as an expression worth 0 rather than
-  reporting an error, so a typo came back as data: measured on 31.62, a
-  hypercube grouped by `no_such_field` returned a single row holding
-  49,989,556,885.52 — the grand total over all ten regions, and
-  indistinguishable from a real answer. Dimension fields are now checked
-  against the data model before the cube is built (one pipelined
-  `GetFieldDescription` batch, ~0.01s), and an unknown one comes back as
-  `error_category: field_not_found` with `did_you_mean` suggestions.
-- **Measures that quietly evaluate to nothing are called out.** Every
-  reply carries `warnings`. A measure whose every value is `0` or `'-'`
-  is flagged — that is what Qlik returns for a set-analysis filter
-  matching no value (`region_name={'Moscow'}` where the data says
-  `Moskva`), a misspelled field inside an aggregation, or an expression
-  it could not evaluate. SQL written into a measure (`AS`, `SELECT`,
-  `GROUP BY`, `FROM`, `WHERE`) is named as such, and names inside a
-  measure that the model does not have are reported without blocking the
-  query, since they are found lexically.
-- **Objects report the expressions behind them.**
-  `get_app_sheet_objects` returns `fields_used`, `measures` and
-  `dimensions` — all three were computed and then dropped, so answering
-  "what does this sheet work with" meant one call per object, and the
-  expressions were not reachable at all. `get_app_object` gained the
-  same three: its docstring promised "dimension/measure definitions and
-  expressions" while returning a layout that does not contain them.
+- A hypercube dimension naming a field the model does not have is now
+  refused with `error_category: field_not_found` and `did_you_mean`
+  suggestions. Qlik scores an unknown name as 0, so the query used to
+  return one row holding the grand total.
+- Every hypercube reply carries `warnings`: an all-zero or all-`'-'`
+  measure, SQL written into a measure (`AS`, `SELECT`, `GROUP BY`,
+  `FROM`, `WHERE`), names a measure mentions that the model does not
+  have, and an empty result.
+- `get_app_sheet_objects` and `get_app_object` return `fields_used`,
+  `measures` and `dimensions`, with master items resolved to their
+  library definitions.
 
 ### Fixed
 
-- **A calculated dimension skipped the check.** `=Year(no_such_field)`
-  was passed through unexamined because an expression is not a field
-  name — leaving open the exact hole the check exists to close. The
-  names inside it are now read too, as a warning rather than a refusal.
-- **An empty result is explained.** `suppress_zero=True` turns a full
-  table of zeros into no rows at all, and the per-column check needs
-  rows to look at, so the warning went quiet precisely when the answer
-  was emptiest.
-- **The SQL check no longer fires on a legal field name.** It scanned
-  the raw expression, so a field called `[Cost as planned]` read as an
-  SQL alias. Bracketed names and string literals are masked first — and
-  masked rather than removed, so `AS "total"`, the alias form a model
-  writes most often, is still caught.
-- **Measure expressions were read from the wrong place.** The code
-  looked for `qMeasureInfo.qDef` in the object layout, and Engine does
-  not put it there — verified against a live sheet, where every measure
-  arrived with `qFallbackTitle`, formatting and statistics but no
-  definition at all. The expression lives in the properties
-  (`qHyperCubeDef.qMeasures[].qDef.qDef`), which are now fetched in the
-  same pipelined pass. Objects also report their `measures` and
-  `dimensions` with expressions and labels.
-- **Charts built from the library reported no fields.** A master measure
-  or dimension stores only `qLibraryId`; those are now resolved through
-  `GetMeasure`/`GetDimension` — so precisely the charts a modeller took
-  the trouble to standardise stop being the ones that answer "no fields".
-- **Filter panes report the fields they filter on.** A filter pane is a
-  container: the fields live in its listbox children, one level down, and
-  reading only the top level reported every filter pane as using nothing.
-- **Non-Latin field names are found.** The identifier pattern was
-  `[A-Za-z_]`, so a chart grouped by `Год` and `Месяц` — the actual
-  dimensions on the stand — contributed no fields. Numeric literals no
-  longer count either: `Count(distinct id) / 1e3` used to report `1e3`
-  as a field.
-- **A double-quoted search is a value, not a field.**
-  `Sum({<Country={"New Zealand"}>} Sales)` reported `New` and `Zealand`
-  as fields of the data model. Both quote styles and `$(variable)`
-  expansions are now removed before names are read.
-- **Certificate mode follows the URL scheme too.** It listed both
-  `wss://` endpoints before the `ws://` ones, and with the default retry
-  budget of 2 the plain-WebSocket entries were unreachable — so
-  `QLIK_SERVER_URL=http://host` could not connect at all. The requested
-  scheme is now tried first and exhausted before the other. (1.8.1 fixed
-  this for JWT mode only.)
+- Measure expressions were read from the object layout, where Engine
+  does not put them; they come from the properties.
+- Filter panes reported no fields — the fields are in their listbox
+  children.
+- Field names outside `A-Za-z` were dropped, `1e3` was reported as a
+  field, and a double-quoted set-analysis search returned its words as
+  field names.
+- `=Year(no_such_field)` skipped the unknown-field check.
+- `suppress_zero=True` hid the all-zero-measure warning.
+- The SQL check fired on a field legitimately called
+  `[Cost as planned]`.
+- Certificate mode ignored the URL scheme and could not reach `ws://`
+  with the default retry budget.
 
 ## [1.8.1] - 2026-08-11
 
 ### Changed
 
-- **The URL scheme decides the transport, including the WebSocket.**
-  `QLIK_SERVER_URL=http://host/jwt` now connects to Engine with `ws://`;
-  before, the scheme was honoured for every HTTP call but the WebSocket
-  was hard-coded to `wss://` on the grounds that TLS is mandatory. That
-  is not the client's decision to make: Qlik serves the virtual proxies
-  on 80 and 443 both, and a node whose proxy TLS has failed answers only
-  on 80 — the case that prompted this, where 443 stopped completing
-  handshakes while `http://host/jwt/qps/csrftoken` returned 204. Both
-  schemes are covered by tests, and the full e2e suite was run over
-  `http://` against a live Qlik. An `http://` URL is logged as a warning,
-  because the JWT and the session cookie then travel in clear text.
-- **TLS verification is off by default.** `QLIK_VERIFY_SSL` now defaults
-  to `false` and must be set to `true` to turn verification on. Qlik
-  Sense Enterprise serves its own self-signed certificate, so a correct
-  installation failed verification and every deployment was switching it
-  off anyway — a default that is wrong for the product it talks to only
-  teaches people to disable the setting without reading it.
+- The scheme in `QLIK_SERVER_URL` now decides the transport for the
+  Engine WebSocket too: `http://host/jwt` connects with `ws://`,
+  `https://` with `wss://`. An `http://` URL is logged as a warning —
+  the JWT and the session cookie then travel in clear text.
+- `QLIK_VERIFY_SSL` defaults to `false`. Qlik Sense Enterprise serves a
+  self-signed certificate, so verification failed on a correct
+  installation. Set it to `true` to turn verification on.
 
 ### Fixed
 
-- **Filter panes reported no fields.** Engine gives a hypercube a *list*
-  of `qDimensionInfo` and a list object exactly one; the extractor
-  iterated both as lists, so on a list object it walked the dict's keys
-  and raised `'str' object has no attribute 'get'`. A catch-all turned
-  that into a log warning and an empty field list, and filter panes are
-  precisely the objects that say which fields a sheet can be sliced by.
-- **`Sum(Sales)` now reports `Sales`.** Field extraction matched only
-  bracketed names, so any expression written without brackets — most of
-  them — contributed nothing to "which fields does this object use".
-  Names are now taken structurally: an identifier followed by `(` is a
-  function, string literals are values, everything else that is not a
-  keyword is a field. Calculated dimensions (`=Year(OrderDate)`) are read
-  the same way instead of being skipped.
+- Filter panes reported no fields: a list object carries one
+  `qDimensionInfo`, not a list, and iterating it walked the dict's keys.
+- Field extraction matched only bracketed names, so `Sum(Sales)`
+  reported nothing.
 
 ## [1.8.0] - 2026-08-11
 
 ### Added
 
-- **`update_task_schedule` and `delete_task_schedule`** — a task can have
-  several triggers, and until now the only way to stop one through this
-  server was `update_task(enabled=False)`, which stops the task and every
-  other trigger with it. Both verified end to end against a live Qlik:
-  disable one trigger, retime it, give it a window, delete it.
-- `update_reload_task` refuses fields that must not travel in a PUT
-  (`id`, `createdDate`, the operational section) and reports a QRS 409 as
-  `error_category: conflict` — someone else changed the task between the
-  read and the write, which the caller answers by re-reading, not by
-  retrying blindly.
-- **`QlikEngineAPI.send_requests_pipelined()`** — sends a batch of
-  independent JSON-RPC requests back-to-back and matches responses by
-  `id`, which the Engine protocol supports precisely so replies can come
-  back out of order. `send_request()` is untouched. `raise_on_error=False`
-  returns per-item exceptions so one bad item does not lose the batch.
-  (from PR #29)
-- `_get_sheet_objects_detailed()` uses two pipelined batches instead of
-  one `GetObject`+`GetLayout` round-trip per object: 2 round-trips
-  instead of 2N. Measured on a live sheet with 16 objects: 0.135s to
-  0.028s, identical results. (from PR #29)
-- `QLIK_WS_IDLE_PROBE_AFTER` (default 30s), `QLIK_WS_PROBE_TIMEOUT`
-  (15s) and `QLIK_WS_GREETING_TIMEOUT` (15s) — liveness and handshake
-  budgets, separate from `QLIK_WS_TIMEOUT`, because a real query may
-  legitimately take minutes while a health check never should.
-  (adapted from PR #28)
-- **End-to-end test suite** (`tests/test_e2e_*.py`, marker `e2e`) that
-  runs the tools against a real Qlik and asserts on real values: ranking
-  actually ordered by the measure, pagination actually moving, NULL
-  groups actually dropped, the connection actually reused. Skipped
-  unless `QLIK_E2E_*` names a server. `tests/test_e2e_large_app.py`
-  additionally needs an app with 10M+ rows — none of the defects fixed
-  in this release could be reproduced by a fake socket.
+- `update_task_schedule` and `delete_task_schedule` — a task can have
+  several triggers, and stopping one used to mean disabling the task.
+- `QLIK_WS_IDLE_PROBE_AFTER` (30s), `QLIK_WS_PROBE_TIMEOUT` (15s) and
+  `QLIK_WS_GREETING_TIMEOUT` (15s), separate from `QLIK_WS_TIMEOUT`.
+- End-to-end test suite (`tests/test_e2e_*.py`, marker `e2e`) that runs
+  the tools against a real Qlik. Skipped unless `QLIK_E2E_*` is set.
+- `QlikEngineAPI.send_requests_pipelined()`; sheet objects now cost 2
+  round-trips instead of 2 per object. (from PR #29)
 
 ### Changed
 
-- **`get_app_variables` returns objects, always.** An empty group came
-  back as `""` instead of `{}`, so the field's type depended on whether it
-  had data. It also dropped script variables unless `created_in_script`
-  was passed explicitly, which left `variables_from_script` permanently
-  empty on the default call — half the reply was structurally dead. The
-  default now returns both sources, and the reply carries `count` and
-  `total_found`.
-- **`qSuppressMissing` is never set.** Measured on Qlik 31.62: it drops
-  exactly one row — the NULL-dimension group — and leaves rows with a NULL
-  *measure* untouched. That is what `qNullSuppression` per dimension
-  already does, under the caller's control, so the cube-wide flag only
-  ever meant an explicit "keep the NULL group" could be overridden.
-- **`engine_api.py` and `server.py` are split into packages.** The Engine
-  client became `engine/` — transport, hypercubes, fields, sheets and
-  app metadata as separate mixins assembled in `engine/api.py` — and the
-  tools became `tools/`, grouped by the API they talk to, with shared
-  state in `tools/context.py` and the response envelope in
-  `tools/helpers.py`. `from .engine_api import QlikEngineAPI` and
-  `from .server import get_apps` keep working; the largest module went
-  from 3394 lines to 875.
+- `get_app_variables` always returns objects, and both sources by
+  default — script variables used to be dropped unless asked for.
+- `qSuppressMissing` is never set: it drops the NULL-dimension row,
+  which `qNullSuppression` already does under the caller's control.
+- `engine_api.py` and `server.py` are split into `engine/` and `tools/`
+  packages. The old import paths keep working.
 
 ### Removed
 
-- 43 methods that nothing called (~1180 lines): `get_table_data`,
-  `create_data_export`, `get_visualization_data`,
-  `get_detailed_app_metadata`, `get_sheets_with_objects`, bookmark and
-  selection helpers, and the rest of the unreachable surface of
-  `QlikEngineAPI` and `QlikRepositoryAPI`. Among them
-  `get_pivot_table_data`, which raised `NameError` on every call, and a
-  duplicate `get_field_description` shadowed by a later definition —
-  deleting the visible one would have silently reactivated the dead one.
+- 55 methods nothing called (~1180 lines), including
+  `get_pivot_table_data`, which raised `NameError` on every call.
 
 ### Fixed
 
-- **QRS paging is done by the server now.** `get_apps` fetched
-  `app/full` — which ignores skip/take and is itself truncated at the
-  QRS MaxRecordLimit (100 by default) — and then sliced the result
-  locally. Every app past that cap was invisible, and `total_found`
-  reported the cap as if it were the total, so a client paging through
-  `has_more` walked off the end of the data without an error. Pages now
-  come from `app/table` with skip/take and the total from `app/count`.
-  The same applies to reload tasks (`reloadtask/table`, read through to
-  the last page) and to execution history, where `top` became a
-  server-side `take` instead of a slice of an arbitrary window.
-- **`published="both"` returns both.** It was documented as "any other
-  value means both" but folded into the default `True`, so the mode was
-  unreachable — the tool answered with published apps only. Live check on
-  8 published + 10 unpublished apps now returns 18.
-- **`create_task_schedule` produced schedules Qlik rejected outright.**
-  The body carried an empty `operational` section, which QRS answers with
-  400 "invalid property ... operational with EMPTY GuID" — so the tool
-  failed on every call. Behind that were three more errors: an
-  `incrementOption` numbering that does not exist (there is no
-  "minutely", and daily is 2 rather than 3), the interval written into
-  the *days* position of `incrementDescription`, and an enum code sent
-  where `schemaFilterDescription` expects an 8-position window string.
-  Verified end to end: a created trigger now comes back with a real
-  `nextExecution` instead of the 1753 sentinel.
-- **Failed tasks include aborted and errored runs.** The filter matched
-  status 8 (FinishedFail) only, missing 6 (Aborted) and 11 (Error) — the
-  status codes were confirmed against the server's own
-  `TaskExecutionStatus` enum rather than assumed. `get_tasks` also gained
-  the documented-but-missing `"running"` filter, and an unknown
-  `status_filter` is now refused instead of quietly returning everything.
-- **Hypercube pages are completed.** Engine may trim a page below the
-  requested `qInitialDataFetch`; the remainder is now read with
-  `GetHyperCubeData` before the reply is assembled, so a request for 4000
-  rows no longer returns fewer without saying so.
-- **One Engine call at a time.** The Streamable HTTP transport serves
-  several MCP clients from one process while the client holds a single
-  WebSocket and a single open document. Overlapping calls interleaved on
-  that socket: strict id-matching made each discard the other's reply,
-  and `ensure_app` could switch documents mid-call. Engine-backed tools
-  now hold the client's reentrant lock for the whole call
-  (`_engine_serialised`); Repository-only tools are deliberately left
-  unsynchronised so a slow hypercube does not block them.
-- **Session objects are always destroyed.** `get_sheets` and
-  `_get_user_variables` never destroyed theirs at all, and the rest of
-  the client cleaned up after the read rather than in a `finally`, so any
-  early return or exception leaked the object — and its result set — into
-  Engine memory for the rest of the session. Creation now goes through
-  `QlikEngineAPI.session_object()`, a context manager that generates a
-  unique id and destroys it on every path.
-- **Field search and paging happen in Engine.** `get_app_field` read the
-  first 500–5000 values, matched them in Python and sliced the result,
-  so on a larger field a match simply did not exist: verified on a field
-  with 200,000 distinct values, where `search_string="C19999*"` returned
-  nothing and `offset=150000` returned an empty page. Both now go to
-  Engine — the search as a NULL-suppressed calculated dimension, the
-  offset as the page top — and the reply carries `total_matches`.
-  Passing `search_string` and `search_number` together is refused
-  instead of one silently overwriting the other.
-- **Null statistics were meaningless.** `get_app_field_statistics`
-  labelled Qlik's `Count()` — which ignores NULLs — as `total_count`, and
-  paired it with `Count({$<[field]={'*'}>})`, an aggregation with no
-  argument. The derived `null_percentage` therefore compared two counts
-  of the same non-null values and came out near zero however much was
-  missing. It now uses `NullCount()`, reports `null_count` alongside
-  `non_null_count`, and derives `total_count` as their sum. On a field
-  built with exactly 5% NULLs the answer is 5.0%; it used to be 0.
-- **`get_app_object` no longer raises KeyError** when Engine returns no
-  handle for an object (an unknown id, or a type it will not open) —
-  that came back as an opaque failure instead of
-  `error_category: object_not_available`.
-- **A Repository failure is no longer reported as an empty list.**
-  `get_tasks`, `get_failed_tasks_with_logs`, `get_task_executions` and
-  `get_apps` turned a 500, a 403 or a refused connection into "nothing
-  found". They now return `error_category: repository_error` with the
-  original cause.
-- `/count` replies are accepted in both shapes QRS uses — a bare integer
-  and `{"value": N}`. Insisting on the object form would have failed
-  every paged read on a server that answers with the number.
-- A hypercube page that could not be read is now labelled `INCOMPLETE`
-  rather than reusing the "showing the top N" wording, which made a
-  failed read look like a deliberate ranking. The cause travels in
-  `timings.page_fetch_error`.
-- `get_task_schedule` and `get_task_dependencies` no longer answer
-  "no schedule" / "no dependencies" when QRS is unreachable; composite
-  events are also read page by page instead of from the truncated
-  `compositeevent/full`.
-- `_read_all` compares what it collected against `/count` and reports a
-  short read instead of returning a quietly truncated list. The same
-  applies to its safety cap, which used to appear only in the server log.
-- Case-sensitive field search keeps wildcard semantics (`Match`, which
-  honours `*` and `?`); it previously stripped the wildcards and fell
-  back to a substring test, so `C1*9` matched anything containing "C19".
-- `daylightSavingTime` is a parameter of `create_schema_trigger` instead
-  of a hard-coded 0, and `create_task_schedule` gained `time_window` —
-  the 8-position filter that says when a schedule may fire. It existed
-  in the Repository layer but no tool could reach it, so a caller could
-  only ever set how often, never when.
-- Each Engine client gets its own transaction lock. A class-level
-  default coupled every partially-constructed client in the process,
-  so unrelated instances serialised against each other.
-- 12 more dead functions removed: the unreachable `get_app_details`
-  branch of the Engine client and its helpers — two of which called
-  methods that do not exist anywhere in the package — plus the unused
-  ticket/proxy helpers and a no-op loop over `qChildList`.
-- **Wildcards are Qlik's, not Python's.** The case-sensitive filter went
-  through `fnmatch`, which also reads `[...]` as a character class — so the
-  pattern `Order[12]` matched the value `Order[1]`, a match Qlik would
-  never make. Patterns are now compiled with only `*` and `?` as
-  wildcards and everything else literal.
-- **The search's own caveats reach the caller.** `search_truncated`,
-  `total_matches_at_least` and `candidates_scanned` were computed and then
-  dropped by the tool layer, so a capped scan looked like the complete
-  answer.
-- **Changing a schedule's repetition now requires the interval too.**
-  `incrementOption` and `incrementDescription` describe one schedule
-  between them; switching daily→hourly while keeping `"0 0 1 0"` meant
-  "hourly, every 1 day". Refused instead of saved.
-- **`start_date` no longer defaults to a date in the past.** The hard-coded
-  `2026-04-01` had long since passed, and a `once` schedule dated in the
-  past never fires. It now defaults to the next midnight, and the docstring
-  says what the value actually means: wall-clock time in `time_zone`, not
-  UTC.
-- **Session objects in `get_field_values` and `get_field_statistics`** are
-  destroyed on the exception paths as well — both cleaned up after the read
-  rather than in a `finally`.
-- **`_read_all`'s safety cap counts rows, not offsets**, so it no longer
-  refuses the last page one row early.
-- **Case-sensitive field search kept its wildcards.** The previous fix
-  reached for `Match()`, which respects case but does not understand `*`
-  or `?` — verified on 31.62, `Match('C000001','C00000*')` is 0. Qlik has
-  no case-sensitive wildcard function at all, so the search now asks
-  Engine for the case-insensitive superset with `WildMatch` and narrows it
-  here. That cannot miss anything (the exact answer is a subset), paging
-  is applied after the narrowing, and the scan is capped so one search
-  cannot walk a 200k-value field end to end. When the cap is hit the reply
-  says `search_truncated` and reports `total_matches_at_least` instead of
-  a total it did not count.
-- **Script-log retrieval works again.** Moving execution history to the
-  table endpoint dropped the very fields the log download needs
-  (`scriptLogAvailable`, `scriptLogLocation`), so every request fell
-  through to the summary fallback. The table endpoint now returns ids and
-  each execution is read in full. An error envelope from that call is also
-  reported as one — iterating it walked the dict's keys and raised
-  `AttributeError` on the first `.get`.
-- **`grand_total` no longer contains nulls.** It only guarded against the
-  `"NaN"` sentinel, while the rows also handle a missing `qNum`; a total
-  Engine returned as text therefore arrived as JSON `null`.
-- **An empty extra page marks the result incomplete.** The page loop
-  stopped on it, as intended, but said nothing — so a short answer looked
-  like a deliberate top-N.
-- **`_read_all` no longer reports a phantom truncation.** A result whose
-  size is an exact multiple of the page size reached the safety cap having
-  already read everything, and that was reported as a partial read. It now
-  stops as soon as the collected count reaches what `/count` promised.
-- **Session objects in `get_field_range`** are destroyed on the early
-  return as well — the cleanup was written after it.
-- **An unreadable load script says so.** Reading it needs Professional
-  access; with an Analyzer licence Qlik returns an empty string and no
-  error, which is indistinguishable from an app that has no script.
-  `get_app_script` now attaches a `note` explaining the difference.
-- **The cached WebSocket is no longer wedged by its own health check.**
-  `_is_connected()` sent a WebSocket ping before reusing the connection.
-  Qlik's Proxy Service does not relay ping/pong to the Engine: through a
-  virtual proxy the first request after a ping is never answered, so the
-  call blocked for the whole `QLIK_WS_TIMEOUT` (180s by default) and only
-  then reconnected. In JWT mode — the only mode that goes through a proxy
-  — that meant every second tool call hung for minutes, and each forced
-  reconnect burned another Engine session until Qlik's per-user limit
-  (5) refused new ones and every call failed. Verified on Qlik 31.60: the
-  same ping is harmless on a direct Engine socket (port 4747, certificate
-  mode), which is why it survived this long. A connection that answered
-  within `QLIK_WS_IDLE_PROBE_AFTER` seconds is now reused as-is, and an
-  idle one is validated with a real `EngineVersion` request — which also
-  proves more than a ping did, since it shows the Engine still answers
-  rather than just that the socket accepts writes. Live effect on a
-  repeated call: 63s timeout to 0.005s.
-- **A refused Engine session is now reported as such.** `connect()` read
-  exactly one greeting frame and treated it as "session established".
-  When Qlik answers a new socket with `OnMaxParallelSessionsExceeded`
-  (the per-user session limit) and closes it immediately, the client
-  reported success and the next call failed with `Failed to parse
-  WebSocket frame ... Expecting value` — a message that says nothing
-  about the cause. Greeting frames are now read up to `OnConnected`, and
-  a fatal one raises `QlikSessionLimitError` naming the quota and how to
-  clear it.
-- **`exclude_null_dimensions=false` now actually keeps the NULL group.**
-  Sorting by a measure switched on the cube-wide `qSuppressMissing`, which
-  drops the NULL-dimension row as well — so the one request whose whole
-  point is "show me how much data is unattributed" came back with that row
-  removed. On a 10M-row app the NULL group held 499,918 rows and never
-  appeared. The suppression is now off whenever the caller opts into
-  keeping NULL groups; the ranking itself is unchanged.
-- **A missing field is reported instead of invented.** `get_app_field`
-  fell back to a single-dimension hypercube when the `ListObject` path
-  returned nothing, and Qlik evaluates an unknown field name as an
-  expression worth 0 — so a misspelled field answered
-  `{"field_values": ["0"]}`, which reads as data. The field's existence is
-  now checked first (one `GetFieldDescription`, whose result is reused for
-  `field_comment`), and an unknown name returns `error_category:
-  field_not_found`.
-- **A Repository failure is no longer reported as a missing app.** Any
-  QRS error — 500, 403, a refused connection, a failed JWT bootstrap —
-  surfaced from `get_app_details` as `App not found by provided app_id`,
-  sending the caller to look for a different id while the real answer was
-  that Qlik was unreachable. Found by the e2e suite while the Qlik proxy
-  happened to be restarting. Such failures now carry
-  `error_category: repository_error`, the original cause and a hint;
-  a genuinely absent app keeps `app_not_found`.
-- **Session-object ids are unique per call.** `create_hypercube`,
-  `get_field_values`, `get_field_range` and `get_field_statistics` built
-  `qId` from the request's shape (e.g. `hypercube-1d-1m`), so a call
-  issued shortly after an identically-shaped one was destroyed could get
-  a stale cached calculation back instead of an evaluation of its own
-  `qDef`. Every id now carries a `uuid4` suffix, and the matching
-  `DestroySessionObject` uses the generated id. (from PR #27)
+- QRS paging happens on the server: `app/full` ignores skip/take and is
+  capped at MaxRecordLimit, so apps past the cap were invisible and
+  `total_found` reported the cap as the total. Same for reload tasks and
+  execution history.
+- `published="both"` was unreachable and answered with published apps
+  only.
+- `create_task_schedule` built schedules QRS rejected outright: an empty
+  `operational` section, a wrong `incrementOption` numbering, the
+  interval in the wrong position, and an enum where a window string
+  belongs.
+- Failed-task filters missed Aborted (6) and Error (11); `get_tasks`
+  gained the documented `"running"` filter and refuses an unknown one.
+- Hypercube pages are read to the requested height instead of returning
+  fewer rows silently.
+- Engine calls are serialised: overlapping calls on the shared socket
+  discarded each other's replies and could switch documents mid-call.
+- Session objects are destroyed on every path, including exceptions.
+- Field search and paging run in Engine — on a 200k-value field, a local
+  scan could not see a match at all.
+- `get_app_field_statistics` uses `NullCount()`: `null_percentage` was
+  near zero however much was missing.
+- A Repository failure returns `error_category: repository_error`
+  instead of an empty list, and a missing field is reported instead of
+  being invented as `0`.
+- The cached WebSocket is no longer wedged by its own health check —
+  Qlik's proxy does not relay ping/pong to Engine, so through a virtual
+  proxy the next request hung for the whole timeout (63s to 0.005s).
+- A refused Engine session (`OnMaxParallelSessionsExceeded`) raises
+  `QlikSessionLimitError` instead of surfacing as a parse error later.
+- `exclude_null_dimensions=false` keeps the NULL group again.
+- Session-object ids are unique per call, so a stale cached calculation
+  cannot come back. (from PR #27)
+- Script-log retrieval, `grand_total` nulls, truncation reporting,
+  case-sensitive wildcard search, `start_date` defaulting to the past,
+  and per-client transaction locks.
 
 ## [1.7.2] - 2026-07-31
 

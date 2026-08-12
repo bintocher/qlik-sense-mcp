@@ -56,8 +56,10 @@ class TestFastMCPRegistration:
         assert hasattr(srv.mcp, "_tool_manager")
 
     def test_tools_count(self):
-        # Exactly 26 MCP tools in certificate mode; update when one is added.
-        assert len(srv.mcp._tool_manager._tools) == 26
+        # 14 analysis tools plus 14 for task administration, which follow
+        # certificate mode. Per-mode visibility is covered in
+        # tests/test_tool_registration.py.
+        assert len(srv.mcp._tool_manager._tools) == 28
 
     def test_core_tools_registered(self):
         tool_names = set(srv.mcp._tool_manager._tools.keys())
@@ -69,6 +71,7 @@ class TestFastMCPRegistration:
             # Engine
             "get_app_script",
             "get_app_field_statistics",
+            "engine_query",
             "engine_create_hypercube",
             "engine_get_field_range",
             "get_app_field",
@@ -76,19 +79,7 @@ class TestFastMCPRegistration:
             "get_app_sheets",
             "get_app_sheet_objects",
             "get_app_object",
-            # Task management
-            "get_tasks",
-            "get_task_details",
-            "start_task",
-            "create_task",
-            "update_task",
-            "delete_task",
-            "get_task_schedule",
-            "create_task_schedule",
-            "get_task_executions",
-            "get_task_script_log",
-            "get_failed_tasks_with_logs",
-            "get_task_dependencies",
+            "search_app",
         }
         missing = expected - tool_names
         assert not missing, f"missing tools: {missing}"

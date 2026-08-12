@@ -43,10 +43,6 @@ virtual proxy configuration and key/token issuance.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QLIK_JWT_TOKEN` | unset | Signed JWT bearer token. Setting this switches the server to JWT mode. |
-| `QLIK_JWT_USER_ID_CLAIM` | `userId` | Name of the JWT payload claim holding the user ID. Must match the QMC virtual proxy's "JWT attribute for user ID". |
-| `QLIK_JWT_USER_DIR_CLAIM` | `userDirectory` | Name of the JWT payload claim holding the user directory. Must match the QMC virtual proxy's "JWT attribute for user directory". |
-| `QLIK_JWT_SESSION_COOKIE` | auto-detected | Override for the virtual proxy session cookie name. By default the MCP picks it up from the bootstrap response `Set-Cookie` header. |
-| `QLIK_JWT_SESSION_TTL` | `1500` | Seconds to cache the bootstrapped session before re-fetching. Lower this if the QMC Proxy "Session inactivity timeout" is below 30 minutes. |
 
 In JWT mode `QLIK_SERVER_URL` MUST include the virtual proxy prefix as
 URL path (e.g. `https://qlik.company.com/jwt`). `QLIK_USER_DIRECTORY`
@@ -71,16 +67,24 @@ Defaults match the standard
 |----------|---------|-------------|
 | `QLIK_VERIFY_SSL` | `false` | Verify TLS certificates. Off by default: Qlik Sense Enterprise serves its own self-signed certificate, so a correct installation fails verification. Set to `true` once Qlik presents a certificate your machine trusts (and point `QLIK_CA_CERT_PATH` at the CA if it is a private one). |
 
+## Which tools are registered
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QLIK_TASK_TOOLS` | `true` | Register the 14 reload-task tools. They need repository-admin rights, so they are registered in certificate mode only and this variable has no effect in JWT mode. Set to `false` to leave them out of certificate mode as well — an identity that only reads data has no use for them, and every registered tool takes up room in the model's context. |
+
+## Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `INFO` | Root log level (`DEBUG`, `INFO`, `WARNING`, ...). |
+| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go — stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+
 ## Timeouts and retries
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QLIK_HTTP_TIMEOUT` | `10.0` | HTTP request timeout in seconds (Repository API). |
 | `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to BOTH the WS handshake AND every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
-| `QLIK_WS_RETRIES` | `2` | Number of WebSocket connection endpoints to try when connecting. |
-| `QLIK_WS_IDLE_PROBE_AFTER` | `30.0` | How long (seconds since the last answered frame) a cached Engine connection is reused without re-checking. Past it, the client spends one cheap `EngineVersion` request proving the Engine still answers. Raising it saves that request at the cost of finding a dead socket later. |
-| `QLIK_WS_PROBE_TIMEOUT` | `15.0` | Timeout for that liveness request on its own — deliberately far below `QLIK_WS_TIMEOUT`, since a health check that needs minutes is a dead connection either way. |
-| `QLIK_WS_GREETING_TIMEOUT` | `15.0` | How long to wait for Engine's greeting frames (`OnConnected`, or a fatal `OnMaxParallelSessionsExceeded`) on a fresh socket. |
 
 ## Logging
 
@@ -117,9 +121,7 @@ client connects to the long-lived server process you start manually.
         "QLIK_PROXY_PORT": "4243",
         "QLIK_ENGINE_PORT": "4747",
         "QLIK_VERIFY_SSL": "false",
-        "QLIK_HTTP_TIMEOUT": "10.0",
         "QLIK_WS_TIMEOUT": "180.0",
-        "QLIK_WS_RETRIES": "2",
         "LOG_LEVEL": "INFO"
       }
     }

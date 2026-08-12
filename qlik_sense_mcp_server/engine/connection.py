@@ -11,6 +11,7 @@ from ..config import (
     DEFAULT_WS_IDLE_PROBE_AFTER,
     DEFAULT_WS_PROBE_TIMEOUT,
     DEFAULT_WS_GREETING_TIMEOUT,
+    WS_SESSION_TTL_SECONDS,
     AUTH_MODE_JWT,
 )
 from ..exceptions import QlikConnectionError, QlikEngineError, QlikSessionLimitError
@@ -26,6 +27,10 @@ import uuid
 import websocket
 
 logger = logging.getLogger(__name__)
+
+# Every Engine endpoint carries this: Qlik reads `/ttl/<n>` from the socket
+# path and drops the session that many seconds after the socket goes away.
+_TTL = f"/ttl/{WS_SESSION_TTL_SECONDS}"
 
 # Guards creation of a per-instance transaction lock, nothing else.
 _LOCK_CREATION_GUARD = threading.Lock()
@@ -185,11 +190,11 @@ class EngineConnectionMixin:
             if app_id:
                 enc = quote(app_id, safe="")
                 endpoints_all.append(
-                    f"{ws_scheme}://{server_netloc}/{prefix}/app/{enc}{jwt_csrf_qs}"
+                    f"{ws_scheme}://{server_netloc}/{prefix}/app/{enc}{_TTL}{jwt_csrf_qs}"
                 )
             endpoints_all.extend([
-                f"{ws_scheme}://{server_netloc}/{prefix}/app/engineData{jwt_csrf_qs}",
-                f"{ws_scheme}://{server_netloc}/{prefix}/app{jwt_csrf_qs}",
+                f"{ws_scheme}://{server_netloc}/{prefix}/app/engineData{_TTL}{jwt_csrf_qs}",
+                f"{ws_scheme}://{server_netloc}/{prefix}/app{_TTL}{jwt_csrf_qs}",
             ])
         else:
             # Certificate mode talks to the Engine port directly, but the
@@ -204,10 +209,11 @@ class EngineConnectionMixin:
             for scheme in (primary, fallback):
                 if app_id:
                     enc = quote(app_id, safe="")
-                    endpoints_all.append(f"{scheme}://{server_host}:{port}/app/{enc}")
+                    endpoints_all.append(
+                        f"{scheme}://{server_host}:{port}/app/{enc}{_TTL}")
                 endpoints_all.extend([
-                    f"{scheme}://{server_host}:{port}/app/engineData",
-                    f"{scheme}://{server_host}:{port}/app",
+                    f"{scheme}://{server_host}:{port}/app/engineData{_TTL}",
+                    f"{scheme}://{server_host}:{port}/app{_TTL}",
                 ])
         # ws_retries controls how many fallback endpoints to try; always at
         # least 1, and if app_id is given we add +1 to include the per-app URL

@@ -17,16 +17,119 @@ from . import context
 
 logger = context.logger
 
+# Log the body of each reply, not just the call. Auditing "what did the
+# model see" needs both halves of the exchange.
+_LOG_REPLIES = __import__("os").getenv("QLIK_LOG_REPLIES", "").lower() == "true"
+# Enough of a reply to see what the caller was given; a full 10k-row page
+# in the log helps nobody and buries the next entry.
+_LOG_REPLY_CHARS = 4000
+
+
+# What a reader needs first, in the order it needs it. A model reads the
+# head of a reply most carefully, so the category and the fix go before the
+# echo of the request and long before the timings.
+_ERROR_KEY_ORDER = (
+    "error_category", "error", "did_you_mean", "allowed_values",
+    "unknown_fields", "invalid_expressions", "available_columns",
+    "next_actions", "hint", "tool", "request",
+)
+
 
 def _err(msg: str, **extra: Any) -> str:
-    d = {"error": msg}
-    d.update(extra)
-    return json.dumps(d, indent=2, ensure_ascii=False)
+    """An error a caller can act on without a second guess.
 
+    Ordered deliberately: the category first, then what to do about it,
+    then the echo of what was sent. Timings and tracebacks last — they
+    matter to a human reading a log, not to whoever has to fix the call.
+    """
+    payload = {"error": msg}
+    payload.update(extra)
+
+    ordered = {key: payload[key] for key in _ERROR_KEY_ORDER if key in payload}
+    for key, value in payload.items():
+        if key not in ordered:
+            ordered[key] = value
+    return json.dumps(ordered, indent=2, ensure_ascii=False)
+
+
+
+# Keys that hold bulk data. Indenting these costs more than the whole rest
+# of the reply: a 500x6 hypercube is 48620 characters at indent=2 against
+# 22575 compact, and none of those newlines carry meaning to a reader that
+# is a language model.
+_BULK_KEYS = ("rows", "field_values", "values", "executions", "apps",
+              "tasks", "objects", "sheets", "fields", "tables", "call_list")
 
 
 def _ok(obj: Any) -> str:
-    return json.dumps(obj, indent=2, ensure_ascii=False)
+    """Serialise a successful reply: readable envelope, compact bulk.
+
+    The envelope stays indented because a model reads the first keys of a
+    reply most carefully, and the structure helps. The bulk arrays go on
+    one line each — every row of a hypercube used to be spread over one
+    line per cell.
+    """
+    if not isinstance(obj, dict):
+        return json.dumps(obj, indent=2, ensure_ascii=False)
+
+    compact = {}
+    for key, value in obj.items():
+        if key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
+            compact[key] = _CompactList(value)
+        elif key in _BULK_KEYS and isinstance(value, dict) and "rows" in value:
+            # A bulk key answered as {columns, rows} — the wide-model form
+            # of `fields`. Without this its rows keep the indentation and
+            # the table ends up longer than the objects it replaced:
+            # measured, 61 fields cost 9.8k indented against 6.3k as
+            # objects, and 4.4k once the rows go on one line each.
+            inner = dict(value)
+            if isinstance(inner["rows"], list):
+                inner["rows"] = _CompactList(inner["rows"])
+            compact[key] = inner
+        else:
+            compact[key] = value
+    return json.dumps(compact, indent=2, ensure_ascii=False, cls=_CompactEncoder)
+
+
+class _CompactList(list):
+    """Marker: serialise this list without the indentation."""
+
+
+class _CompactEncoder(json.JSONEncoder):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop("indent", None)
+        super().__init__(*args, indent=2, **kwargs)
+        self._placeholders = {}
+
+    def default(self, o):
+        if isinstance(o, _CompactList):
+            key = f"__compact_{id(o)}__"
+            self._placeholders[key] = json.dumps(
+                list(o), ensure_ascii=False, separators=(",", ":"), default=str)
+            return key
+        return str(o)
+
+    def encode(self, o):
+        # Lists are handled by the C encoder before default() ever sees them,
+        # so swap them out here and put the compact text back afterwards.
+        placeholders = {}
+
+        def swap(value):
+            if isinstance(value, _CompactList):
+                key = f"__compact_{len(placeholders)}__"
+                placeholders[key] = json.dumps(
+                    list(value), ensure_ascii=False, separators=(",", ":"), default=str)
+                return key
+            if isinstance(value, dict):
+                return {k: swap(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [swap(v) for v in value]
+            return value
+
+        text = super().encode(swap(o))
+        for key, compact_text in placeholders.items():
+            text = text.replace(f'"{key}"', compact_text)
+        return text
 
 
 
@@ -107,8 +210,20 @@ def _timed(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         t0 = time.monotonic()
+        # Log what was asked, not just what failed. When a model drives
+        # these tools, the arguments are the interesting part — which field
+        # it guessed, how many rows it asked for, what set analysis it
+        # wrote — and without this the only record of a successful call is
+        # a duration.
+        logger.info("tool %s %s", func.__name__, _describe_call(sig, args, kwargs))
         try:
             result = func(*args, **kwargs)
+            if _LOG_REPLIES and isinstance(result, str):
+                # QLIK_LOG_REPLIES exists for auditing what a model was
+                # actually told. Off by default: replies carry data, and
+                # data does not belong in a log unless someone asked.
+                logger.info("reply %s %s", func.__name__,
+                            result[:_LOG_REPLY_CHARS])
         except Exception as ex:
             elapsed = round(time.monotonic() - t0, 3)
             logger.exception("Tool %s raised after %.3fs", func.__name__, elapsed)
@@ -135,15 +250,19 @@ def _timed(func):
                     ensure_ascii=False,
                 )
             if isinstance(parsed, dict):
-                new_dict = {"tool_call_seconds": elapsed}
-                new_dict.update(parsed)
-                if "error" in new_dict:
+                if "error" in parsed:
                     # Tools report expected failures (timeout, bad field,
                     # limit exceeded) as a payload rather than an
-                    # exception — echo the request for those too.
-                    new_dict.setdefault("tool", func.__name__)
-                    new_dict.setdefault("request", _describe_call(sig, args, kwargs))
-                return json.dumps(new_dict, indent=2, ensure_ascii=False, default=str)
+                    # exception — echo the request for those too. The
+                    # duration goes last: on an error the category and the
+                    # fix are what the reader needs from the first line.
+                    parsed.setdefault("tool", func.__name__)
+                    parsed.setdefault("request", _describe_call(sig, args, kwargs))
+                    parsed["tool_call_seconds"] = elapsed
+                    return _err(parsed.pop("error"), **parsed)
+                new_dict = {"tool_call_seconds": elapsed}
+                new_dict.update(parsed)
+                return _ok(new_dict)
             return json.dumps(
                 {"tool_call_seconds": elapsed, "result": parsed},
                 indent=2,

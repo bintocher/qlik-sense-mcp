@@ -187,3 +187,30 @@ class TestToolLayer:
         tool(_Qrs(rows=[]))
         result = self._call("get_task_executions", task_id="t", top=0)
         assert result["error_category"] == "invalid_argument"
+
+
+class TestExecutionStatusNames:
+    """`status: 8` is not something a reader should have to look up.
+
+    The two codes that matter most read nothing alike as numbers while
+    meaning almost the same thing to an operator: 8 FinishedFail and
+    6 Aborted are both "this reload did not produce data".
+    """
+
+    def test_the_common_codes(self):
+        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
+        assert R.execution_status_name(7) == "FinishedSuccess"
+        assert R.execution_status_name(8) == "FinishedFail"
+        assert R.execution_status_name(6) == "Aborted"
+        assert R.execution_status_name(11) == "Error"
+
+    def test_every_status_this_server_filters_on_has_a_name(self):
+        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
+        codes = (R.FAILED_EXECUTION_STATUSES + (R.SUCCESS_EXECUTION_STATUS,)
+                 + R.RUNNING_EXECUTION_STATUSES)
+        for code in codes:
+            assert not R.execution_status_name(code).startswith("Unknown"), code
+
+    def test_an_unknown_code_says_so_rather_than_guessing(self):
+        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
+        assert R.execution_status_name(99) == "Unknown(99)"

@@ -26,29 +26,23 @@ from ..config import (
 from ..jwt_session import JwtSession
 from .app_model import EngineAppModelMixin
 from .connection import EngineConnectionMixin
+from .expressions import EngineExpressionsMixin
 from .fields import EngineFieldsMixin
+from .filters import EngineFiltersMixin
 from .hypercube import EngineHypercubeMixin
+from .queries import EngineQueriesMixin
 from .sheets import EngineSheetsMixin
 
 logger = logging.getLogger(__name__)
 
 
-def _env_float(name: str, default: float) -> float:
-    """Read a float from the environment, falling back on anything unusable."""
-    raw = os.getenv(name)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("%s=%r is not a number, using %.1f", name, raw, default)
-        return default
-
-
 class QlikEngineAPI(
     EngineConnectionMixin,
     EngineHypercubeMixin,
+    EngineQueriesMixin,
     EngineFieldsMixin,
+    EngineExpressionsMixin,
+    EngineFiltersMixin,
     EngineSheetsMixin,
     EngineAppModelMixin,
 ):
@@ -78,17 +72,11 @@ class QlikEngineAPI(
             self.ws_timeout_seconds = DEFAULT_WS_TIMEOUT
         # Single unified timeout — used for both connection and all Engine operations
         self.ws_operation_timeout = self.ws_timeout_seconds
-        retries_env = os.getenv("QLIK_WS_RETRIES")
-        try:
-            self.ws_retries = int(retries_env) if retries_env else DEFAULT_WS_RETRIES
-        except ValueError:
-            self.ws_retries = DEFAULT_WS_RETRIES
-        # Liveness-check knobs, separate from QLIK_WS_TIMEOUT: a real query
-        # may legitimately take minutes, a health check never should.
-        self.ws_idle_probe_after = _env_float(
-            "QLIK_WS_IDLE_PROBE_AFTER", DEFAULT_WS_IDLE_PROBE_AFTER)
-        self.ws_probe_timeout = _env_float(
-            "QLIK_WS_PROBE_TIMEOUT", DEFAULT_WS_PROBE_TIMEOUT)
-        self.ws_greeting_timeout = _env_float(
-            "QLIK_WS_GREETING_TIMEOUT", DEFAULT_WS_GREETING_TIMEOUT)
+        self.ws_retries = DEFAULT_WS_RETRIES
+        # Liveness checks keep their own short deadlines: a real query may
+        # legitimately take minutes, a health check never should. Fixed —
+        # nobody should have to tune this to use the server.
+        self.ws_idle_probe_after = DEFAULT_WS_IDLE_PROBE_AFTER
+        self.ws_probe_timeout = DEFAULT_WS_PROBE_TIMEOUT
+        self.ws_greeting_timeout = DEFAULT_WS_GREETING_TIMEOUT
 

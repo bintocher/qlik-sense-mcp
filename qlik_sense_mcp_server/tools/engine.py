@@ -33,32 +33,31 @@ from ..config import (
 @_engine_serialised
 def get_app_script(app_id: str) -> str:
     """
-    Get the full load script (LOAD ... FROM ... statements) of a Qlik Sense app.
+    Read an app's load script — the LOAD statements that built its data.
 
-    Use this to understand how data is ingested into the app — source systems,
-    transformations, joins, variables, and section access. Read this BEFORE
-    writing non-trivial set analysis: the script reveals field renames, data
-    model shape, and any `$(variable)` definitions used in expressions.
+    WHEN TO USE
+        To learn where the data came from and what was done to it: source
+        systems, joins, renames, and the `$(variable)` definitions chart
+        expressions rely on. Worth reading before writing anything
+        elaborate, since the script explains names that look arbitrary in
+        the data model.
+
+    WHEN NOT TO USE
+        To find out which fields exist or how large they are —
+        `get_app_details` answers that directly and costs less to read.
 
     Args:
-        app_id: Application GUID. Required. Get it from `get_apps` or
-            `get_app_details`.
+        app_id: application GUID, from `get_apps` or `get_app_details`.
 
     Returns:
-        JSON with `qScript` (the full script as a single string),
-        `script_length` (character count), and `app_id`.
-    
-    Example:
-        Call: {"app_id": "a1b2c3d4-1111-2222-3333-444455556666"}
-        Returns: {"tool_call_seconds": 1.12,
-                  "qScript": "SET ThousandSep=' ';\nOrders:\nLOAD ... FROM ...",
-                  "app_id": "a1b2c3d4-1111-2222-3333-444455556666",
-                  "script_length": 14872}
+        `qScript` (the whole script as one string), `script_length`,
+        `app_id`. An empty script comes with a `note` saying whether the
+        app has none or this identity may not read it — reading the script
+        needs Professional access, and an Analyzer licence gets an empty
+        string rather than an error.
 
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Data, field lists, or the reload history.
     """
     e = _check()
     if e:
@@ -98,67 +97,41 @@ def get_app_field_statistics(
     full: bool = False,
 ) -> str:
     """
-    Compute statistics for a single field via a measures-only hypercube.
+    Measure how complete and how varied one field is.
 
-    DEFAULT (LIGHT) MODE — fast on any table size, returns:
-        unique_values, non_null_count, null_count, total_count, min_value,
-        max_value, null_percentage, completeness_percentage.
-        `non_null_count` is Qlik's `Count()`, `null_count` is `NullCount()`,
-        and `total_count` is their sum — the rows the field appears in.
+    WHEN TO USE
+        To answer "how much of this field is filled in" before trusting an
+        average or a share computed from it. `null_count` against
+        `non_null_count` is what this tool is for.
 
-    FULL MODE (`full=True`) — adds avg, sum, median, mode, std_deviation.
-    These extra measures are EXTREMELY SLOW on large fact tables (>100M
-    rows) and meaningless for date/text fields. Use only when you actually
-    need them on a small dimension table.
-
-    DO NOT CALL THIS ON DATE FIELDS to learn the loaded period — sum/avg
-    of timestamps is nonsense and slow. Instead use `engine_create_hypercube`
-    with measures `Min([YourDateField])` and `Max([YourDateField])`,
-    no dimensions, `max_rows=1`. Same for "give me a couple sample values"
-    — use `get_app_field` (which itself falls back to a hypercube on
-    high-cardinality fields).
-
-    PERFORMANCE: even in light mode, calling this on a 500M-row fact table
-    can still take tens of seconds — Engine has to count nulls. If you
-    already have `distinct_values` and row count from `get_app_details`,
-    you usually don't need this tool at all.
+    WHEN NOT TO USE
+        To learn a date field's loaded period — `engine_get_field_range`
+        answers that in a fraction of the time, and sum or average over a
+        timestamp is a meaningless number.
+        To see example values — `get_app_field` lists them.
+        To learn how many different values a field holds —
+        `get_app_details` already carries `distinct_values` per field.
+        On a large fact table with `full=true`: median and standard
+        deviation there take tens of seconds.
 
     Args:
-        app_id: Application GUID. Required.
-        field_name: Exact field name as it appears in the data model. No square
-            brackets — pass `"<FieldName>"`, NOT `"[<FieldName>]"`. Get valid field
-            names from `get_app_details` (`fields[*].name`).
-        full: If True, also compute avg/sum/median/mode/stdev. Default False.
-            Only enable for small (<10M rows) numeric fields.
+        app_id: application GUID.
+        field_name: exact field name, no square brackets. Names are
+            case-sensitive; copy them from `get_app_details`.
+        full: also compute avg, sum, median, mode and standard deviation.
+            Default false. Worth it on a small numeric field, expensive on
+            a large one.
 
     Returns:
-        JSON with unique_values, total_count, non_null_count, min_value,
-        max_value, null_percentage, completeness_percentage. If `full=True`,
-        also avg_value/sum_value/median_value/mode_value/std_deviation. Each
-        stat is `{text, numeric, is_numeric}`.
-    
-    Example (default light mode):
-        Call: {"app_id": "a1b2...", "field_name": "Amount"}
-        Returns: {"tool_call_seconds": 3.4, "field_name": "Amount",
-                  "unique_values": {"text": "9421", "numeric": 9421,
-                                    "is_numeric": true},
-                  "non_null_count": {"...": "..."},
-                  "null_count": {"...": "..."},
-                  "total_count": {"...": "..."},
-                  "min_value": {"...": "..."}, "max_value": {"...": "..."},
-                  "null_percentage": 0.67, "completeness_percentage": 99.33,
-                  "debug_log": ["..."]}
+        `unique_values`, `non_null_count` (Qlik's `Count`), `null_count`
+        (`NullCount`), `total_count` (their sum — the rows the field
+        appears in), `min_value`, `max_value`, `null_percentage`,
+        `completeness_percentage`. Each figure is
+        `{text, numeric, is_numeric}`. With `full=true`, also `avg_value`,
+        `sum_value`, `median_value`, `mode_value`, `std_deviation`.
 
-    Example (full mode — adds avg/sum/median/mode/stdev, slow):
-        Call: {"app_id": "a1b2...", "field_name": "Amount", "full": true}
-        Returns: {"tool_call_seconds": 41.7, "avg_value": {"...": "..."},
-                  "sum_value": {"...": "..."}, "median_value": {"...": "..."},
-                  "mode_value": {"...": "..."}, "std_deviation": {"...": "..."}}
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        The values themselves, or anything about other fields.
     """
     e = _check()
     if e:
@@ -177,46 +150,30 @@ def get_app_field_statistics(
 @_engine_serialised
 def engine_get_field_range(app_id: str, field_name: str) -> str:
     """
-    Lightning-fast bounds query for a single field: distinct count + min + max.
+    The bounds of one field: how many different values, the smallest and
+    the largest.
 
-    Use this BEFORE building any heavy hypercube to learn:
-      - the loaded period of a date field (`Min`/`Max`)
-      - the cardinality of a key column
-      - the range of a numeric measure
+    WHEN TO USE
+        To learn a date field's loaded period before asking about a period
+        inside it. Also for the range of a numeric field, or the size of a
+        key. Engine answers from its symbol table without reading rows, so
+        this returns in under a second on tables of any size.
 
-    Internally builds a measures-only hypercube with 3 expressions
-    (`Count(DISTINCT)`, `Min`, `Max`) and no dimensions. Engine resolves
-    these from the symbol table without scanning rows, so the call returns
-    in seconds even on multi-billion-row tables — orders of magnitude
-    faster than `get_app_field_statistics`.
-
-    PREFER THIS OVER:
-      - `get_app_field_statistics` (which adds slow Sum/Avg/Median/Mode/Stdev)
-      - `get_app_field` (which materializes individual values — heavy on
-        high-cardinality keys)
+    WHEN NOT TO USE
+        To list values — `get_app_field` does that.
+        To measure completeness — `get_app_field_statistics` counts nulls.
 
     Args:
-        app_id: Application GUID. Required.
-        field_name: Exact field name, no square brackets. Required.
+        app_id: application GUID.
+        field_name: exact field name, no square brackets.
 
     Returns:
-        JSON `{ "field_name": ..., "unique_values": {text,numeric},
-        "min_value": {text,numeric}, "max_value": {text,numeric} }`.
-    
-    Example:
-        Call: {"app_id": "a1b2...", "field_name": "OrderDate"}
-        Returns: {"tool_call_seconds": 0.9, "field_name": "OrderDate",
-                  "unique_values": {"text": "939", "numeric": 939,
-                                    "is_numeric": true},
-                  "min_value": {"text": "2024-01-01", "numeric": 45292,
-                                "is_numeric": true},
-                  "max_value": {"text": "2026-07-27", "numeric": 46230,
-                                "is_numeric": true}}
+        `field_name`, `unique_values`, `min_value`, `max_value`, each as
+        `{text, numeric, is_numeric}`. For a date, `text` is the writing
+        Qlik displays and `numeric` is its serial number.
 
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Null counts, averages, or the values between the bounds.
     """
     e = _check()
     if e:
@@ -227,6 +184,151 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
     except Exception as ex:
         return _err(str(ex), app_id=app_id, field_name=field_name)
 
+
+
+@mcp.tool()
+@_timed
+@_engine_serialised
+def engine_query(
+    app_id: str,
+    queries: Optional[List[Dict[str, Any]]] = None,
+    group_by: Optional[List[str]] = None,
+    metrics: Optional[List[Dict[str, Any]]] = None,
+    filters: Optional[List[Dict[str, Any]]] = None,
+    sort_by: Optional[str] = None,
+    sort_order: str = "desc",
+    limit: int = 100,
+) -> str:
+    """
+    Answer a question about an app's data: group by fields, aggregate
+    fields, filter by period or by value. The server writes the Qlik
+    expressions.
+
+    WHEN TO USE
+        Any question of the form "how much / how many, by what, for when".
+        This is the first tool to reach for once `get_app_details` has
+        shown which fields exist.
+
+        Ask several unrelated things at once. Every query in `queries` is
+        independent — its own grouping, its own measures, its own filters —
+        and the whole list shares three round-trips instead of three per
+        query:
+
+            {"app_id": "...",
+             "queries": [
+               {"id": "by_region",
+                "group_by": ["Region"],
+                "metrics": [{"field": "Amount", "agg": "sum"}],
+                "sort_by": "sum_Amount", "limit": 20},
+               {"id": "by_category",
+                "group_by": ["Category"],
+                "metrics": [{"field": "Amount", "agg": "sum"},
+                            {"field": "OrderId", "agg": "count_distinct"}]},
+               {"id": "yearly",
+                "group_by": ["Year"],
+                "metrics": [{"field": "Amount", "agg": "sum"}],
+                "filters": [{"field": "OrderDate", "from": "2023", "to": "2025"}]}
+             ]}
+
+        Up to 25 queries in one call, and up to 200 grouping fields,
+        measures and filter values between them — every one of those is
+        checked by Qlik before the batch runs. Plan the whole question in
+        one call rather than discovering it one round-trip at a time.
+
+    WHEN NOT TO USE
+        A calculation this vocabulary cannot state — a nested aggregation,
+        `Aggr()`, `FirstSortedValue`, set analysis with P()/E(), a
+        comparison of two periods inside one column. Write the expression
+        yourself with `engine_create_hypercube`; `filters` works there too.
+
+    ARGUMENTS
+        app_id: application GUID.
+        group_by: field names to group by. Omit for a single total row.
+        metrics: what to aggregate, as
+            {"field": "Amount", "agg": "sum", "label": "Revenue"}.
+            `agg` is one of sum, count, count_distinct, avg, min, max,
+            median, stdev. `label` is optional and defaults to
+            `<agg>_<field>`; it names the column and is what `sort_by`
+            takes.
+        filters: what to narrow to. Two shapes:
+            {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
+            {"field": "Region", "values": ["North", "South"]}
+            `from` and `to` include both ends, and either may be left out
+            for an open end. What they mean follows the field: on a date
+            field they are days — written as 2024-01-31, 31.01.2024,
+            2024-01 for a whole month, 2024 for a whole year, or a Qlik
+            serial number — and on any other field they are the values
+            themselves, so {"field": "Discount", "from": 400} is a
+            discount of 400 or more. For a bound that excludes itself use
+            `greater_than` / `less_than`: "more than 400" is
+            {"field": "Discount", "greater_than": 400}, and the difference
+            between the two is every row sitting exactly on 400.
+            `{"field": "OrderDate", "period": "2024"}` is the whole year in
+            one key. Filters combine with AND.
+            A filter that selects nothing is refused with what the field
+            does hold, rather than answered with a zero.
+        sort_by: a metric label or a grouping field. Set it whenever
+            `limit` might cut the result, otherwise the rows that come back
+            are arbitrary rather than the largest.
+        sort_order: "desc" (default) or "asc".
+        limit: rows per query, default 100, cap 5000.
+        queries: a list of whole queries, each with the keys above plus an
+            optional "id". Use it for several independent questions at
+            once. When present, the single-query arguments are ignored.
+        measures: an escape hatch inside a query, for one expression this
+            vocabulary cannot state — `[{"expression": "Sum({filter} A) / "
+            "Count({filter} B)", "label": "AOV"}]`. With `filters`, the
+            expression must mark where the filter goes: a set modifier
+            narrows the aggregation it sits in, and only the author knows
+            which one that is. Without the marker the query is refused
+            rather than answered with an unfiltered number.
+
+    RETURNS
+        `results`, one entry per query, each with `id`, `columns`, `rows`
+        (numbers as numbers, dates as the text Qlik displays), `total_rows`,
+        `grand_total` across all groups, and `sorted_by`.
+        `filters_applied` states what each filter resolved to.
+        `period_check` gives the earliest and latest value of each filtered
+        date field inside the result, so the period is verifiable from the
+        answer itself.
+        A query that fails carries `error` and `error_category`; the others
+        in the batch still answer.
+
+    DOES NOT RETURN
+        Raw Qlik layout, per-cell state, or the expressions it wrote.
+        Row-level records — every reply is aggregated.
+
+    A filter that selects nothing is refused before the query runs, and a
+    value the field does not hold is answered with what the field holds
+    instead. Qlik itself reports neither: it returns 0 for the first and
+    the unfiltered total for the second.
+    """
+    e = _check()
+    if e:
+        return e
+    if queries is None:
+        queries = [{
+            "group_by": group_by or [],
+            "metrics": metrics or [],
+            "filters": filters or [],
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "limit": limit,
+        }]
+    if not isinstance(queries, list) or not queries:
+        return _err(
+            "queries must be a non-empty list of query objects",
+            error_category="invalid_argument",
+            hint='One query: {"group_by": ["Region"], "metrics": '
+                 '[{"field": "Amount", "agg": "sum"}]}.',
+        )
+    try:
+        app_handle = context.engine_api.ensure_app(app_id, no_data=False)
+        return _ok(context.engine_api.run_queries(app_handle, app_id, queries))
+    except Exception as ex:
+        logger.exception("engine_query failed")
+        return _err(str(ex) or repr(ex), error_type=type(ex).__name__,
+                    app_id=app_id)
 
 
 @mcp.tool()
@@ -243,157 +345,76 @@ def engine_create_hypercube(
     exclude_null_dimensions: bool = True,
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
+    offset: int = 0,
+    filters: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
-    Run a grouped aggregation against a Qlik app and return the rows.
-    This is the MAIN data-analysis tool. It is the Qlik equivalent of:
+    Run a grouped aggregation written as Qlik expressions.
 
-        SELECT <dimensions>, <measures>
-        FROM <app>
-        GROUP BY <dimensions>
-        ORDER BY <sort_by> <sort_order>
-        LIMIT <limit>
+    WHEN TO USE
+        A calculation `engine_query` cannot state: a nested aggregation,
+        `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, two periods
+        compared inside one column, a calculated dimension.
 
-    `dimensions` are the GROUP BY columns, `measures` are the aggregates,
-    `sort_by` + `sort_order` are the ORDER BY, and `limit` is the LIMIT.
+    WHEN NOT TO USE
+        A plain "how much by what, for when". `engine_query` states that
+        without any expression, writes the set analysis itself and returns
+        the control values that show the filter applied. Reach for it
+        first; come here when it cannot say what you need.
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 1 — TOP-N (the most common request)
-    ────────────────────────────────────────────────────────────────────
-    "Give me the 10 clients with the highest GGR":
+    THE SHAPE
+        `dimensions` group, `measures` aggregate, `sort_by` and
+        `sort_order` order, `limit` cuts:
 
-        {
-          "app_id": "a1b2c3d4-1111-2222-3333-444455556666",
-          "dimensions": [{"field": "clientid"}],
-          "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
-          "sort_by": "GGR",
-          "sort_order": "desc",
-          "limit": 10
-        }
+            {"app_id": "...",
+             "dimensions": [{"field": "clientid"}],
+             "measures": [{"expression": "Sum(ggr)", "label": "GGR"}],
+             "sort_by": "GGR", "sort_order": "desc", "limit": 10}
 
-    Returns (shortened):
+        Omit `dimensions` for a single total row.
 
-        {
-          "tool_call_seconds": 4.1,
-          "columns": ["clientid", "GGR"],
-          "rows": [["1042", 918450.5], ["8871", 764300.0]],
-          "total_rows": 5417612,
-          "returned_rows": 10,
-          "sorted_by": "GGR",
-          "sort_order": "desc",
-          "grand_total": [95552568044.93],
-          "timings": {"open_app_seconds": 0.01, "get_layout_seconds": 3.9}
-        }
+    FILTERING
+        Two ways, and the first is safer.
 
-    `total_rows` is how many groups exist on the server; `returned_rows`
-    is how many came back. For a ranked query that difference is normal
-    and expected — you asked for the top 10 of 5.4 million.
+        Describe the filter and mark where it belongs. The server writes
+        the set analysis, checks that it selects something, and reports
+        what it resolved to:
 
-    For the BOTTOM 10 use `"sort_order": "asc"` (add
-    `"suppress_zero": true` to skip groups whose measure is 0).
+            {"measures": [{"expression": "Sum({filter} Amount)",
+                           "label": "Revenue"}],
+             "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 2 — a single total, no grouping
-    ────────────────────────────────────────────────────────────────────
-    "What is the total GGR and the loaded date range?":
+        The marker `{filter}` is required with `filters`, because a set
+        modifier narrows the aggregation it sits in and only the author of
+        the expression knows which one that is.
 
-        {
-          "app_id": "...",
-          "measures": [
-            {"expression": "Sum(ggr)",       "label": "GGR"},
-            {"expression": "Min(OrderDate)", "label": "FirstDate"},
-            {"expression": "Max(OrderDate)", "label": "LastDate"}
-          ],
-          "limit": 1
-        }
+        Or write the set analysis yourself:
 
-    Omit `dimensions` entirely for a grand-total row. This is the fast,
-    correct way to learn an app's loaded period — never use
-    `get_app_field_statistics` on a date field for that.
+            Sum({<[Year]={2024}>} Amount)
 
-    ────────────────────────────────────────────────────────────────────
-    EXAMPLE 3 — filtered breakdown (set analysis)
-    ────────────────────────────────────────────────────────────────────
-    "Revenue by region for 2026 only, biggest first":
+        Quoting decides the meaning and a wrong choice returns 0 rather
+        than an error: 'single' is an exact value, "double" is a search
+        where comparisons and wildcards work. A range is one string with
+        no spaces: {">=100<200"}.
 
-        {
-          "app_id": "...",
-          "dimensions": [{"field": "Region"}],
-          "measures": [
-            {"expression": "Sum({<[Year]={2026}>}Amount)", "label": "Revenue2026"}
-          ],
-          "sort_by": "Revenue2026",
-          "sort_order": "desc",
-          "limit": 20
-        }
+        Comparison inside a modifier runs against the text Qlik displays
+        for a value. On a date field displayed as `01.01.2024`, a serial
+        number range returns 0; on one displayed as `45292`, it works.
+        Stating the period as `filters` avoids the question — the server
+        measures which form this field answers to.
 
-    ────────────────────────────────────────────────────────────────────
-    HOW TO GET IT RIGHT (and fast)
-    ────────────────────────────────────────────────────────────────────
-    1. Call `get_app_details` FIRST. Field names are case-sensitive and
-       must exist in the data model. It also gives you `distinct_values`
-       per field, which tells you how many rows your query can produce.
-
-    2. FILTER INSIDE MEASURES WITH SET ANALYSIS, NEVER WITH `If()`.
-       `If()` scans every row of the fact table; set analysis is an
-       index lookup done before aggregation. On a 100M-row table that is
-       the difference between minutes and milliseconds.
-           BAD:  Sum(If(Year=2026, Amount))
-           GOOD: Sum({<[Year]={2026}>}Amount)
-       Quick reference (substitute real field names and values):
-         numeric field   {<[Year]={2026}>}
-         text field      {<[Region]={'North','South'}>}
-         wildcard        {<[Region]={"*ampton*"}>}
-         two fields AND  {<[Year]={2026},[Region]={'North'}>}
-         ignore filters  {1<[Region]={'North'}>}
-         ever matched    {<[Client]=P({<[Flag]={1}>}[Client])>}
-         never matched   {<[Client]=E({<[Flag]={1}>}[Client])>}
-
-    3. A DIMENSION `field` MUST BE A PLAIN FIELD NAME — never an
-       expression. `{"field": "=Year(OrderDate)"}` is evaluated for
-       every row of the fact table and will time out. If you need
-       monthly buckets, look for an existing calendar field in
-       `get_app_details`; if there is none, group by the raw date and
-       aggregate the handful of returned rows yourself.
-
-    4. To rank by an aggregate, use `sort_by` — do NOT hand-roll
-       `qSortByExpression` in the dimension. `sort_by` orders by the
-       measure column that was already computed, while
-       `qSortByExpression` makes the Engine compute the same aggregate a
-       SECOND time just for ordering (measured: 66s → 286s on a 91M-row
-       table, and it can silently return a wrong order).
-
-    5. If a call is slow, read `timings` in the response. It splits the
-       time into `open_app_seconds` (loading the app into Engine memory —
-       only the first call against an app pays this) and
-       `get_layout_seconds` (the actual computation). A large
-       `get_layout_seconds` means the query itself is too heavy: add set
-       analysis, drop a dimension, or lower `limit`.
-
-       A well-formed query answers in seconds: grouping by a field that
-       lives in the fact table returns in well under a second even on
-       91M rows. Tens of seconds means the grouping field sits on the far
-       side of a large link table — prefer a dimension closer to the
-       facts, or filter the period with set analysis.
-
-    ────────────────────────────────────────────────────────────────────
-    SESSION LIMIT — NEVER RUN THESE CALLS IN PARALLEL
-    ────────────────────────────────────────────────────────────────────
-    Qlik Sense allows a maximum of **5 concurrent sessions per user
-    identity**, and going over that can get the account LOCKED. This is a
-    Qlik platform limit — no MCP setting can raise it.
-
-    This server deliberately funnels every tool call through ONE cached
-    Engine session, so a whole analysis costs exactly one session. Keep
-    it that way:
-      - issue hypercube calls ONE AT A TIME, never fan them out
-        concurrently to "speed things up" — they are serialised over a
-        single WebSocket anyway, so parallelism buys nothing and risks
-        the lockout;
-      - do not start a second MCP process with the same credentials, and
-        do not run two editors against the same token side by side.
-    When a query is slow, make the query cheaper (see point 5) instead of
-    launching more of them.
+    PERFORMANCE
+        Filter inside the aggregation rather than with `If()`: set
+        analysis is an index lookup before aggregation, `If()` scans every
+        row of the fact table.
+        A dimension `field` should be a plain field name. An expression
+        there is evaluated per row of the fact table.
+        Rank with `sort_by`, not with `qSortByExpression` in the
+        dimension: measured on a 91M-row table, the latter took 286s
+        against 66s for the same ranking.
+        Read `timings` when a call is slow. `open_app_seconds` is loading
+        the app into memory, paid once per app; `get_layout_seconds` is
+        the computation itself.
 
     Args:
         app_id: Application GUID. Required. From `get_apps`.
@@ -426,6 +447,11 @@ def engine_create_hypercube(
             ARBITRARY rows, not the most important ones.
         sort_order: `"desc"` (default, largest first — top-N) or `"asc"`
             (smallest first — bottom-N).
+        offset: Row to start from, for reading a result in pages. The reply
+            carries `has_more` and `next_offset`; pass that value back to
+            get the following page. Keep `sort_by` identical between pages,
+            otherwise the order — and therefore the paging — changes under
+            you.
         suppress_zero: Drop rows whose measure is 0. Default False.
             Useful for `sort_order="asc"`, where zero-valued groups
             would otherwise fill the entire result.
@@ -441,35 +467,48 @@ def engine_create_hypercube(
             (per-cell `qElemNumber`/`qState`, `qDimensionInfo`,
             `qMeasureInfo`). Default False, because it costs several
             times more tokens than `rows` and is rarely needed.
-        max_rows: Deprecated alias for `limit`, kept so older callers
-            keep working. If both are given, `max_rows` wins.
+        max_rows: Alias for `limit`. If both are given, `max_rows` wins.
+        filters: Filters described rather than written, applied wherever a
+            measure carries the `{filter}` marker. Same shapes as
+            `engine_query`: `{"field": "OrderDate", "from": "2024-01-01",
+            "to": "2024-12-31"}` for a period, `{"field": "Discount",
+            "from": 400}` for a range of any other field, or
+            `{"field": "Region", "values": ["North"]}` for named values.
 
     Returns:
-        JSON with:
           - `columns`: column names, in row order.
-          - `rows`: the data as plain arrays of values — numbers stay
-            numbers, text stays text. Read this, not `hypercube_data`.
+          - `rows`: values as data — numbers as numbers, dates as the text
+            Qlik displays for them, which is the same writing every other
+            reply about that field uses.
           - `total_rows`: how many groups exist on the server.
           - `returned_rows`: how many rows are in `rows`.
           - `sorted_by` / `sort_order`: the sort actually applied
             (`null` when unsorted).
-          - `grand_total`: totals across ALL groups, per measure —
-            correct even when the rows are truncated.
-          - `truncation_warning`: non-null when `total_rows >
-            returned_rows`. For an unsorted query this means the rows are
-            arbitrary — add `sort_by` or narrow the query.
-          - `timings`: seconds per step (see point 5 above).
+          - `grand_total`: totals across all groups, per measure — correct
+            even when the rows are truncated.
+          - `truncation_warning`: set when `total_rows > returned_rows`.
+            For an unsorted query the rows are arbitrary; add `sort_by`.
+          - `filters_applied`: what each described filter resolved to.
+          - `timings`: seconds per step.
 
-    Errors return `error`, `error_category` and an actionable `hint`:
-        `invalid_sort` — `sort_by` matched no column; the response lists
-            `available_columns`.
-        `invalid_limit` — `limit` was not a positive integer.
-        `limit_exceeded` — limit above 5000.
-        `cell_cap_exceeded` — columns * limit above 9900; the hint gives
-            a concrete smaller limit.
-        `socket_timeout` — the query is genuinely too heavy; the hint
-            lists what to cut, in order of impact.
-        `engine_api_error` — bad expression or unknown field name.
+    Does not return:
+        Row-level records, or the Qlik layout unless
+        `include_raw_layout=true`.
+
+    Errors carry `error`, `error_category` and the fix:
+        `invalid_expression` — Qlik's own parser rejected an expression;
+            its message is quoted.
+        `field_not_found` — a name the data model does not have, in a
+            dimension, a measure or a set modifier; `did_you_mean` lists
+            near matches.
+        `invalid_sort` — `sort_by` matched no column; `available_columns`
+            lists the valid ones.
+        `invalid_limit` / `limit_exceeded` / `cell_cap_exceeded` — the
+            reply names a limit that fits.
+        `empty_period` / `value_not_found` — a described filter selects
+            nothing; the reply says what the field holds.
+        `socket_timeout` — the query is too heavy; the hint lists what to
+            cut, in order of impact.
     """
     import traceback as _tb
     e = _check()
@@ -494,6 +533,8 @@ def engine_create_hypercube(
             suppress_zero=suppress_zero,
             include_raw_layout=include_raw_layout,
             exclude_null_dimensions=exclude_null_dimensions,
+            offset=offset,
+            filters=filters,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the
@@ -527,64 +568,43 @@ def get_app_field(
     case_sensitive: bool = False,
 ) -> str:
     """
-    List distinct values of a single field (like `SELECT DISTINCT field FROM ... LIMIT N`),
-    with optional wildcard filtering and pagination.
+    List the values a field holds, most frequent first.
 
-    Use this to see what values a field actually contains before writing set
-    analysis (`{<Field={'value1','value2'}>}`). Particularly useful for
-    dimension fields like status codes, categories, region names.
+    WHEN TO USE
+        To see how a value is really spelled before filtering on it. A
+        filter on a value the field does not hold returns zeros rather
+        than an error, so `Moscow` against data saying `Moskva` produces a
+        clean, wrong table. One look here settles it.
+        Also to find a value by pattern, with `search_string`.
 
-    For min/max/cardinality of a single field prefer the much faster
-    `engine_get_field_range`. For grouped aggregations use
-    `engine_create_hypercube`.
-
-    IMPLEMENTATION NOTE: this tool first tries the lightweight ListObject
-    API. If ListObject returns an empty result (which can happen for fields
-    in fact tables that have no current "state"), it transparently falls
-    back to a one-dimension hypercube. The response then includes
-    `fallback_used: "hypercube"`. If both methods return nothing, the
-    response includes a `warning` explaining why and suggesting next steps.
+    WHEN NOT TO USE
+        When `engine_query` will do the filtering: it checks the values
+        itself and says what the field holds instead.
+        For bounds or a count of different values — `engine_get_field_range`.
+        For values of a field you have not identified yet — `search_app`
+        finds which field holds a term.
 
     Args:
-        app_id: Application GUID. Required.
-        field_name: Exact field name, no square brackets. Case-sensitive.
-        limit: Max values to return per page. Default 10, cap 100.
-        offset: Number of values to skip for pagination. Default 0.
-        search_string: Optional wildcard filter applied to the text form of
-            the value. Supports `*` and `%` as multi-character wildcards.
-            Example: `"<prefix>*"` matches any value starting with `<prefix>`.
-            Leave `None` to return all values.
-        search_number: Optional wildcard filter on the numeric/text form.
-            Matches values whose number OR text representation matches the
-            pattern. Useful for filtering IDs by prefix.
-        case_sensitive: If `False` (default) the wildcard match is
-            case-insensitive; set to `True` for exact case matching.
+        app_id: application GUID.
+        field_name: exact field name, no square brackets, case-sensitive.
+        limit: values per page. Default 10, cap 100.
+        offset: values to skip, for reading further pages.
+        search_string: wildcard filter on the text form of the value.
+            `*` and `%` both stand for any run of characters. The search
+            runs in Engine, over the whole field.
+        search_number: wildcard filter matching either the numeric or the
+            text form. Pass one of the two searches, not both.
+        case_sensitive: default false.
 
     Returns:
-        JSON `{ "field_values": ["val1", "val2", ...] }` — plain list after
-        filtering and pagination. Order is by frequency descending on the
-        Qlik side. When the load script attached a `COMMENT FIELD` text to
-        this field, the response also carries `field_comment` with that
-        business description.
+        `field_values`, a plain list. With a search, also `total_matches`
+        and `search_truncated` when the scan was capped. `field_comment`
+        carries the load script's `COMMENT FIELD` text when there is one.
+        `fallback_used` appears when the light path returned nothing and a
+        hypercube answered instead.
 
-    Example (see what values a dimension holds):
-        Call: {"app_id": "a1b2...", "field_name": "Region", "limit": 5}
-        Returns: {"tool_call_seconds": 0.7,
-                  "field_values": ["North", "South", "West"],
-                  "field_comment": "Sales region of the client"}
-
-    Example (wildcard search; `fallback_used` appears when the fast
-    ListObject path returned nothing and a hypercube was used instead):
-        Call: {"app_id": "a1b2...", "field_name": "OrderID",
-               "search_string": "ORD-2026*", "limit": 10}
-        Returns: {"tool_call_seconds": 2.1,
-                  "field_values": ["ORD-2026-000001"],
-                  "fallback_used": "hypercube"}
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Counts per value, or anything about other fields.
     """
     e = _check()
     if e:
@@ -671,48 +691,35 @@ def get_app_variables(
     case_sensitive: bool = False,
 ) -> str:
     """
-    List user-defined Qlik variables (`SET`/`LET` from script, or UI-created),
-    split by source. System/reserved variables are always excluded.
+    List the app's own variables and what they hold.
 
-    Use this to discover `$(vCurrentYear)`-style shortcuts used in chart
-    expressions — expanding them manually gives you the real set analysis.
+    WHEN TO USE
+        When a chart expression refers to `$(vSomething)` and you need to
+        know what it stands for. A variable can hold a whole set modifier,
+        so reading it is often the difference between copying a chart's
+        logic and guessing at it.
+
+    WHEN NOT TO USE
+        For fields — those are in `get_app_details`. Qlik's own reserved
+        variables are never listed here.
 
     Args:
-        app_id: Application GUID. Required.
-        limit: Max variables per page. Default 10, cap 100.
-        offset: Number of variables to skip for pagination. Default 0.
-        created_in_script: Filter by source. Accepts `"true"` / `"false"`
-            (case-insensitive). `"true"` — only script-created (`SET`/`LET`);
-            `"false"` — only UI-created; `None` (default) — both.
-        search_string: Optional wildcard filter on variable name OR its
-            text value. Supports `*` and `%`. Leave `None` for no filter.
-        case_sensitive: Toggle case-sensitive wildcard match. Default `False`.
+        app_id: application GUID.
+        limit: variables per page. Default 10, cap 100.
+        offset: variables to skip.
+        created_in_script: `"true"` for script `SET`/`LET` only, `"false"`
+            for ones made in the interface, omitted for both.
+        search_string: wildcard filter on the name or the value.
+        case_sensitive: default false.
 
     Returns:
-        JSON `{ "variables_from_script": {name: value, ...},
-        "variables_from_ui": {name: value, ...}, "count": N,
-        "total_found": M }`. Both groups are always objects — an empty one
-        is `{}`, never `""`. `count` is what this page holds, `total_found`
-        how many matched before paging.
-    
-    Example (default — both sources):
-        Call: {"app_id": "a1b2..."}
-        Returns: {"tool_call_seconds": 0.8,
-                  "variables_from_script": {"vCurrentYear": "2026"},
-                  "variables_from_ui": {"vSelectedRegion": "North"},
-                  "count": 2, "total_found": 2}
+        `variables_from_script` and `variables_from_ui`, each an object of
+        name to value and always present even when empty; `count` for this
+        page and `total_found` before paging.
 
-    Example (script SET/LET variables only):
-        Call: {"app_id": "a1b2...", "created_in_script": "true", "limit": 50}
-        Returns: {"tool_call_seconds": 0.85,
-                  "variables_from_script": {"vCurrentYear": "2026",
-                      "vSetPeriod": "{<[Year]={2026}>}"},
-                  "variables_from_ui": {}, "count": 2, "total_found": 2}
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Where a variable is used, or its value after expansion in a
+        particular expression.
     """
     e = _check()
     if e:
@@ -759,31 +766,25 @@ def get_app_variables(
 @_engine_serialised
 def get_app_sheets(app_id: str) -> str:
     """
-    List all sheets (tabs) in a Qlik Sense application.
+    List the app's sheets — the pages its users see.
 
-    Use this to discover which sheets exist before drilling into their objects
-    with `get_app_sheet_objects`. Sheets are the top-level pages users see in
-    the Qlik dashboard UI.
+    WHEN TO USE
+        As the way in to what the app is actually about. Sheet titles say
+        what its authors considered worth showing, which is a better guide
+        to the data than field names.
+
+    WHEN NOT TO USE
+        For the data model — `get_app_details`.
 
     Args:
-        app_id: Application GUID. Required.
+        app_id: application GUID.
 
     Returns:
-        JSON `{ "app_id": ..., "total_sheets": N, "sheets": [{sheet_id, title,
-        description}, ...] }`. Pass `sheet_id` into `get_app_sheet_objects` to
-        list the charts/tables on that sheet.
-    
-    Example:
-        Call: {"app_id": "a1b2..."}
-        Returns: {"tool_call_seconds": 1.3, "app_id": "a1b2...",
-                  "total_sheets": 2,
-                  "sheets": [{"sheet_id": "b2c3d4e5-1111-...",
-                              "title": "Overview", "description": "..."}]}
+        `sheets`, each with `sheet_id`, `title` and `description`, plus
+        `total_sheets`. Pass a `sheet_id` to `get_app_sheet_objects`.
 
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        The charts on a sheet, or any data.
     """
     e = _check()
     if e:
@@ -807,37 +808,31 @@ def get_app_sheets(app_id: str) -> str:
 @_engine_serialised
 def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
     """
-    List all visualization objects (charts, tables, KPIs, filters, etc) placed
-    on a specific sheet, with their IDs and types.
+    List the charts on one sheet, with the fields and expressions behind
+    them.
 
-    Use this to discover the `object_id` of a specific chart the user mentions
-    by title, then pass it to `get_app_object` to inspect the chart's full
-    layout (dimensions, measures, expressions, current selections).
+    WHEN TO USE
+        To see what a sheet works with, in one call: `fields_used` covers
+        the fields reached through master items and through a filter
+        pane's listboxes as well as the obvious ones. Also to find the
+        `object_id` of a chart mentioned by title.
+        The `measures` here are the authors' own expressions — the closest
+        thing to a definition of what a figure means in this app.
+
+    WHEN NOT TO USE
+        For a chart's current data — `get_app_object` returns that.
 
     Args:
-        app_id: Application GUID. Required.
-        sheet_id: Sheet ID from `get_app_sheets`. Required.
+        app_id: application GUID.
+        sheet_id: from `get_app_sheets`.
 
     Returns:
-        JSON with `objects` array where each element has `object_id`,
-        `object_type` (e.g. `"barchart"`, `"table"`, `"kpi"`, `"listbox"`),
-        `object_description` (title) and `fields_used` — the fields the
-        object's dimensions and measures refer to, which answers "what does
-        this sheet work with" without opening every object. Use `object_id`
-        in `get_app_object` for the full layout.
+        `objects`, each with `object_id`, `object_type` (`barchart`,
+        `table`, `kpi`, `listbox`), `object_description` (its title),
+        `fields_used`, `measures` and `dimensions`; plus `total_objects`.
 
-    Example:
-        Call: {"app_id": "a1b2...", "sheet_id": "b2c3d4e5-1111-..."}
-        Returns: {"tool_call_seconds": 1.1, "total_objects": 2,
-                  "objects": [{"object_id": "AbCdEf",
-                               "object_type": "barchart",
-                               "object_description": "Sales by Region",
-                               "fields_used": ["Region", "Sales"]}]}
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Computed values, formatting, or layout position.
     """
     e = _check()
     if e:
@@ -871,46 +866,37 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 @_engine_serialised
 def get_app_object(app_id: str, object_id: str) -> str:
     """
-    Fetch the full layout of a specific visualization object (chart, table, KPI,
-    pivot table, etc.) by its object ID — equivalent to Engine API
-    `GetObject` + `GetLayout`.
+    Read one chart in full: its definition and the data it currently
+    shows.
 
-    This returns everything the Qlik client renders: the hypercube with
-    current data, dimension/measure definitions and expressions, title,
-    subtitle, colors, sort order, current selections applied to the chart.
-    Use it to reverse-engineer how a dashboard chart is computed before
-    rebuilding the same logic in `engine_create_hypercube`.
+    WHEN TO USE
+        When a figure on a dashboard has to be explained or reproduced.
+        Compare the chart's own expressions with yours rather than
+        comparing the two numbers — where they differ it is almost always
+        the filters, not the arithmetic.
+
+    WHEN NOT TO USE
+        To survey a sheet: `get_app_sheet_objects` already carries the
+        expressions and fields of every object on it, for a fraction of
+        the reply size. Come here for one object, not for all of them.
 
     Args:
-        app_id: Application GUID. Required.
-        object_id: Object ID from `get_app_sheet_objects`. Required.
+        app_id: application GUID.
+        object_id: from `get_app_sheet_objects`.
 
     Returns:
-        JSON with the full `qLayout` of the object, plus `measures`,
-        `dimensions` and `fields_used`. Read the expressions from
-        `measures` — Engine does NOT put them in the layout, where
-        `qMeasureInfo` carries only the fallback title, formatting and
-        statistics. Master measures and dimensions are resolved to their
-        library definitions. In the layout itself, look for
-        `qHyperCube.qDimensionInfo` and `qDataPages[0].qMatrix` for the
-        computed data.
+        The object's whole `qLayout`, plus `measures`, `dimensions` and
+        `fields_used`. Read the expressions from `measures`: Engine does
+        not put them in the layout, where `qMeasureInfo` carries only the
+        fallback title, formatting and statistics. Master items are
+        resolved to their library definitions. Computed data sits in
+        `qLayout.qHyperCube.qDataPages`.
+        An object Engine will not open is reported as
+        `object_not_available`; a failure to read its properties leaves
+        the layout intact and adds `properties_error`.
 
-    Example:
-        Call: {"app_id": "a1b2...", "object_id": "AbCdEf"}
-        Returns: {"tool_call_seconds": 1.4,
-                  "qLayout": {"qInfo": {"qId": "AbCdEf", "qType": "barchart"},
-                              "qMeta": {"title": "Sales by Region"},
-                              "qHyperCube": {"qDimensionInfo": ["..."],
-                                             "qMeasureInfo": ["..."],
-                                             "qDataPages": ["..."]}}}
-
-    Use this to copy an existing chart's expressions into
-    `engine_create_hypercube`.
-
-    Qlik session limit: this server keeps ONE Engine session for all
-    calls. Qlik allows max 5 concurrent sessions per user and may LOCK
-    the account beyond that — never run these calls in parallel or
-    start a second MCP process with the same credentials.
+    Does not return:
+        Data beyond what the chart itself displays.
     """
     e = _check()
     if e:
@@ -964,3 +950,60 @@ def get_app_object(app_id: str, object_id: str) -> str:
         return _err(str(ex), app_id=app_id, object_id=object_id)
 
 
+
+
+@mcp.tool()
+@_timed
+@_engine_serialised
+def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
+               max_fields: int = 8, max_values: int = 5) -> str:
+    """
+    Find which field holds a value, and how that value is spelled there.
+
+    WHEN TO USE
+        When someone names something — a city, a customer, a product —
+        and you do not know which field it lives in. One call finds both
+        the field and the exact spelling.
+
+    WHEN NOT TO USE
+        When the field is already known: `get_app_field` with
+        `search_string` looks in that field alone and is far cheaper.
+        Searching every field of a large app takes about thirty seconds
+        against roughly a second for a named one, so pass `fields`
+        whenever there is a reasonable guess.
+
+    Args:
+        app_id: application GUID.
+        term: what to look for. Qlik matches it as a prefix, case
+            insensitively, so "Mos" finds "Moskva".
+        fields: field names to search. Omit to search the whole app.
+        max_fields: matching fields to report. Default 8.
+        max_values: matching values per field. Default 5.
+
+    Returns:
+        `matches`, each naming a field and the values it holds that match,
+        spelled as Qlik stores them; plus `fields_matched`. An empty
+        `matches` means the app does not hold this value — an answer, not
+        a failure, and it comes with a hint on what to try next.
+
+    Does not return:
+        How often a value occurs, or which rows contain it.
+    """
+    e = _check()
+    if e:
+        return e
+    try:
+        app_handle = context.engine_api.ensure_app(app_id, no_data=False)
+        result = context.engine_api.search_app(
+            app_handle, term, fields=fields,
+            max_fields=max_fields, max_values=max_values)
+        if not result.get("matches"):
+            result["hint"] = (
+                f"Nothing in this app matches {term!r}. Check the spelling "
+                f"against `values` / `lowest_values` in get_app_details, or "
+                f"search for a shorter prefix."
+            )
+        return _ok(result)
+    except Exception as ex:
+        return _err(str(ex), app_id=app_id, term=term,
+                    error_category="engine_api_error")
