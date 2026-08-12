@@ -277,49 +277,65 @@ class TestDimensionShape:
 
 
 class TestSetModifierFields:
-    """A set modifier on a field that does not exist is the worst case.
+    """What can honestly be said about a hand-written set modifier.
 
-    Qlik does not reject it — it drops the condition. The measure then
-    returns the unfiltered total: a number larger than the truth, which
-    the all-zero detector cannot see and a reader has no reason to doubt.
-
-    `CheckExpression` does not see inside a modifier (measured), so this is
-    `GetFieldsFromExpression`: a modifier whose fields Engine does not
-    recognise is a modifier that will not filter.
+    Engine lists the modifier fields it recognised and says nothing about
+    the ones it did not, so a modifier naming two fields where only one
+    exists comes back looking sound. Naming the survivors is therefore the
+    limit of what this check can claim — a filter that is verified end to
+    end is one stated as `filters`, where the server writes the names and
+    proves each one selects something.
     """
 
-    def test_an_unknown_modifier_field_is_refused(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
-        assert result["error_category"] == "field_not_found"
-
-    def test_the_refusal_explains_why_it_matters(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
-        assert "unfiltered total" in result["hint"]
-
-    def test_the_refusal_offers_the_described_filter_instead(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Regionn={'North'}>} Sales)"))
-        assert any("filters" in action for action in result["next_actions"])
-
-    def test_a_known_modifier_field_passes(self):
+    def test_the_fields_a_modifier_filters_on_are_named(self):
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
-        assert "error" not in result
+        assert any("'Category'" in w for w in result["warnings"])
 
-    def test_a_bracketed_name_with_a_space(self):
+    def test_the_warning_says_a_missing_name_would_be_dropped(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
+        assert any("dropped by Qlik" in w for w in result["warnings"])
+
+    def test_it_points_at_the_filter_that_is_checked_end_to_end(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
+        assert any("`filters`" in w for w in result["warnings"])
+
+    def test_a_measure_with_no_modifier_says_nothing(self):
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum(Sales)"))
+        assert result["warnings"] == []
+
+    def test_a_bracketed_name_with_a_space_is_read_by_engine(self):
         engine = _Engine(known=("Region", "Sales", "Order Date"))
         result = engine._validate_cube_inputs(
             1, _dims("Region"), _measures('Sum({<[Order Date]={">=1<2"}>} Sales)'))
-        assert "error" not in result, result
-
-    def test_a_measure_without_a_modifier_is_not_asked_about(self):
-        """`GetFieldsFromExpression` returns nothing for a plain aggregation,
-        which must not read as a missing filter field."""
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum(Sales)"))
         assert "error" not in result
+        assert any("Order Date" in w for w in result["warnings"])
+
+    def test_engine_decides_what_is_a_modifier_not_this_code(self):
+        """Every expression is asked about, whatever its text looks like.
+
+        Deciding which ones carry a modifier by reading them would be this
+        server guessing at Qlik syntax — the guess missed `{$<...>}` and
+        `{1<...>}` entirely.
+        """
+        asked = []
+
+        class _Recording(_Engine):
+            def send_requests_pipelined(self, requests, raise_on_error=True,
+                                        timeout=None):
+                if requests[0]["method"] == "GetFieldsFromExpression":
+                    asked.extend(r["params"][0] for r in requests)
+                return super().send_requests_pipelined(
+                    requests, raise_on_error, timeout)
+
+        _Recording()._validate_cube_inputs(
+            1, _dims("Region"),
+            _measures("Sum(Sales)", "Sum({$<Category={'Books'}>} Sales)"))
+        assert "Sum(Sales)" in asked
+        assert "Sum({$<Category={'Books'}>} Sales)" in asked
 
 
 class TestExpressionSyntax:

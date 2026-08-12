@@ -93,11 +93,12 @@ class TestValidationIsOneBatch:
         assert len(expands) == 1
         assert len(checks) == 1
 
-    def test_the_whole_batch_costs_five_round_trips(self):
-        """Expand, check, create, layout, destroy — however many queries."""
+    def test_the_whole_batch_costs_six_round_trips(self):
+        """Expand, check, fields, create, layout, destroy — however many
+        queries the call carries."""
         engine = _Engine()
         engine.run_queries(1, "app", [_query() for _ in range(5)])
-        assert len(engine.batches) == 5
+        assert len(engine.batches) == 6
 
 
 class TestImpossibleDates:

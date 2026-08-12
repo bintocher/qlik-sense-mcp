@@ -11,21 +11,11 @@ from ..config import (
 )
 from typing import Dict, List, Any, Optional
 import difflib
-import re
 import logging
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
-
-# Where a set modifier begins, in any of the forms Qlik accepts: `{<`,
-# `{1<` (ignore the current selection), `{$<` (the current selection),
-# `{[Alt State]<`. Recognising that one is present is the only thing this
-# module reads out of an expression itself — everything about the
-# expression, including which fields the modifier filters on, is answered
-# by Engine. Missing a form would skip the check for it silently, which is
-# why this accepts an identifier rather than the bare `{<`.
-_SET_MODIFIER = re.compile(r"\{\s*(?:[$0-9]\w*|\[[^\]]*\]|\w+)?\s*<")
 
 # Where a described filter is written into a hand-written expression.
 _FILTER_MARKER = "{filter}"
@@ -118,20 +108,21 @@ class EngineHypercubeMixin:
         expanded = self.expand_expressions(app_handle, wanted)
         faults = self.check_expressions(
             app_handle, [expanded.get(text, text) for text in wanted])
-        with_modifier = [
-            text for text in wanted
-            if _SET_MODIFIER.search(expanded.get(text, text))
-        ]
+        # Asked for every expression, not only the ones that look like they
+        # carry a modifier. Deciding that by reading the text would be this
+        # module guessing at Qlik syntax, and the call costs 2ms in the
+        # same batch — Engine answers with the modifier fields it
+        # recognised, and with nothing for an expression that has no
+        # modifier at all.
         recognised = self.fields_in_expressions(
-            app_handle, [expanded.get(text, text) for text in with_modifier]
-        ) if with_modifier else {}
+            app_handle, [expanded.get(text, text) for text in wanted])
         return {
             # Keyed by what the caller wrote, which is what it has to fix.
             "expanded": expanded,
             "faults": {text: faults[expanded.get(text, text)]
                        for text in wanted if expanded.get(text, text) in faults},
             "filter_fields": {text: recognised.get(expanded.get(text, text))
-                              for text in with_modifier},
+                              for text in wanted},
         }
 
     def _validate_cube_inputs(
@@ -194,54 +185,24 @@ class EngineHypercubeMixin:
                 ),
             }
 
-        # A set modifier Engine did not read is a filter that will not
-        # apply. Engine lists the modifier fields it recognised; an
-        # expression that carries a modifier and yields none of them is
-        # filtering on something this app does not have.
-        with_modifier = [text for text in measure_texts
-                         if text in inspection["filter_fields"]]
-        if with_modifier:
-            recognised = inspection["filter_fields"]
-            unread = [text for text in with_modifier if not recognised.get(text)]
-            # What Engine did read is worth saying even when it read
-            # something. It reports the modifier fields it recognised and
-            # says nothing about the ones it did not, so a modifier naming
-            # two fields where only one exists comes back looking sound —
-            # and the condition Qlik dropped is invisible unless the reply
-            # names what survived.
-            for text in with_modifier:
-                fields = recognised.get(text)
-                if fields:
-                    warnings.append(
-                        f"Set analysis in {text!r} filters on: "
-                        + ", ".join(repr(f) for f in fields)
-                        + ". Any other field named in that modifier is not "
-                          "one this app has, and Qlik drops such a condition "
-                          "rather than reporting it."
-                    )
-            if unread:
-                return {
-                    "error": (
-                        "Set analysis in " + ", ".join(repr(t) for t in unread)
-                        + " filters on a field this app does not have."
-                    ),
-                    "error_category": "field_not_found",
-                    "failed_step": "validate",
-                    "invalid_expressions": {t: "no filter field recognised"
-                                            for t in unread},
-                    "next_actions": [
-                        "call get_app_details(app_id) and copy the field name "
-                        "exactly — field names are case-sensitive",
-                        "or state the filter as `filters` and let the server "
-                        "write the set analysis",
-                    ],
-                    "hint": (
-                        "Qlik does not reject a set modifier on an unknown "
-                        "field, it drops the condition. The measure then "
-                        "returns the unfiltered total — a number larger than "
-                        "the truth, with nothing to mark it as wrong."
-                    ),
-                }
+        # Which fields a set modifier really filters on, as Engine reads
+        # it. Worth saying whenever there are any: Engine reports the names
+        # it recognised and stays silent about the ones it did not, so a
+        # modifier naming two fields where only one exists comes back
+        # looking sound. Naming the survivors is the whole of what can
+        # honestly be said about a hand-written modifier — a filter that is
+        # checked end to end is one stated as `filters`, where the server
+        # writes the names itself and proves each one selects something.
+        for text in measure_texts:
+            fields = inspection["filter_fields"].get(text)
+            if fields:
+                warnings.append(
+                    f"Set analysis in {text!r} filters on: "
+                    + ", ".join(repr(f) for f in fields)
+                    + ". A field named there that this app does not have is "
+                      "dropped by Qlik rather than reported; state the filter "
+                      "as `filters` to have every name checked."
+                )
 
         unknown_dimension_fields = list(dict.fromkeys(
             name for text in dimension_texts
