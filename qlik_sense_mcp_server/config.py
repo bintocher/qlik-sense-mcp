@@ -34,6 +34,14 @@ DEFAULT_WS_GREETING_TIMEOUT = 15.0
 # Default retry settings
 DEFAULT_WS_RETRIES = 2
 
+# Seconds Engine keeps a session alive after our socket disconnects, sent as
+# the `/ttl/<n>` segment of the WebSocket URL. Without it Qlik holds the
+# session for its own inactivity timeout — minutes — so a handful of restarts
+# exhausts the per-user limit of five and the next connection is refused with
+# OnMaxParallelSessionsExceeded. Measured on 31.62. Not configurable: a long
+# ttl only recreates the problem, and a zero one drops sessions mid-reconnect.
+WS_SESSION_TTL_SECONDS = 5
+
 # Pagination defaults
 DEFAULT_APPS_LIMIT = 25
 MAX_APPS_LIMIT = 50
@@ -48,10 +56,6 @@ MAX_FIELD_FETCH_SIZE = 5000
 # Data model limits
 MAX_TABLES_AND_KEYS_DIM = 1000
 MAX_TABLES = 50
-
-# JWT defaults (mirror Qlik's own JWT virtual proxy examples and docs/AUTH_JWT.md)
-DEFAULT_JWT_USER_ID_CLAIM = "userId"
-DEFAULT_JWT_USER_DIR_CLAIM = "userDirectory"
 
 # Authentication modes
 AUTH_MODE_CERTIFICATE = "certificate"
@@ -103,16 +107,6 @@ class QlikSenseConfig(BaseModel):
 
     # JWT mode
     jwt_token: Optional[str] = Field(None, description="Signed JWT bearer (jwt mode)")
-    jwt_user_id_claim: str = Field(DEFAULT_JWT_USER_ID_CLAIM,
-                                   description="JWT payload claim holding user id — must match QMC 'JWT "
-                                               "attribute for user ID'")
-    jwt_user_dir_claim: str = Field(DEFAULT_JWT_USER_DIR_CLAIM,
-                                    description="JWT payload claim holding user directory — must match "
-                                                "QMC 'JWT attribute for user directory'")
-    jwt_session_cookie_override: Optional[str] = Field(None,
-                                                       description="Optional override for the VP session cookie "
-                                                                   "name; when None the name is auto-detected from "
-                                                                   "the bootstrap response Set-Cookie header.")
 
     @property
     def auth_mode(self) -> str:
@@ -253,7 +247,4 @@ class QlikSenseConfig(BaseModel):
             http_port=int(os.getenv("QLIK_HTTP_PORT")) if os.getenv("QLIK_HTTP_PORT") else None,
             verify_ssl=os.getenv("QLIK_VERIFY_SSL", "false").lower() == "true",
             jwt_token=os.getenv("QLIK_JWT_TOKEN") or None,
-            jwt_user_id_claim=os.getenv("QLIK_JWT_USER_ID_CLAIM", DEFAULT_JWT_USER_ID_CLAIM),
-            jwt_user_dir_claim=os.getenv("QLIK_JWT_USER_DIR_CLAIM", DEFAULT_JWT_USER_DIR_CLAIM),
-            jwt_session_cookie_override=os.getenv("QLIK_JWT_SESSION_COOKIE") or None,
         )

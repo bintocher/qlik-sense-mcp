@@ -144,9 +144,8 @@ print('proxy_port            =', cfg.proxy_port)
 print('engine_port           =', cfg.engine_port)
 print('http_port             =', cfg.http_port)
 print('jwt_token_set         =', bool(cfg.jwt_token))
-print('jwt_user_id_claim     =', cfg.jwt_user_id_claim)
-print('jwt_user_dir_claim    =', cfg.jwt_user_dir_claim)
-print('jwt_session_cookie    =', cfg.jwt_session_cookie_override)
+print('auth_mode             =', cfg.auth_mode)
+print('virtual_proxy_prefix  =', cfg.virtual_proxy_prefix)
 "
 ```
 

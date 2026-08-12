@@ -20,7 +20,9 @@ logger = context.logger
 # Log the body of each reply, not just the call. Auditing "what did the
 # model see" needs both halves of the exchange.
 _LOG_REPLIES = __import__("os").getenv("QLIK_LOG_REPLIES", "").lower() == "true"
-_LOG_REPLY_CHARS = int(__import__("os").getenv("QLIK_LOG_REPLY_CHARS", "4000"))
+# Enough of a reply to see what the caller was given; a full 10k-row page
+# in the log helps nobody and buries the next entry.
+_LOG_REPLY_CHARS = 4000
 
 
 # What a reader needs first, in the order it needs it. A model reads the

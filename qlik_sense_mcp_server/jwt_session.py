@@ -33,7 +33,6 @@ Sources:
 from __future__ import annotations
 
 import logging
-import os
 import ssl
 import threading
 import time
@@ -46,37 +45,12 @@ from .config import QlikSenseConfig
 logger = logging.getLogger(__name__)
 
 
-# Qlik default session idle timeout is 30 minutes. We refresh a little earlier
-# so a borderline request never races the server-side eviction. Can be
-# overridden by the ``QLIK_JWT_SESSION_TTL`` environment variable for
-# deployments whose QMC session timeout differs from the default 30 minutes.
+# Qlik's default session idle timeout is 30 minutes. Refreshing at 25 leaves
+# margin so a borderline request never races the server-side eviction.
 DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
 
-
-def _ttl_from_env(default: int = DEFAULT_JWT_SESSION_TTL_SECONDS) -> int:
-    raw = os.getenv("QLIK_JWT_SESSION_TTL")
-    if not raw:
-        return default
-    try:
-        v = int(raw)
-    except ValueError:
-        logger.warning(
-            "QLIK_JWT_SESSION_TTL=%r is not an integer, falling back to %d",
-            raw, default,
-        )
-        return default
-    if v <= 0:
-        logger.warning(
-            "QLIK_JWT_SESSION_TTL must be positive, got %d — falling back to %d",
-            v, default,
-        )
-        return default
-    return v
-
-# Names of session cookies to recognize when auto-detecting from Set-Cookie.
-# Any cookie whose name starts with "X-Qlik-Session" is treated as a session
-# cookie — Qlik uses "X-Qlik-Session" on the central proxy and
-# "X-Qlik-Session-<prefix>" on virtual proxies.
+# Name Qlik gives the virtual proxy session cookie. The suffix varies with
+# the proxy, so the cookie is matched by this prefix rather than in full.
 _QLIK_SESSION_COOKIE_PREFIX = "X-Qlik-Session"
 
 
@@ -99,10 +73,9 @@ class JwtSession:
         ttl_seconds: Optional[int] = None,
     ) -> None:
         self._config = config
-        # Explicit arg wins over env, env wins over default.
-        self._ttl = ttl_seconds if ttl_seconds is not None else _ttl_from_env()
+        self._ttl = ttl_seconds if ttl_seconds is not None else DEFAULT_JWT_SESSION_TTL_SECONDS
         self._lock = threading.Lock()
-        self._cookie_name: Optional[str] = config.jwt_session_cookie_override
+        self._cookie_name: Optional[str] = None
         self._cookie_value: Optional[str] = None
         self._csrf_token: Optional[str] = None
         self._fetched_at: float = 0.0
@@ -146,10 +119,8 @@ class JwtSession:
             self._cookie_value = None
             self._csrf_token = None
             self._fetched_at = 0.0
-            # Keep cookie_name if it was supplied via env override, reset
-            # otherwise so a fresh Set-Cookie is picked up.
-            if not self._config.jwt_session_cookie_override:
-                self._cookie_name = None
+            # Forget the name too, so a fresh Set-Cookie is picked up.
+            self._cookie_name = None
 
     def logout(self) -> bool:
         """Ask the proxy to end this user's Qlik session, and forget it.
@@ -313,9 +284,13 @@ class JwtSession:
         cookie_name, cookie_value = self._pick_session_cookie(resp)
         if not cookie_value:
             raise JwtBootstrapError(
-                "csrftoken response did not set a Qlik session cookie. Verify "
-                "that QLIK_SERVER_URL points at the JWT virtual proxy and not "
-                "at the central proxy."
+                "csrftoken response did not set a Qlik session cookie. "
+                f"Cookies received: {list(resp.cookies.keys()) or 'none'}. "
+                "Check that QLIK_SERVER_URL points at the JWT virtual proxy "
+                "rather than the central proxy; if it does, the proxy's "
+                "'Session cookie header name' in QMC has been renamed to "
+                "something this server cannot recognise — set it back to a "
+                "name containing 'Qlik'."
             )
 
         self._cookie_name = cookie_name
@@ -333,34 +308,25 @@ class JwtSession:
         """
         Extract the Qlik session cookie from a bootstrap response.
 
-        Honors the env override ``QLIK_JWT_SESSION_COOKIE`` first. Otherwise
-        scans response cookies for the conventional ``X-Qlik-Session*`` name
-        and falls back to the single cookie in the response if Qlik set only
-        one.
+        The conventional name is ``X-Qlik-Session*``, but QMC lets an admin
+        rename it per virtual proxy, and a load balancer in front of Qlik
+        adds cookies of its own. So the name is matched in three widening
+        steps rather than assumed.
         """
-        override = self._config.jwt_session_cookie_override
-        if override:
-            value = resp.cookies.get(override)
-            if value:
-                return override, value
-            # Explicit override but not present → treat as misconfiguration.
-            raise JwtBootstrapError(
-                f"QLIK_JWT_SESSION_COOKIE={override!r} set but no such cookie "
-                f"in csrftoken response. Available: {list(resp.cookies.keys())}"
-            )
+        names = list(resp.cookies.keys())
 
-        # Prefer any cookie whose name starts with X-Qlik-Session.
-        candidates = [
-            (name, resp.cookies.get(name))
-            for name in resp.cookies.keys()
-            if name.lower().startswith(_QLIK_SESSION_COOKIE_PREFIX.lower())
-        ]
-        if candidates:
-            return candidates[0]
+        # 1. The conventional name.
+        for name in names:
+            if name.lower().startswith(_QLIK_SESSION_COOKIE_PREFIX.lower()):
+                return name, resp.cookies.get(name)
 
-        # Last resort — if Qlik set exactly one cookie, use it.
-        if len(resp.cookies) == 1:
-            name = next(iter(resp.cookies.keys()))
-            return name, resp.cookies.get(name)
+        # 2. A renamed Qlik cookie still tends to say so.
+        for name in names:
+            if "qlik" in name.lower():
+                return name, resp.cookies.get(name)
+
+        # 3. Exactly one cookie — it can only be the session.
+        if len(names) == 1:
+            return names[0], resp.cookies.get(names[0])
 
         return None, None

@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Engine sessions are released about five seconds after the socket
+  closes instead of lingering for the proxy's inactivity timeout. The
+  WebSocket URL now carries a `ttl` segment, so restarting the server
+  no longer walks into Qlik's limit of five sessions per user.
+- Ten environment variables removed, leaving 15 `QLIK_*` settings:
+  `QLIK_HTTP_TIMEOUT`, `QLIK_WS_RETRIES`, `QLIK_WS_IDLE_PROBE_AFTER`,
+  `QLIK_WS_PROBE_TIMEOUT`, `QLIK_WS_GREETING_TIMEOUT`,
+  `QLIK_LOG_REPLY_CHARS`, `QLIK_JWT_SESSION_TTL`,
+  `QLIK_JWT_SESSION_COOKIE`, `QLIK_JWT_USER_ID_CLAIM`,
+  `QLIK_JWT_USER_DIR_CLAIM`. The first six are now fixed values; the last
+  two were never read by the server.
+- The virtual proxy session cookie is recognised even when QMC renames it:
+  the conventional `X-Qlik-Session*` first, then any name containing
+  "qlik", then a lone cookie. Previously a renamed cookie arriving
+  alongside a load-balancer cookie left no way to connect, since the
+  override that covered it was removed. The error now lists the cookies
+  that did arrive.
+
 ## [1.9.0] - 2026-08-11
 
 ### Added

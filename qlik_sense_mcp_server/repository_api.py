@@ -4,7 +4,6 @@ import ssl
 from typing import Dict, List, Any, Optional
 import httpx
 import logging
-import os
 from .config import (
     QlikSenseConfig,
     DEFAULT_HTTP_TIMEOUT,
@@ -45,11 +44,7 @@ class QlikRepositoryAPI:
             ssl_context.verify_mode = ssl.CERT_NONE
 
         # Timeouts from env (seconds)
-        http_timeout_env = os.getenv("QLIK_HTTP_TIMEOUT")
-        try:
-            timeout_val = float(http_timeout_env) if http_timeout_env else DEFAULT_HTTP_TIMEOUT
-        except ValueError:
-            timeout_val = DEFAULT_HTTP_TIMEOUT
+        timeout_val = DEFAULT_HTTP_TIMEOUT
 
         # Build per-mode client config. JWT mode uses neither client certs
         # nor X-Qlik-User impersonation — identity comes from the signed

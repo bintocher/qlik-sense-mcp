@@ -114,10 +114,10 @@ harmless, which is why the problem only ever appeared in JWT mode.
 `_is_connected()` therefore:
 
 1. Trusts a socket that answered a frame less than
-   `QLIK_WS_IDLE_PROBE_AFTER` seconds ago (default 30) — no traffic at all
+   30 seconds ago — no traffic at all
    in the common case of back-to-back tool calls.
 2. Probes an idle one with a real `EngineVersion` request bounded by
-   `QLIK_WS_PROBE_TIMEOUT` (default 15s). This proves more than a ping
+   15 seconds. This proves more than a ping
    ever did: that the Engine answers, not merely that the socket accepts
    writes.
 
@@ -125,7 +125,7 @@ harmless, which is why the problem only ever appeared in JWT mode.
 
 A fresh socket is answered with notifications before anything else —
 normally `OnAuthenticationInformation` then `OnConnected`. `connect()`
-reads them up to `OnConnected` (bounded by `QLIK_WS_GREETING_TIMEOUT`),
+reads them up to `OnConnected` (bounded by a 15-second window),
 which also leaves the receive buffer empty for the first real request.
 
 A greeting can also be fatal. `OnMaxParallelSessionsExceeded` means the

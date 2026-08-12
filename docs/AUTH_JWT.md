@@ -167,10 +167,6 @@ something non-standard.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `QLIK_JWT_USER_ID_CLAIM` | Name of the payload claim holding the user id | `userId` |
-| `QLIK_JWT_USER_DIR_CLAIM` | Name of the payload claim holding the user directory | `userDirectory` |
-| `QLIK_JWT_SESSION_COOKIE` | Exact name of the VP session cookie | auto-detected from bootstrap response |
-| `QLIK_JWT_SESSION_TTL` | Seconds to cache the bootstrapped session before re-fetching. Lower this if the QMC Proxy `Session inactivity timeout` is below 30 min. | `1500` (25 min) |
 | `QLIK_VERIFY_SSL` | `true` enables TLS verification | `false` |
 | `QLIK_CA_CERT_PATH` | Path to a corporate CA bundle | unset |
 
