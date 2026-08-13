@@ -996,3 +996,105 @@ class TestOneValueIsAValue:
             _query()])
         assert result["queries_failed"] == 0
         assert len(result["results"]) == 2
+
+
+class TestAnInheritedScopeDoesNotEraseTheFilters:
+    """An inherited scope arrives already built into the modifier, with the
+    filters that came with it. Rebuilding it from the scope alone threw
+    those filters away and answered over every row."""
+
+    def test_a_metric_that_states_both_keeps_both_in_its_parts(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide",
+                      "scope": {"ignore_selections": True},
+                      "filters": [{"field": "Region", "values": ["North"]}],
+                      "of": [{"field": "Amount", "agg": "sum"},
+                             {"field": "Amount", "agg": "sum",
+                              "total": True}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert expression.count("{1<[Region]={'North'}>}") == 3
+
+    def test_a_part_may_still_override_it(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide",
+                      "scope": {"ignore_selections": True},
+                      "filters": [{"field": "Region", "values": ["North"]}],
+                      "of": [{"field": "Amount", "agg": "sum"},
+                             {"field": "Amount", "agg": "sum",
+                              "scope": {"bookmark": "BM01"}}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum({BM01} [Amount])" in expression
+        assert "{1<[Region]={'North'}>}" in expression
+
+
+class TestAnEmptyScopeBesideFilters:
+    """The same rule wherever it is written: a scope that names nothing
+    does not cancel the set the query named."""
+
+    @pytest.mark.parametrize("scope", [{}, {"ignore_selections": False},
+                                       {"bookmark": ""}])
+    def test_it_keeps_the_query_scope(self, scope):
+        plan = _Engine()._plan_query(1, "app", dict(_query(
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope,
+                      "filters": [{"field": "Region", "values": ["North"]}]}]),
+            scope={"ignore_selections": True}), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum({1<[Region]={'North'}>} [Amount])")
+
+    def test_a_part_of_an_operation_follows_the_same_rule(self):
+        plan = _Engine()._plan_query(1, "app", dict(_query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum", "scope": {},
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"field": "Amount", "agg": "sum"}]}]),
+            scope={"ignore_selections": True}), 0)
+        assert "Sum({1<[Region]={'North'}>} [Amount])" in (
+            plan["measures"][0]["expression"])
+
+
+class TestThePartsCountTowardsTheCeiling:
+    """A metric made of parts builds one expression per part, at any
+    depth. Counting the list alone let one allowed metric carry an
+    expression of any size into a shared connection."""
+
+    def test_a_deep_metric_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import (
+            MAX_EXPRESSIONS_PER_CALL)
+
+        deep = {"op": "add", "of": [{"field": "Amount", "agg": "sum"}
+                                    for _ in range(MAX_EXPRESSIONS_PER_CALL)]}
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(metrics=[deep])])
+        assert result["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_nesting_counts_at_every_depth(self):
+        from qlik_sense_mcp_server.engine.queries import (
+            MAX_EXPRESSIONS_PER_CALL)
+
+        inner = {"op": "add", "of": [{"field": "Amount", "agg": "sum"}
+                                     for _ in range(20)]}
+        deep = {"op": "add", "of": [dict(inner)
+                                    for _ in range(MAX_EXPRESSIONS_PER_CALL
+                                                   // 10)]}
+        result = _Engine().run_queries(1, "app", [_query(metrics=[deep])])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_operation_still_runs(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "count"}]}])])
+        assert result["queries_failed"] == 0
+
+    def test_the_field_an_element_set_reads_counts_too(self):
+        from qlik_sense_mcp_server.engine.queries import _filter_cost
+
+        cost = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "of_field": "Buyer",
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        without = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        assert cost == without + 1
