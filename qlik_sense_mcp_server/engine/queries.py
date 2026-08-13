@@ -556,7 +556,10 @@ class EngineQueriesMixin:
         # these.
         planned = sum(len(one) for one in written) + 6 * len(written)
         if operation == "divide":
-            planned += sum(len(one) for one in written[1:]) + 12
+            # `If((d1) = 0 or (d2) = 0, Null(), ...)`: every denominator
+            # again, plus the words holding them apart.
+            planned += (sum(len(one) for one in written[1:])
+                        + 10 * len(written[1:]) + 20)
         if planned > MAX_EXPRESSION_CHARS:
             return {}, {"id": query_id, "error": (
                 f"This measure would be about {planned} characters long, "
@@ -1270,13 +1273,20 @@ class EngineQueriesMixin:
                 item[3] += added
                 progressed = True
             if not progressed:
+                stopped = True
                 break
+        else:
+            stopped = False
         for plan, cube, shaped, got, wanted in pending:
             if got < wanted:
                 plan.setdefault("warnings", []).append(
                     f"{got} of the {wanted} rows this page asked for came "
-                    f"back; Engine stopped sending. Ask again for the rest "
-                    f"with offset={shaped['offset'] + got}."
+                    f"back; "
+                    + ("Engine stopped sending."
+                       if stopped else
+                       f"reading on stopped after {MAX_PAGE_READS} rounds.")
+                    + f" Ask again for the rest with "
+                      f"offset={shaped['offset'] + got}."
                 )
 
         results = [

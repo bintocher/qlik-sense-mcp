@@ -639,13 +639,9 @@ class TestConditionByExpression:
         checked on its own, where Qlik does say what is wrong with it -
         "Sum(amount > 20" came back as "')' or ',' expected"."""
         class _Checking(_Engine):
-            def send_request(self, method, params=None, handle=-1,
-                             timeout=None):
-                if method == "CheckExpression":
-                    if "Sum([Amount] > 20" in (params or [""])[0]:
-                        return {"qErrorMsg": "')' or ',' expected"}
-                    return {"qErrorMsg": ""}
-                return super().send_request(method, params, handle, timeout)
+            def check_expressions(self, app_handle, expressions):
+                return {e: {"error": "')' or ',' expected", "bad_fields": []}
+                        for e in expressions if "Sum([Amount] > 20" in e}
 
         engine = _Checking(values=("2023",), date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
@@ -1003,17 +999,14 @@ class TestTheConditionNamesFieldsThatExist:
     @staticmethod
     def _engine(bad=()):
         class _Checking(_Engine):
-            def send_request(self, method, params=None, handle=-1,
-                             timeout=None):
-                if method == "CheckExpression":
-                    text = (params or [""])[0]
-                    names = []
-                    for name in bad:
-                        if name in text:
-                            names.append({"qFrom": text.index(name),
-                                          "qCount": len(name)})
-                    return {"qErrorMsg": "", "qBadFieldNames": names}
-                return super().send_request(method, params, handle, timeout)
+            def check_expressions(self, app_handle, expressions):
+                faults = {}
+                for expression in expressions:
+                    named = [n for n in bad if n in expression]
+                    if named:
+                        faults[expression] = {"error": "",
+                                              "bad_fields": named}
+                return faults
 
         engine = _Checking(values=("2023",), date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
@@ -1058,3 +1051,57 @@ class TestTheConditionSelectsSomething:
                         "match_expression": "Sum([Amount]) > 20"}])
         assert result["modifier"] == (
             '{<[Client]={"=Sum([Amount]) > 20"}>}')
+
+
+class TestAnElementSetSelectsSomething:
+    """"The clients who bought in a year nobody bought in" narrows the
+    field to nothing, and an empty answer reads as "no such data" rather
+    than as "no such client"."""
+
+    @staticmethod
+    def _engine(matched):
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": matched, "is_numeric": True,
+             "error": None} for _ in exprs]
+        return engine
+
+    def test_a_condition_selecting_nothing_is_refused(self):
+        result = self._engine(0).build_filters(1, "app", [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert result["error_category"] == "value_not_found"
+
+    def test_a_condition_selecting_something_runs(self):
+        result = self._engine(4).build_filters(1, "app", [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "error" not in result
+        assert "P(" in result["modifier"]
+
+
+class TestAProbeThatQlikRefuses:
+    """A probe with no number has two causes. Qlik answering with the text
+    of an error is a refusal to pass on; a probe that never ran says
+    nothing about the query and must not be read as one."""
+
+    @staticmethod
+    def _engine(text):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": text, "number": None, "is_numeric": False,
+             "error": None} for _ in exprs]
+        return engine
+
+    def test_a_complaint_is_a_refusal(self):
+        result = self._engine(
+            "Error: Error in set modifier ad hoc element list: "
+            "',' or ')' expected").build_filters(
+            1, "app", [{"field": "Region", "contains": "no"}])
+        assert result["error_category"] == "invalid_filter"
+        assert "expected" in result["error"]
+
+    def test_a_probe_that_did_not_run_is_not_a_refusal(self):
+        result = self._engine(None).build_filters(
+            1, "app", [{"field": "Region", "contains": "no"}])
+        assert "error" not in result
