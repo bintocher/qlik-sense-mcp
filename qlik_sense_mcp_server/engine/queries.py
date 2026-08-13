@@ -18,6 +18,7 @@ import time
 import uuid
 
 from ..utils import bare_field_name, escape_qlik_field_name
+from .filters import _set_identifier
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -25,8 +26,31 @@ logger = logging.getLogger(__name__)
 
 MAX_NESTING = 20
 
+# What one measure may grow to. A division writes its denominator
+# twice, so nesting them doubles the text at every level.
+MAX_EXPRESSION_CHARS = 20000
+
 # A reference count plus the candidate forms of a date field.
 RANGE_PROBE_COST = 3
+
+
+def _scope_is_readable(scope: Any, query_id: str) -> Optional[Dict[str, Any]]:
+    """The refusal a scope description earns, or nothing.
+
+    A scope naming no set is not applied, but it is still read: a key
+    misspelled and holding zero used to pass unnoticed, and the answer came
+    back over the query's set with no sign that another one was asked for.
+    """
+    if scope is None:
+        return None
+    if not isinstance(scope, dict):
+        return {"id": query_id,
+                "error": f"scope must be an object, got {scope!r}.",
+                "error_category": "invalid_argument"}
+    verdict = _set_identifier(scope)
+    if verdict.get("error"):
+        return dict(verdict, id=query_id)
+    return None
 
 
 def _listed(value: Any) -> int:
@@ -223,7 +247,9 @@ class EngineQueriesMixin:
 
         group_by = query.get("group_by")
         if group_by is None:
-            group_by = query.get("dimensions") or []
+            group_by = query.get("dimensions")
+        if group_by is None:
+            group_by = []
         if isinstance(group_by, str):
             group_by = [group_by]
         # A list of fields, or one field named plainly. An object was walked
@@ -428,6 +454,9 @@ class EngineQueriesMixin:
             # Only a scope this part stated itself replaces what it
             # inherited. An inherited one arrives already built into
             # `modifier`, together with the filters that came with it.
+            verdict = _scope_is_readable(part.get("scope"), query_id)
+            if verdict:
+                return {}, verdict
             if (_scope_names_a_set(part.get("scope"))
                     and part.get("filters") is None):
                 built = slice_for([], part.get("scope"))
@@ -486,6 +515,16 @@ class EngineQueriesMixin:
             expression = f"If({guard}, Null(), {joined})"
         else:
             expression = joined
+        if len(expression) > MAX_EXPRESSION_CHARS:
+            return {}, {"id": query_id, "error": (
+                f"The expression this metric builds is "
+                f"{len(expression)} characters long, over the "
+                f"{MAX_EXPRESSION_CHARS} this server sends."),
+                "error_category": "limit_exceeded",
+                "hint": ("A division writes its denominator twice — once "
+                         "for the guard against zero — so divisions inside "
+                         "divisions double the text at every level. State "
+                         "the inner ones as separate metrics.")}
         written_metric = {"expression": expression,
                           "label": str(metric.get("label") or operation)}
         if part_filters:
@@ -674,6 +713,9 @@ class EngineQueriesMixin:
             own_scope = None
             # A scope of its own applies even with no filters beside it:
             # "everything, ignoring selections" is a statement in itself.
+            verdict = _scope_is_readable(metric.get("scope"), query_id)
+            if verdict:
+                return [], verdict
             if (_scope_names_a_set(metric.get("scope"))
                     and metric.get("filters") is None):
                 built = slice_for([], metric.get("scope"))
@@ -733,6 +775,9 @@ class EngineQueriesMixin:
             own = modifier
             own_applied = None
             own_scope = None
+            verdict = _scope_is_readable(measure.get("scope"), query_id)
+            if verdict:
+                return [], verdict
             if (_scope_names_a_set(measure.get("scope"))
                     and measure.get("filters") is None):
                 built = slice_for([], measure.get("scope"))
@@ -1317,7 +1362,7 @@ class EngineQueriesMixin:
             reply["measure_filters"] = per_measure
         if plan.get("period_check"):
             reply["period_check"] = plan["period_check"]
-        if total_rows > len(rows):
+        if shaped["offset"] + len(rows) < total_rows:
             reply["has_more"] = True
             reply["next_offset"] = shaped["offset"] + len(rows)
             if shaped["sorted_by"] is None:
