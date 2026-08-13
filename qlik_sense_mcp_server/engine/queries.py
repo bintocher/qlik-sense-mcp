@@ -386,6 +386,7 @@ class EngineQueriesMixin:
                 return [], failure
             if own_applied is not None:
                 written["filters_applied"] = own_applied
+                written["modifier"] = own
             measures.append(written)
 
         # A caller that needs something this vocabulary cannot say writes
@@ -458,6 +459,7 @@ class EngineQueriesMixin:
                        "label": str(measure.get("label") or expression)}
             if own_applied is not None:
                 written["filters_applied"] = own_applied
+                written["modifier"] = own
             measures.append(written)
         return measures, None
 
@@ -469,8 +471,24 @@ class EngineQueriesMixin:
         Qlik ignored the condition — the one failure that otherwise returns
         a plausible number and no sign of trouble.
         """
+        # Every filter stated anywhere in the query, not only the one at
+        # the top: a period named inside a metric narrows that metric, and
+        # a period that fails to apply is exactly what these probes exist
+        # to catch. The measure's own modifier is used for its own probe.
+        stated = [(plan.get("modifier", ""), applied)
+                  for applied in plan.get("filters_applied", [])]
+        for measure in plan.get("measures", []):
+            for applied in measure.get("filters_applied") or []:
+                stated.append((measure.get("modifier", ""), applied))
+
         probes = []
-        for applied in plan.get("filters_applied", []):
+        seen = set()
+        for modifier_for_probe, applied in stated:
+            signature = (modifier_for_probe, applied.get("field"),
+                         str(applied.get("from")), str(applied.get("to")))
+            if signature in seen:
+                continue
+            seen.add(signature)
             # A period and a numeric range are both bounded filters, and
             # both can silently fail to apply. Values outside the bounds
             # in the result say so; a value list cannot fail this way,
@@ -479,9 +497,9 @@ class EngineQueriesMixin:
                 continue
             if applied.get("from") is None and applied.get("to") is None:
                 continue
-            field = f"[{applied['field']}]"
-            modifier = plan.get("modifier", "")
-            inner = f"{modifier} {field}" if modifier else field
+            field = escape_qlik_field_name(applied["field"])
+            inner = (f"{modifier_for_probe} {field}"
+                     if modifier_for_probe else field)
             # A period compares against day numbers; a range against the
             # values themselves. Either way the question is the same: does
             # the result hold anything outside what was asked for.

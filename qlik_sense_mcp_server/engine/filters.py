@@ -27,6 +27,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..exceptions import QlikEngineError
 from ..utils import bare_field_name, escape_qlik_field_name
 
 logger = logging.getLogger(__name__)
@@ -493,10 +494,15 @@ class EngineFiltersMixin:
                 described = self.send_request(
                     "GetFieldDescription", [field], handle=app_handle)
                 exists = bool((described.get("qReturn") or {}).get("qName"))
+            except QlikEngineError:
+                # Engine considered the call and refused it: for a field it
+                # does not have, it answers "Invalid parameters". That is
+                # an answer.
+                exists = False
             except Exception as exc:
-                # Could not ask. The filter goes through unchecked rather
-                # than being refused on the strength of a failed question;
-                # a wrong name still fails later, and loudly.
+                # The question never got through. The filter goes on
+                # unchecked rather than being refused on the strength of a
+                # failed question; a wrong name still fails later, loudly.
                 logger.debug("Could not describe %r: %s", field, exc)
                 exists = True
             if not exists:
