@@ -85,6 +85,22 @@ def _scope_is_readable(scope: Any, query_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _narrowings(records, modifier):
+    """Every filter recorded under a modifier, at any depth.
+
+    A combination of sets records what each of its sets narrowed one level
+    down, and a period stated inside one of them can fail to apply like any
+    other.
+    """
+    for record in records or []:
+        if isinstance(record, dict) and "filters_applied" in record:
+            for inner in _narrowings(record["filters_applied"],
+                                     record.get("modifier") or modifier):
+                yield inner
+        elif isinstance(record, dict):
+            yield (modifier, record)
+
+
 def _listed(value: Any) -> int:
     """How many entries a list holds, counting anything else as one.
 
@@ -180,6 +196,18 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
                     stated = entry.get(operator)
                     total += (len(stated) if isinstance(stated, (list, tuple))
                               else (1 if stated is not None else 0))
+                # A text search, a condition written as an expression and
+                # an element set each prove themselves with a probe of
+                # their own, and the expression is read by Qlik twice more
+                # - expanded, then parsed.
+                for key in ("contains", "starts_with", "ends_with"):
+                    if entry.get(key) is not None:
+                        total += 1
+                if entry.get("match_expression") is not None:
+                    total += 3
+                if (entry.get("matching") is not None
+                        or entry.get("not_matching") is not None):
+                    total += 1
                 for nested in ("matching", "not_matching"):
                     inner = entry.get(nested)
                     total += _filter_cost(inner, depth + 1)
@@ -851,6 +879,11 @@ class EngineQueriesMixin:
         for measure in query.get("measures") or []:
             if isinstance(measure, str):
                 measure = {"expression": measure}
+            if not isinstance(measure, dict):
+                return [], {"id": query_id, "error": (
+                    f"A measure must be an expression or an object, got "
+                    f"{measure!r}."),
+                    "error_category": "invalid_argument"}
             expression = str(measure.get("expression") or "").strip()
             if not expression:
                 return [], {"id": query_id, "error": (
@@ -948,19 +981,6 @@ class EngineQueriesMixin:
         # the top: a period named inside a metric narrows that metric, and
         # a period that fails to apply is exactly what these probes exist
         # to catch. The measure's own modifier is used for its own probe.
-        # A combination of sets records what each of its sets narrowed, one
-        # level down: a period stated inside one of them can fail to apply
-        # like any other, and the reply promises to say so.
-        def _narrowings(records, modifier):
-            for record in records or []:
-                if isinstance(record, dict) and "filters_applied" in record:
-                    for inner in _narrowings(record["filters_applied"],
-                                             record.get("modifier")
-                                             or modifier):
-                        yield inner
-                elif isinstance(record, dict):
-                    yield (modifier, record)
-
         stated = list(_narrowings(plan.get("filters_applied"),
                                   plan.get("modifier", "")))
         for measure in plan.get("measures", []):
@@ -1502,6 +1522,17 @@ class EngineQueriesMixin:
         for check in plan.get("period_check", []):
             if check.get("filter_applied") is False:
                 warnings.append(check["note"])
+        # A filter built over a probe that never answered is not a filter
+        # anyone checked, and the reply says which.
+        for _, applied in _narrowings(plan.get("filters_applied"),
+                                      plan.get("modifier", "")):
+            if applied.get("note"):
+                warnings.append(applied["note"])
+        for measure in plan.get("measures", []):
+            for _, applied in _narrowings(measure.get("filters_applied"),
+                                          measure.get("modifier", "")):
+                if applied.get("note"):
+                    warnings.append(applied["note"])
         # What the checks said before the query ran — which fields a set
         # modifier really filters on, for instance — belongs in the same
         # place as what the result said afterwards.
