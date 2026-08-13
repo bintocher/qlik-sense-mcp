@@ -275,8 +275,14 @@ class EngineQueriesMixin:
         total = metric.get("total")
         except_fields = metric.get("total_except")
         if except_fields is not None:
-            names = ([except_fields] if isinstance(except_fields, str)
-                     else list(except_fields or []))
+            if isinstance(except_fields, (str, list, tuple)):
+                names = ([except_fields] if isinstance(except_fields, str)
+                         else list(except_fields))
+            else:
+                return "", {"id": query_id, "error": (
+                    f"total_except={except_fields!r} is neither a field name "
+                    f"nor a list of them."),
+                    "error_category": "invalid_argument"}
             if not names:
                 return "", {"id": query_id, "error": (
                     "total_except names no field."),
@@ -321,6 +327,7 @@ class EngineQueriesMixin:
                          '"count_distinct"}].')}
 
         written = []
+        part_filters = []
         for part in parts:
             if not isinstance(part, dict):
                 return {}, {"id": query_id, "error": (
@@ -328,6 +335,7 @@ class EngineQueriesMixin:
                     f"{part!r}."),
                     "error_category": "invalid_argument"}
             own = modifier
+            own_applied = None
             if "filters" in part and part["filters"] is not None:
                 if slice_for is None or not isinstance(part["filters"], list):
                     return {}, {"id": query_id, "error": (
@@ -340,11 +348,14 @@ class EngineQueriesMixin:
                     failed["id"] = query_id
                     return {}, failed
                 own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
             one, failure = EngineQueriesMixin._write_metric(
                 part, own, query_id, slice_for)
             if failure:
                 return {}, failure
             written.append(one["expression"])
+            if own_applied is not None:
+                part_filters.append((own, own_applied))
 
         joined = OPERATIONS[operation].join(written)
         if operation == "divide":
@@ -356,8 +367,11 @@ class EngineQueriesMixin:
             expression = f"If({guard}, Null(), {joined})"
         else:
             expression = joined
-        return {"expression": expression,
-                "label": str(metric.get("label") or operation)}, None
+        written_metric = {"expression": expression,
+                          "label": str(metric.get("label") or operation)}
+        if part_filters:
+            written_metric["part_filters"] = part_filters
+        return written_metric, None
 
     @staticmethod
     def _write_metric(metric, modifier, query_id, slice_for=None):
@@ -462,7 +476,12 @@ class EngineQueriesMixin:
             if refusal:
                 return {}, refusal
 
-        per_fields = [per] if isinstance(per, str) else list(per or [])
+        if isinstance(per, (str, list, tuple)):
+            per_fields = [per] if isinstance(per, str) else list(per)
+        else:
+            return {}, {"id": query_id, "error": (
+                f"per={per!r} is neither a field name nor a list of them."),
+                "error_category": "invalid_argument"}
         if not per_fields:
             return {}, {"id": query_id, "error": "per names no field.",
                         "error_category": "invalid_argument"}
@@ -482,8 +501,14 @@ class EngineQueriesMixin:
             modifier=prefix.rstrip() if prefix else "",
             field=field, p=fraction).replace("(  ", "(").replace("( ", "(")
         grouped = "Aggr(" + inner + ", " + ", ".join(written_per) + ")"
+        # TOTAL belongs to the outer aggregation: the inner one is already
+        # grouped by `per`, and it is the outer one that would otherwise
+        # follow the grouping of the query.
+        total, failure = EngineQueriesMixin._total_prefix(metric, query_id)
+        if failure:
+            return {}, failure
         expression = OUTER_AGGREGATIONS[aggregation].format(
-            inner=grouped, p=fraction)
+            inner=(total + grouped) if total else grouped, p=fraction)
         return {"expression": expression,
                 "label": str(metric.get("label")
                              or f"{aggregation}_{inner_name}_{plain_field}")}, None
@@ -513,6 +538,17 @@ class EngineQueriesMixin:
             # all, and the two are different statements.
             own = modifier
             own_applied = None
+            # A scope of its own applies even with no filters beside it:
+            # "everything, ignoring selections" is a statement in itself.
+            if metric.get("scope") is not None and metric.get(
+                    "filters") is None:
+                built = slice_for([], metric.get("scope"))
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return [], failed
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
             if "filters" in metric and metric["filters"] is not None:
                 if not isinstance(metric["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -632,6 +668,11 @@ class EngineQueriesMixin:
         for measure in plan.get("measures", []):
             for applied in measure.get("filters_applied") or []:
                 stated.append((measure.get("modifier", ""), applied))
+            # A part of an arithmetic metric carries its own filters, and a
+            # period stated there can fail to apply like any other.
+            for part_modifier, part_applied in measure.get("part_filters") or []:
+                for applied in part_applied:
+                    stated.append((part_modifier, applied))
 
         probes = []
         seen = set()
