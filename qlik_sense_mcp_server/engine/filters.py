@@ -640,7 +640,7 @@ class EngineFiltersMixin:
                 "field": field, "element_set": joined}
 
     def pattern_modifier(self, app_handle: int, field: str, kind: str,
-                         value: Any) -> Dict[str, Any]:
+                         value: Any, base: str = "") -> Dict[str, Any]:
         """A modifier matching values by their text.
 
         Not written as a Qlik wildcard search. There is no escape for `*`,
@@ -664,8 +664,29 @@ class EngineFiltersMixin:
             condition = f"Index({upper_field}, {upper_value})=1"
         else:
             condition = (f"Upper(Right({name}, Len({literal})))={upper_value}")
-        return {"modifier": f'{name}={{"={condition}"}}', "field": field,
-                kind: text}
+        modifier = f'{name}={{"={condition}"}}'
+        # Proven to select something, the way every other filter is: a
+        # search matching no value is answered by Qlik with an empty table
+        # rather than with a word about it, and an empty table reads as
+        # "there is no such data" instead of "there is no such spelling".
+        counted = self.evaluate_expressions(
+            app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+        matched = counted[0].get("number") if counted else None
+        if matched is not None and int(matched) == 0:
+            return {
+                "error": (
+                    f"No value of {escape_qlik_field_name(field)} "
+                    f"{kind.replace('_', ' ')} {text!r}."),
+                "error_category": "value_not_found",
+                "next_actions": [
+                    f"read the values with get_app_field on "
+                    f"{escape_qlik_field_name(field)}",
+                ],
+            }
+        outcome = {"modifier": modifier, "field": field, kind: text}
+        if matched is not None:
+            outcome["matched"] = int(matched)
+        return outcome
 
     def build_filters(self, app_handle: int, app_id: str,
                       filters: List[Dict[str, Any]],
@@ -811,7 +832,8 @@ class EngineFiltersMixin:
             pattern = kinds["text"]
             if pattern:
                 outcome = self.pattern_modifier(
-                    app_handle, field, pattern[0], entry[pattern[0]])
+                    app_handle, field, pattern[0], entry[pattern[0]],
+                    base=identifier)
                 if outcome.get("error"):
                     return outcome
                 parts.append(outcome["modifier"])
@@ -829,12 +851,28 @@ class EngineFiltersMixin:
                         f"match_expression on "
                         f"{escape_qlik_field_name(field)} is empty."),
                         "error_category": "invalid_filter"}
-                if condition.count('"') % 2 or condition.count(
-                        "{") != condition.count("}"):
+                # Whether the condition is well formed is Qlik's verdict,
+                # not a count of characters here: a quote or a brace inside
+                # a string literal is text, and counting them refused
+                # conditions Qlik reads without complaint. Measured: inside
+                # a set modifier Qlik reads a broken condition as text and
+                # answers zero, so the condition is checked on its own,
+                # where Qlik does say what is wrong with it.
+                try:
+                    verdict = self.send_request(
+                        "CheckExpression", [condition], handle=app_handle)
+                    complaint = str(verdict.get("qErrorMsg") or "").strip()
+                except Exception:
+                    complaint = ""
+                if complaint:
                     return {"error": (
-                        f"match_expression {condition!r} does not close "
-                        f"its quotes or braces."),
-                        "error_category": "invalid_filter"}
+                        f"match_expression on "
+                        f"{escape_qlik_field_name(field)} is not an "
+                        f"expression Qlik reads: {complaint}"),
+                        "error_category": "invalid_expression",
+                        "hint": ("It is scored for each value of the field, "
+                                 "so it reads like a measure: "
+                                 "Sum([Amount]) > 1000.")}
                 name = escape_qlik_field_name(field)
                 parts.append(f'{name}={{"={condition}"}}')
                 applied.append({"field": field,

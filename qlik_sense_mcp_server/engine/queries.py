@@ -1194,6 +1194,7 @@ class EngineQueriesMixin:
                 plan["error"] = "Engine created no object for this query"
                 plan["error_category"] = "engine_api_error"
                 continue
+            plan["handle"] = handle
             handles.append((plan, shaped, handle))
 
         # Batch two: read every layout.
@@ -1215,6 +1216,42 @@ class EngineQueriesMixin:
                 continue
             plan["cube"] = cube
             plan["shaped"] = shaped
+
+        # Engine may hand back a shorter first page than was asked for, and
+        # the caller has no way to tell a short page from a short result.
+        # The hypercube path reads the rest; this one used to stop there and
+        # answer with fewer rows for the same question.
+        short = []
+        for plan in plans:
+            cube, shaped = plan.get("cube"), plan.get("shaped")
+            if not cube or not shaped:
+                continue
+            got = sum(len(page.get("qMatrix") or [])
+                      for page in cube.get("qDataPages") or [])
+            total = (cube.get("qSize") or {}).get("qcy", 0)
+            wanted = min(shaped["limit"], max(0, total - shaped["offset"]))
+            if got < wanted:
+                short.append((plan, cube, shaped, got, wanted))
+        if short:
+            requests = [{
+                "method": "GetHyperCubeData",
+                "handle": plan["handle"],
+                "params": ["/qHyperCubeDef", [{
+                    "qTop": shaped["offset"] + got, "qLeft": 0,
+                    "qHeight": wanted - got,
+                    "qWidth": len(shaped["column_names"])}]],
+            } for plan, cube, shaped, got, wanted in short]
+            try:
+                extra = self.send_requests_pipelined(requests,
+                                                     raise_on_error=False)
+            except Exception:
+                extra = [None] * len(requests)
+            for (plan, cube, _, _, _), reply in zip(short, extra):
+                if isinstance(reply, Exception) or not reply:
+                    continue
+                pages = reply.get("qDataPages") or []
+                if pages:
+                    cube["qDataPages"] = (cube.get("qDataPages") or []) + pages
 
         results = [
             self._query_reply(plan, plan.get("cube"), plan.get("shaped"))
@@ -1357,7 +1394,15 @@ class EngineQueriesMixin:
                 f"that for an aggregation over no rows; check the filters."
             )
         if not rows:
+            # Two different answers look alike here, and saying only one of
+            # them sends the caller after data that is there.
             warnings.append(
+                "No rows came back. With suppress_zero=true that is also "
+                "what a measure evaluating to 0 everywhere looks like; "
+                "otherwise the grouping fields have no values under these "
+                "filters. Ask again without suppress_zero to tell them "
+                "apart."
+                if plan.get("suppress_zero") else
                 "No rows matched. The grouping fields have no values under "
                 "these filters."
             )
@@ -1392,7 +1437,7 @@ class EngineQueriesMixin:
         # Asked for, so answered: the untouched Qlik layout, exactly as
         # engine_create_hypercube hands it over.
         if plan.get("include_raw_layout") and cube is not None:
-            reply["raw_layout"] = cube
+            reply["hypercube_data"] = cube
         # Where measures were narrowed differently from each other, say so
         # per measure: the number alone does not show which slice it came
         # from, and a KPI holding both is the point of the feature.

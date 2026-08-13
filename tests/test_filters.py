@@ -633,16 +633,36 @@ class TestConditionByExpression:
             1, "app", [{"field": "Year", "match_expression": "[Year]>2023"}])
         assert result["modifier"] == '{<[Year]={"=[Year]>2023"}>}'
 
-    def test_an_unbalanced_quote_is_refused(self):
-        result = self._engine().build_filters(
-            1, "app", [{"field": "Year", "match_expression": '[Year]>"2023'}])
-        assert result["error_category"] == "invalid_filter"
+    def test_a_condition_qlik_refuses_is_refused(self):
+        """Measured on the server: inside a set modifier Qlik reads a
+        broken condition as text and answers zero, so the condition is
+        checked on its own, where Qlik does say what is wrong with it -
+        "Sum(amount > 20" came back as "')' or ',' expected"."""
+        class _Checking(_Engine):
+            def send_request(self, method, params=None, handle=-1,
+                             timeout=None):
+                if method == "CheckExpression":
+                    if "Sum([Amount] > 20" in (params or [""])[0]:
+                        return {"qErrorMsg": "')' or ',' expected"}
+                    return {"qErrorMsg": ""}
+                return super().send_request(method, params, handle, timeout)
 
-    def test_unbalanced_braces_are_refused(self):
+        engine = _Checking(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Year",
+                        "match_expression": "Sum([Amount] > 20"}])
+        assert result["error_category"] == "invalid_expression"
+        assert "')'" in result["error"]
+
+    def test_a_brace_inside_a_string_is_not_a_broken_condition(self):
+        """Counting characters refused this one; Qlik reads it fine."""
         result = self._engine().build_filters(
             1, "app", [{"field": "Year",
-                        "match_expression": "Sum({<A={1}>ance"}])
-        assert result["error_category"] == "invalid_filter"
+                        "match_expression": '[Year] <> "}"'}])
+        assert "error" not in result
 
     def test_an_empty_condition_is_refused(self):
         result = self._engine().build_filters(
