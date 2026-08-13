@@ -1031,8 +1031,7 @@ class TestAnEmptyScopeBesideFilters:
     """The same rule wherever it is written: a scope that names nothing
     does not cancel the set the query named."""
 
-    @pytest.mark.parametrize("scope", [{}, {"ignore_selections": False},
-                                       {"bookmark": ""}])
+    @pytest.mark.parametrize("scope", [{}, {"ignore_selections": False}])
     def test_it_keeps_the_query_scope(self, scope):
         plan = _Engine()._plan_query(1, "app", dict(_query(
             metrics=[{"field": "Amount", "agg": "sum", "scope": scope,
@@ -1178,8 +1177,7 @@ class TestZeroSaysNothing:
     step - reading them as statements cancelled the query's filters."""
 
     @pytest.mark.parametrize("scope", [{"ignore_selections": 0},
-                                       {"selection_back": 0},
-                                       {"bookmark": 0}])
+                                       {"current_selection": 0}])
     def test_a_zero_keeps_the_query_filters(self, scope):
         plan = _Engine()._plan_query(1, "app", _query(
             filters=[{"field": "Region", "values": ["North"]}],
@@ -1238,3 +1236,84 @@ class TestTheCostOfAName:
         ranged = _filter_cost({"filters": [
             {"field": "OrderDate", "period": "2024"}]})
         assert ranged == 1 + RANGE_PROBE_COST
+
+
+class TestAScopeWrittenDownIsAScopeChecked:
+    """A scope naming no set is not applied, but it is still read: a key
+    misspelled and holding zero used to pass unnoticed, and the answer came
+    back over the query's set with nothing to say another was asked for."""
+
+    @pytest.mark.parametrize("scope", [{"ignore_selection": 0},
+                                       {"selection_back": -2},
+                                       {"steps_back": 0}])
+    def test_a_metric_scope_is_read(self, scope):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_part_scope_is_read(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum",
+                 "scope": {"ignore_selection": 0}},
+                {"field": "Amount", "agg": "sum"}]}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_hand_written_measure_scope_is_read(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[],
+            measures=[{"expression": "Sum([Amount])",
+                       "scope": {"bad_key": 0}}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_readable_scope_still_runs(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "scope": {"ignore_selections": True}}])])
+        assert result["queries_failed"] == 0
+
+
+class TestOneMeasureHasASize:
+    """A division writes its denominator twice - once for the guard against
+    zero - so divisions inside divisions double the text at every level.
+    Sixteen levels is a megabyte of Qlik through a shared connection."""
+
+    def test_a_doubling_metric_is_refused(self):
+        deep = {"field": "Amount", "agg": "sum"}
+        for _ in range(16):
+            deep = {"op": "divide", "of": [{"field": "Amount", "agg": "sum"},
+                                           dict(deep)]}
+        plan = _Engine()._plan_query(1, "app", _query(metrics=[deep]), 0)
+        assert plan["error_category"] == "limit_exceeded"
+        assert "denominator" in plan["hint"]
+
+    def test_an_ordinary_nesting_still_builds(self):
+        deep = {"op": "divide", "of": [
+            {"field": "Amount", "agg": "sum"},
+            {"op": "add", "of": [{"field": "Amount", "agg": "sum"},
+                                 {"field": "Amount", "agg": "count"}]}]}
+        plan = _Engine()._plan_query(1, "app", _query(metrics=[deep]), 0)
+        assert "expression" in plan["measures"][0]
+
+
+class TestThePageEndsWhereTheRowsEnd:
+    def test_the_last_page_is_not_called_incomplete(self):
+        engine = _Engine(rows=[["North", 1], ["South", 2], ["East", 3]])
+        result = engine.run_queries(1, "app", [_query(offset=2, limit=2)])
+        assert "has_more" not in result["results"][0]
+
+    def test_an_offset_past_the_end_is_not_called_incomplete(self):
+        engine = _Engine(rows=[["North", 1]])
+        result = engine.run_queries(1, "app", [_query(offset=50, limit=10)])
+        assert "has_more" not in result["results"][0]
+        assert "next_offset" not in result["results"][0]
+
+
+class TestAnEmptyNameIsAMistake:
+    @pytest.mark.parametrize("scope", [{"bookmark": ""}, {"state": "  "},
+                                       {"selection_back": 0},
+                                       {"bookmark": 0}])
+    def test_it_is_refused_rather_than_ignored(self, scope):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
