@@ -1308,6 +1308,10 @@ class TestAQuestionThatNeverArrived:
 
         class _Answering(_Engine):
             def get_field_description(self, app_handle, field):
+                return {}
+
+            def send_request(self, method, params=None, handle=-1,
+                             timeout=None):
                 raise QlikEngineError("Invalid parameters")
 
         assert _Answering()._is_temporal_field(1, "price") is False

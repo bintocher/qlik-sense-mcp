@@ -291,19 +291,33 @@ class EngineFiltersMixin:
         the truth was 1,898,591 — a plausible number, and wrong.
         """
         try:
-            description = self.get_field_description(app_handle, field)
-        except QlikEngineError as exc:
-            # Qlik answered, and the answer is that it has no such field.
-            logger.debug("No description for %r: %s", field, exc)
-            return False
-        except Exception as exc:
-            # The question never arrived. Reading that as "not a date"
-            # turns a period into a numeric range and answers a plausible
-            # wrong number - the very failure this check exists to stop.
-            raise QlikProbeUnavailable(
-                f"Qlik could not be asked whether "
-                f"{escape_qlik_field_name(field)} holds dates: {exc}"
-            ) from exc
+            description = self.get_field_description(app_handle, field) or {}
+        except Exception:
+            # The wrapper is documented not to raise; a subclass that does
+            # is telling us the same thing an empty answer does - ask
+            # again, directly.
+            description = {}
+        if not description:
+            # The wrapper answers `{}` to both "Qlik says there is no such
+            # field" and "the question never arrived", and here the
+            # difference decides whether a period stays a period. Asked
+            # again, directly, so the two can be told apart.
+            try:
+                reply = self.send_request("GetFieldDescription", [field],
+                                          handle=app_handle)
+                description = {"tags": ((reply or {}).get("qReturn")
+                                        or {}).get("qTags", [])}
+            except QlikEngineError as exc:
+                logger.debug("No description for %r: %s", field, exc)
+                return False
+            except Exception as exc:
+                # Reading silence as "not a date" turns a period into a
+                # numeric range and answers a plausible wrong number - the
+                # very failure this check exists to stop.
+                raise QlikProbeUnavailable(
+                    f"Qlik could not be asked whether "
+                    f"{escape_qlik_field_name(field)} holds dates: {exc}"
+                ) from exc
         tags = description.get("tags") or []
         return any(str(tag).lstrip("$") in ("date", "timestamp")
                    for tag in tags)
@@ -535,10 +549,19 @@ class EngineFiltersMixin:
                 f"{escape_qlik_field_name(field)}: {complaints[0]}"),
                 "error_category": "invalid_period"}
 
-        # Every candidate disagreed with the reference. The expression form
-        # is the one built from the same comparison the reference uses, so
-        # it is what goes out, with the disagreement recorded.
-        label, modifier = candidates[-1]
+        # Every candidate disagreed with the reference. The one that goes
+        # out is built from the same comparison the reference uses - but
+        # never one Qlik has already refused, even when another form only
+        # disagreed.
+        usable = [(label, modifier)
+                  for (label, modifier), value in zip(candidates, values[1:])
+                  if not _probe_complaint(value)]
+        if not usable:
+            return {"error": (
+                f"Qlik cannot read any form of a period filter on "
+                f"{escape_qlik_field_name(field)}: {complaints[0]}"),
+                "error_category": "invalid_period"}
+        label, modifier = usable[-1]
         logger.warning(
             "No filter form matched the reference count on %r (reference=%d)",
             field, reference)
