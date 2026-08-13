@@ -96,6 +96,16 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 - **One value, one writing.** A date in a query result reads as the text
   Qlik displays for it, the same as the sample values in
   `get_app_details` and the bounds from `engine_get_field_range`.
+- **A field name is always written in brackets.** A bare `Тип ставки` is
+  read by Qlik's parser as two tokens — "Garbage after expression:
+  'ставки'" — which used to refuse queries Qlik itself runs happily.
+- **Aggregating over groups, not rows.** `per` and `inner_agg` state
+  "sum per issue, then the 85th percentile across issues", which is a
+  different question from a percentile over rows and gives a different
+  number.
+- **A measure can narrow itself.** Its own `filters` override the
+  query's, so a KPI carries its numerator and its denominator in one
+  answer.
 - **Objects say which fields they use.** `get_app_sheet_objects` returns
   `fields_used`, including fields reached through master measures and the
   ones inside a filter pane's listboxes — so "what does this sheet work
