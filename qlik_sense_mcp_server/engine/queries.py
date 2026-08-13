@@ -23,6 +23,35 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _filter_cost(query: Any) -> int:
+    """How many Engine calls the filters of a query will cost.
+
+    Every filter asks Engine about its field, and every value asks whether
+    the field holds it. Counting only the values stated at the top let a
+    metric carry three hundred of its own, or an element set hide them one
+    level down, and pass a budget meant to bound exactly that.
+    """
+    if isinstance(query, list):
+        return sum(_filter_cost(item) for item in query)
+    if not isinstance(query, dict):
+        return 0
+    total = 0
+    for key, value in query.items():
+        if key == "filters" and isinstance(value, list):
+            for entry in value:
+                if not isinstance(entry, dict):
+                    continue
+                # The field itself is one call, then one per value.
+                total += 1
+                for operator in ("values", "exclude", "add", "intersect"):
+                    total += len(entry.get(operator) or [])
+                for nested in ("matching", "not_matching"):
+                    total += _filter_cost(entry.get(nested))
+        elif isinstance(value, (list, dict)):
+            total += _filter_cost(value)
+    return total
+
+
 def _as_number(value: Any) -> Optional[float]:
     """A stated bound as a number, or None when there is no bound."""
     if value is None or isinstance(value, bool):
@@ -709,12 +738,7 @@ class EngineQueriesMixin:
         expressions = sum(
             len(q.get("group_by") or q.get("dimensions") or [])
             + len(q.get("metrics") or []) + len(q.get("measures") or [])
-            # Every filter value costs its own Engine call — each one is
-            # checked against the field before the query runs — so they
-            # count against the same budget as the expressions do.
-            + sum(len(f.get("values") or [])
-                  for f in (q.get("filters") or [])
-                  if isinstance(f, dict))
+            + _filter_cost(q)
             for q in queries if isinstance(q, dict))
         if expressions > MAX_EXPRESSIONS_PER_CALL:
             return {

@@ -694,3 +694,36 @@ class TestShareOfTheTotal:
     def test_without_it_nothing_changes(self):
         plan = _Engine()._plan_query(1, "app", _query(), 0)
         assert "TOTAL" not in plan["measures"][0]["expression"]
+
+
+class TestEveryValueCountsTowardsTheBudget:
+    """Every filter asks Engine about its field, and every value asks
+    whether the field holds it. Counting only the values stated at the top
+    let a metric carry three hundred of its own."""
+
+    def test_values_inside_a_metric_filter_count(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSIONS_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "filters": [{"field": "Region", "values": [
+                          f"v{i}" for i in range(MAX_EXPRESSIONS_PER_CALL)]}]}])])
+        assert result["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_values_inside_an_element_set_count(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSIONS_PER_CALL
+
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Client", "matching": {"filters": [
+                {"field": "Region", "values": [
+                    f"v{i}" for i in range(MAX_EXPRESSIONS_PER_CALL)]}]}}])])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_query_is_well_inside_it(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North", "South"]}])])
+        assert result["queries_failed"] == 0
