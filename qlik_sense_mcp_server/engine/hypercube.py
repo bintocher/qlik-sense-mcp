@@ -559,9 +559,11 @@ class EngineHypercubeMixin:
         `qSortByExpression`, which makes the Engine evaluate the aggregate
         a second time purely for ordering.
 
-        `exclude_null_dimensions` (default True) sets `qNullSuppression`
+        `exclude_null_dimensions` (default False) sets `qNullSuppression`
         on every dimension, dropping the row whose dimension value is
-        NULL (Qlik renders it as "-"). Unattributed facts often
+        NULL (Qlik renders it as "-"). It is off by default: a fact with
+        no value for the grouping field is still a fact, and leaving it
+        out is the caller's statement to make. Unattributed facts often
         accumulate into that single row, which then wins the ranking and
         pushes out the real values — a top-10 that starts with "unknown"
         is rarely what the caller wanted.
@@ -764,6 +766,21 @@ class EngineHypercubeMixin:
                         f"together with sort_by."
                     ),
                 }
+
+            # A key meaning yes or no takes yes or no here as well: the
+            # typed query refuses the word spelled out, and both tools
+            # answer to one rule.
+            for key, value in (("exclude_null_dimensions",
+                                exclude_null_dimensions),
+                               ("suppress_zero", suppress_zero),
+                               ("include_raw_layout", include_raw_layout)):
+                if value is not None and not isinstance(value, bool):
+                    return {
+                        "error": f"{key}={value!r} is not yes or no.",
+                        "error_category": "invalid_argument",
+                        "failed_step": "plan",
+                        "hint": "true or false, not the word for it.",
+                    }
 
             # Reject max_rows over the hard cap.
             if max_rows > HARD_MAX_ROWS:

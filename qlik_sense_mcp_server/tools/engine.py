@@ -529,7 +529,8 @@ def engine_create_hypercube(
             Useful for `sort_order="asc"`, where zero-valued groups
             would otherwise fill the entire result.
         exclude_null_dimensions: Drop the row whose dimension value is
-            NULL — the one Qlik displays as `"-"`. Default True.
+            NULL — the one Qlik displays as `"-"`. Default False: such a
+            fact is still a fact, so leaving it out is yours to say.
             Facts that carry no value for the grouping field all pile
             into that single row, so it frequently holds a large total
             and wins the ranking, pushing the real values out of a

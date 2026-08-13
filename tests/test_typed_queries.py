@@ -41,6 +41,7 @@ class _Engine(QlikEngineAPI):
         self.batches = []
         self.destroyed = []
         self.pages = {}
+        self.cube_defs = []
 
     def send_requests_pipelined(self, requests, raise_on_error=True, timeout=None):
         self.batches.append([r["method"] for r in requests])
@@ -70,6 +71,8 @@ class _Engine(QlikEngineAPI):
         if method == "CreateSessionObject":
             fetch = ((params[0] or {}).get("qHyperCubeDef") or {}).get(
                 "qInitialDataFetch") or [{}]
+            self.cube_defs.append(
+                (params[0] or {}).get("qHyperCubeDef") or {})
             handle = 100 + len(self.pages)
             # Per object, not per stub: a batch holds several queries with
             # pages of their own, and one shared attribute gave them all
@@ -1401,3 +1404,30 @@ class TestYesOrNoEverywhere:
             _query(metrics=[{"field": "Amount", "agg": "sum", "total": True}]),
             exclude_null_dimensions=True)])
         assert result["queries_failed"] == 0
+
+
+class TestAKeyAcceptedIsAKeyObeyed:
+    """Checked for type and then dropped on the floor: a caller that asked
+    for the raw layout, or for zero-valued groups to go, got neither and no
+    word about it."""
+
+    def test_the_raw_layout_comes_back_when_asked_for(self):
+        result = _Engine().run_queries(1, "app", [
+            dict(_query(), include_raw_layout=True)])
+        assert "raw_layout" in result["results"][0]
+
+    def test_it_stays_out_when_not_asked_for(self):
+        result = _Engine().run_queries(1, "app", [_query()])
+        assert "raw_layout" not in result["results"][0]
+
+    def test_suppress_zero_reaches_the_cube(self):
+        engine = _Engine()
+        engine.run_queries(1, "app", [dict(_query(), suppress_zero=True)])
+        created = [b for b in engine.batches if "CreateSessionObject" in b]
+        assert created
+        assert engine.cube_defs[-1]["qSuppressZero"] is True
+
+    def test_without_it_the_cube_keeps_zeroes(self):
+        engine = _Engine()
+        engine.run_queries(1, "app", [_query()])
+        assert engine.cube_defs[-1]["qSuppressZero"] is False
