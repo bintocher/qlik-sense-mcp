@@ -992,3 +992,69 @@ class TestTheFieldCheckReachesEngine:
         result = engine.build_filters(
             1, "app", [{"field": "Region", "values": ["North"]}])
         assert "error" not in result
+
+
+class TestTheConditionNamesFieldsThatExist:
+    """Qlik answers CheckExpression with two things, and a name it does not
+    know is the second: a misspelled field is read as a value of itself, so
+    the condition scores false everywhere and the answer is empty rather
+    than wrong."""
+
+    @staticmethod
+    def _engine(bad=()):
+        class _Checking(_Engine):
+            def send_request(self, method, params=None, handle=-1,
+                             timeout=None):
+                if method == "CheckExpression":
+                    text = (params or [""])[0]
+                    names = []
+                    for name in bad:
+                        if name in text:
+                            names.append({"qFrom": text.index(name),
+                                          "qCount": len(name)})
+                    return {"qErrorMsg": "", "qBadFieldNames": names}
+                return super().send_request(method, params, handle, timeout)
+
+        engine = _Checking(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_an_unknown_field_inside_the_condition_is_refused(self):
+        result = self._engine(bad=("Amountt",)).build_filters(
+            1, "app", [{"field": "Client",
+                        "match_expression": "Sum([Amountt]) > 20"}])
+        assert result["error_category"] == "field_not_found"
+        assert "[Amountt]" in result["error"]
+
+    def test_a_condition_on_real_fields_still_works(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Client",
+                        "match_expression": "Sum([Amount]) > 20"}])
+        assert "error" not in result
+
+
+class TestTheConditionSelectsSomething:
+    """The only kind of condition that used to run unproven."""
+
+    @staticmethod
+    def _engine(matched):
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": matched, "is_numeric": True,
+             "error": None} for _ in exprs]
+        return engine
+
+    def test_a_condition_matching_nothing_is_refused(self):
+        result = self._engine(0).build_filters(
+            1, "app", [{"field": "Client",
+                        "match_expression": "Sum([Amount]) > 1000000"}])
+        assert result["error_category"] == "value_not_found"
+
+    def test_a_condition_matching_something_runs(self):
+        result = self._engine(3).build_filters(
+            1, "app", [{"field": "Client",
+                        "match_expression": "Sum([Amount]) > 20"}])
+        assert result["modifier"] == (
+            '{<[Client]={"=Sum([Amount]) > 20"}>}')

@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 MAX_NESTING = 20
 
+# How many times a short page is read on before the reply says so.
+MAX_PAGE_READS = 5
+
 # What one measure may grow to. A division writes its denominator
 # twice, so nesting them doubles the text at every level.
 MAX_EXPRESSION_CHARS = 20000
@@ -1232,7 +1235,16 @@ class EngineQueriesMixin:
             wanted = min(shaped["limit"], max(0, total - shaped["offset"]))
             if got < wanted:
                 short.append((plan, cube, shaped, got, wanted))
-        if short:
+        # One reply may itself be short, so the reading-on repeats until
+        # the page is whole or Engine stops adding rows. Whatever is still
+        # missing is said out loud rather than answered as a smaller
+        # result.
+        pending = [[plan, cube, shaped, got, wanted]
+                   for plan, cube, shaped, got, wanted in short]
+        for _ in range(MAX_PAGE_READS):
+            pending = [item for item in pending if item[3] < item[4]]
+            if not pending:
+                break
             requests = [{
                 "method": "GetHyperCubeData",
                 "handle": plan["handle"],
@@ -1240,18 +1252,32 @@ class EngineQueriesMixin:
                     "qTop": shaped["offset"] + got, "qLeft": 0,
                     "qHeight": wanted - got,
                     "qWidth": len(shaped["column_names"])}]],
-            } for plan, cube, shaped, got, wanted in short]
+            } for plan, cube, shaped, got, wanted in pending]
             try:
                 extra = self.send_requests_pipelined(requests,
                                                      raise_on_error=False)
             except Exception:
                 extra = [None] * len(requests)
-            for (plan, cube, _, _, _), reply in zip(short, extra):
+            progressed = False
+            for item, reply in zip(pending, extra):
                 if isinstance(reply, Exception) or not reply:
                     continue
                 pages = reply.get("qDataPages") or []
-                if pages:
-                    cube["qDataPages"] = (cube.get("qDataPages") or []) + pages
+                added = sum(len(page.get("qMatrix") or []) for page in pages)
+                if not added:
+                    continue
+                item[1]["qDataPages"] = (item[1].get("qDataPages") or []) + pages
+                item[3] += added
+                progressed = True
+            if not progressed:
+                break
+        for plan, cube, shaped, got, wanted in pending:
+            if got < wanted:
+                plan.setdefault("warnings", []).append(
+                    f"{got} of the {wanted} rows this page asked for came "
+                    f"back; Engine stopped sending. Ask again for the rest "
+                    f"with offset={shaped['offset'] + got}."
+                )
 
         results = [
             self._query_reply(plan, plan.get("cube"), plan.get("shaped"))
