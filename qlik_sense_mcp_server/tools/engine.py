@@ -196,6 +196,7 @@ def engine_query(
     metrics: Optional[List[Dict[str, Any]]] = None,
     measures: Optional[List[Dict[str, Any]]] = None,
     filters: Optional[List[Dict[str, Any]]] = None,
+    scope: Optional[Dict[str, Any]] = None,
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     limit: int = 100,
@@ -278,7 +279,29 @@ def engine_query(
             No `filters` key means the query's filters; `[]` means none at
             all. The reply says which measure used which slice in
             `measure_filters`.
-        filters: what to narrow to. Two shapes:
+            A metric may ignore the grouping: `"total": true` aggregates
+            across every group, which is the denominator of a share, and
+            `"total_except": ["Region"]` ignores all of the grouping but
+            those fields, which is a share within a group.
+
+            Arithmetic between aggregations is stated as an operation over
+            parts rather than written as an expression:
+
+                {"label": "share", "op": "divide", "of": [
+                   {"field": "Amount", "agg": "sum"},
+                   {"field": "Amount", "agg": "sum", "total": true}]}
+
+            `op` is divide, multiply, add or subtract. Each part is a
+            metric in its own right, with its own filters, grouping and
+            nesting. Division guards itself: a zero denominator answers
+            with no value rather than with Qlik's dash.
+
+        scope: which set the filters narrow, when it is not the data as
+            loaded. `{"ignore_selections": true}` for everything,
+            `{"bookmark": "BM01"}`, `{"state": "Compare"}`, or both
+            together for a bookmark belonging to a state.
+
+        filters: what to narrow to. Several shapes:
             {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
             {"field": "Region", "values": ["North", "South"]}
             `from` and `to` include both ends, and either may be left out
@@ -293,6 +316,26 @@ def engine_query(
             between the two is every row sitting exactly on 400.
             `{"field": "OrderDate", "period": "2024"}` is the whole year in
             one key. Filters combine with AND.
+            `{"field": "Region", "exclude": ["North"]}` keeps everything
+            else; `add` and `intersect` combine with what is selected.
+
+            `{"field": "Name", "contains": "smith"}`, `starts_with`,
+            `ends_with` match by text, case insensitively. The value is
+            compared as text, so `*` and `?` inside it are ordinary
+            characters rather than wildcards.
+
+            `{"field": "Client", "matching": {"filters": [...]}}` keeps the
+            values of a field that satisfy a condition on another field —
+            the customers who bought a product, whatever else they bought.
+            `not_matching` keeps those that do not. Both together read as
+            "these and not those": bought in 2023 and not in 2024. Inside,
+            `of_field` carries the answer from one field to another, and
+            `base` is `"all"` (the default) or `"current"`.
+
+            `{"field": "Year", "match_expression": "[Year]>2023"}` is the
+            way out for a condition none of the above states. The server
+            wraps it and lets Qlik judge it; it does not read it.
+
             A filter that selects nothing is refused with what the field
             does hold, rather than answered with a zero.
         sort_by: a metric label or a grouping field. Set it whenever
@@ -340,6 +383,7 @@ def engine_query(
             "metrics": metrics or [],
             "measures": measures or [],
             "filters": filters or [],
+            "scope": scope,
             "sort_by": sort_by,
             "sort_order": sort_order,
             "limit": limit,

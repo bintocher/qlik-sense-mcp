@@ -440,3 +440,211 @@ class TestEmptyValueInAList:
         engine = _Engine(values=("North", "South"))
         result = engine.values_modifier(1, "Region", ["North", "South"])
         assert result["modifier"] == "[Region]={'North','South'}"
+
+
+class TestSetIdentifier:
+    """Which set the filters narrow. Verified against a live app of four
+    rows worth 100: all of it ignoring selections gave 100, and the same
+    with a year filter gave 40."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_ignoring_selections(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"ignore_selections": True})
+        assert result["modifier"] == "{1<[Region]={'North'}>}"
+
+    def test_the_current_selection_stated_plainly(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"current_selection": True})
+        assert result["modifier"] == "{$<[Region]={'North'}>}"
+
+    def test_a_bookmark(self):
+        result = self._engine().build_filters(1, "app", [], scope={"bookmark": "BM01"})
+        assert result["modifier"] == "{BM01}"
+
+    def test_a_bookmark_of_a_state(self):
+        result = self._engine().build_filters(
+            1, "app", [], scope={"state": "Compare", "bookmark": "BM01"})
+        assert result["modifier"] == "{Compare::BM01}"
+
+    def test_steps_back_through_the_selection_history(self):
+        result = self._engine().build_filters(1, "app", [], scope={"selection_back": 2})
+        assert result["modifier"] == "{$2}"
+
+    def test_steps_forward(self):
+        result = self._engine().build_filters(1, "app", [], scope={"selection_forward": 1})
+        assert result["modifier"] == "{$_1}"
+
+    def test_two_scopes_at_once_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [], scope={"bookmark": "BM01", "ignore_selections": True})
+        assert result["error_category"] == "invalid_argument"
+
+    def test_a_step_count_that_is_not_a_number_is_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [], scope={"selection_back": "two"})
+        assert result["error_category"] == "invalid_argument"
+
+    def test_no_scope_is_the_plain_modifier(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert result["modifier"] == "{<[Region]={'North'}>}"
+
+
+class TestElementSets:
+    """Values of one field that satisfy a condition on another — what P()
+    and E() answer. Verified live: clients who bought in 2023 summed to 60
+    across all years, those who did not to 40, and "in 2023 but not 2024"
+    to 30."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("2023", "2024", "Shoe"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_matching_becomes_p(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert result["modifier"] == (
+            "{<[Client]=P({1<[Year]={'2023'}>} [Client])>}")
+
+    def test_not_matching_becomes_e(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "not_matching": {"filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "E({1<[Year]={'2023'}>} [Client])" in result["modifier"]
+
+    def test_both_together_subtract_one_possible_set_from_the_other(self):
+        """P(a) - P(b), not P(a) - E(b): "possible under a minus excluded
+        under b" is a different set, and only coincides on some data."""
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"filters": [{"field": "Year", "values": ["2023"]}]},
+             "not_matching": {"filters": [{"field": "Year", "values": ["2024"]}]}}])
+        assert " - " in result["modifier"]
+        assert result["modifier"].count("P(") == 2
+
+    def test_the_answer_can_be_carried_to_another_field(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Customer",
+             "matching": {"of_field": "Supplier",
+                          "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "[Customer]=P({1<[Year]={'2023'}>} [Supplier])" in result["modifier"]
+
+    def test_asking_of_the_current_selection_instead_of_everything(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"base": "current",
+                          "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "P({<[Year]" in result["modifier"]
+
+    def test_matching_without_filters_is_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Client", "matching": {}}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_a_base_that_is_neither_is_refused(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"base": "some", "filters": [{"field": "Year",
+                                                       "values": ["2023"]}]}}])
+        assert result["error_category"] == "invalid_filter"
+
+
+class TestTextMatching:
+    """Matching by text, written as a string comparison rather than as a
+    Qlik wildcard search: there is no escape for `*`, `?` or a quote
+    inside a search, so a value carrying one would become a different
+    search."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_contains(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "contains": "smith"}])
+        assert result["modifier"] == (
+            '{<[Name]={"=Index(Upper([Name]), Upper(\'smith\'))>0"}>}')
+
+    def test_starts_with(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "starts_with": "A"}])
+        assert "=1" in result["modifier"]
+
+    def test_ends_with(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "ends_with": "Ltd"}])
+        assert "Right(" in result["modifier"]
+
+    def test_a_quote_in_the_value_is_escaped(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "contains": "O'Brien"}])
+        assert "'O''Brien'" in result["modifier"]
+
+    def test_a_star_in_the_value_is_just_a_star(self):
+        """As a wildcard search this would match everything."""
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "contains": "50%*off"}])
+        assert "'50%*off'" in result["modifier"]
+
+    def test_two_text_conditions_at_once_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "contains": "a", "starts_with": "b"}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_an_empty_text_is_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Name", "contains": ""}])
+        assert result["error_category"] == "invalid_filter"
+
+
+class TestConditionByExpression:
+    """The escape hatch: a condition the vocabulary cannot state. The
+    server wraps it and lets Qlik judge it; it does not read it."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_the_condition_is_wrapped_as_a_search(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Year", "match_expression": "[Year]>2023"}])
+        assert result["modifier"] == '{<[Year]={"=[Year]>2023"}>}'
+
+    def test_an_unbalanced_quote_is_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Year", "match_expression": '[Year]>"2023'}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_unbalanced_braces_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Year",
+                        "match_expression": "Sum({<A={1}>ance"}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_an_empty_condition_is_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Year", "match_expression": "   "}])
+        assert result["error_category"] == "invalid_filter"

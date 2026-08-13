@@ -129,6 +129,68 @@ def quote_value(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+# What a filter does to the set of values, and the Qlik operator for it.
+# Measured on four rows worth 110 in total: `=` on one value gave 20,
+# `-=` on one value gave 60, and two conditions together gave 30.
+SET_OPERATORS = {
+    "values": "=",       # exactly these
+    "exclude": "-=",     # everything except these
+    "add": "+=",         # these as well as what is selected
+    "intersect": "*=",   # only those of these that are selected
+}
+
+
+# Which set the filters narrow. Without one, Qlik reads the modifier
+# against the current selection, which is what a question about "the data"
+# normally means.
+SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
+              "selection_back", "selection_forward")
+
+
+def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+    """The identifier that goes before the modifier, from a description.
+
+    Returns {"identifier": str} or an error. One key at a time, except a
+    bookmark belonging to a state, which needs both — a bookmark holds the
+    selections of every state at once, so naming the state says which part
+    of it to read.
+    """
+    named = [key for key in SCOPE_KEYS if key in scope]
+    if not named:
+        return {"identifier": ""}
+    pair = set(named) == {"state", "bookmark"}
+    if len(named) > 1 and not pair:
+        return {
+            "error": f"scope states {' and '.join(named)} at once.",
+            "error_category": "invalid_argument",
+            "hint": ("One of them, or `state` together with `bookmark` for a "
+                     "bookmark belonging to a state."),
+        }
+    if pair:
+        return {"identifier": f"{scope['state']}::{scope['bookmark']}"}
+    key = named[0]
+    value = scope[key]
+    if key == "ignore_selections":
+        return {"identifier": "1"} if value else {"identifier": ""}
+    if key == "current_selection":
+        return {"identifier": "$"} if value else {"identifier": ""}
+    if key in ("bookmark", "state"):
+        name = str(value or "").strip()
+        if not name:
+            return {"error": f"scope names an empty {key}.",
+                    "error_category": "invalid_argument"}
+        return {"identifier": name}
+    # Steps through the selection history: `$1` back, `$_1` forward. Two
+    # keys rather than one signed number, because Qlik spells them with
+    # different characters rather than different signs.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return {"error": f"scope {key}={value!r} is not a number of steps.",
+                "error_category": "invalid_argument",
+                "hint": "1 is one step, 2 is two, and so on."}
+    return {"identifier": f"${value}" if key == "selection_back"
+            else f"$_{value}"}
+
+
 class EngineFiltersMixin:
     """Build set modifiers from plain descriptions, and prove they filter."""
 
@@ -384,14 +446,18 @@ class EngineFiltersMixin:
         return {"modifier": modifier, "form": label, "matched": reference}
 
     def values_modifier(self, app_handle: int, field: str,
-                        values: List[Any]) -> Dict[str, Any]:
-        """A set modifier selecting named values of a field.
+                        values: List[Any], operator: str = "values"
+                        ) -> Dict[str, Any]:
+        """A set modifier over named values of a field.
+
+        `operator` says what the values do to the set: keep exactly these,
+        drop these, add these, or intersect with these.
 
         Each value is checked against the field before the query runs. Qlik
         answers a filter on a value that does not exist with zeros, so
         `Moscow` against a field holding `Moskva` produces a clean, wrong
         table; here it produces a refusal naming the values that are
-        missing and what the field holds instead.
+        missing.
         """
         wanted = list(values or [])
         if not wanted:
@@ -441,11 +507,120 @@ class EngineFiltersMixin:
                 ],
             }
         listed = ",".join(quote_value(v) for v in wanted)
-        return {"modifier": f"{name}={{{listed}}}", "field": field,
-                "values": wanted}
+        sign = SET_OPERATORS[operator]
+        outcome = {"modifier": f"{name}{sign}{{{listed}}}", "field": field,
+                   "values": wanted}
+        if operator != "values":
+            outcome["operator"] = operator
+        return outcome
+
+    def _element_set(self, app_handle: int, app_id: str, field: str,
+                     entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Values of a field that satisfy a condition on another field.
+
+        This is what P() and E() are for, and nothing else expresses it: a
+        set modifier takes literal values, and "the customers who bought in
+        2023" is not a literal — it is the answer to another question.
+
+        `matching` keeps the values a condition makes possible, `not_matching`
+        drops the ones it makes possible. Both together read as "these and
+        not those", which is one condition on one field rather than two
+        filters that would have to be combined by guesswork.
+
+        `of_field` carries the answer from one field to another: the
+        suppliers of a product, applied to customers. `base` says whether
+        the condition is asked of the whole model or of what is selected;
+        the whole model by default, since a question asked through this
+        server has no user sitting in front of a selection.
+        """
+        # With both stated, the second is subtracted from the first as
+        # another P: "possible under a, minus possible under b". Written as
+        # P(a) - E(b) it would read "possible under a, minus excluded under
+        # b", which is a different set and only coincides on some data.
+        both = (entry.get("matching") is not None
+                and entry.get("not_matching") is not None)
+        pieces = []
+        for key, function in (("matching", "P"),
+                              ("not_matching", "P" if both else "E")):
+            wanted = entry.get(key)
+            if wanted is None:
+                continue
+            if not isinstance(wanted, dict):
+                return {"error": (
+                    f"{key} on {escape_qlik_field_name(field)} must be an "
+                    f"object holding `filters`."),
+                    "error_category": "invalid_filter"}
+            inner_filters = wanted.get("filters")
+            if not isinstance(inner_filters, list) or not inner_filters:
+                return {"error": (
+                    f"{key} on {escape_qlik_field_name(field)} states no "
+                    f"filters."),
+                    "error_category": "invalid_filter",
+                    "hint": ('{"matching": {"filters": [{"field": "Year", '
+                             '"values": [2023]}]}}')}
+            base = str(wanted.get("base") or "all").strip().lower()
+            if base not in ("all", "current"):
+                return {"error": (
+                    f"base={wanted.get('base')!r} is neither 'all' nor "
+                    f"'current'."),
+                    "error_category": "invalid_filter"}
+            inner = self.build_filters(
+                app_handle, app_id, inner_filters,
+                scope={"ignore_selections": True} if base == "all" else None)
+            if inner.get("error"):
+                return inner
+            of_field = wanted.get("of_field") or field
+            if "[" in str(of_field) or "]" in str(of_field):
+                return {"error": (
+                    f"of_field {of_field!r} carries a bracket."),
+                    "error_category": "invalid_filter"}
+            pieces.append(
+                f"{function}({inner['modifier']} "
+                f"{escape_qlik_field_name(str(of_field))})")
+
+        if not pieces:
+            return {"error": "no element set stated",
+                    "error_category": "invalid_filter"}
+        # P(a) - P(b) rather than P(a) * E(b): the two are equivalent, and
+        # the difference is the one Qlik's own examples are written with.
+        joined = " - ".join(pieces) if len(pieces) > 1 else pieces[0]
+        # No braces around it: an element set is assigned to the field
+        # directly, `Customer = P({...} Customer)`, the way Qlik's own
+        # examples are written. Wrapped in braces it does not parse.
+        return {"modifier": f"{escape_qlik_field_name(field)}={joined}",
+                "field": field, "element_set": joined}
+
+    def pattern_modifier(self, app_handle: int, field: str, kind: str,
+                         value: Any) -> Dict[str, Any]:
+        """A modifier matching values by their text.
+
+        Not written as a Qlik wildcard search. There is no escape for `*`,
+        `?` or a quote inside one, so a value that happens to contain them
+        would silently become a different search. Written instead as a
+        comparison of strings, where the value is a quoted literal and the
+        same doubling that protects an exact value protects this one.
+        """
+        text = str(value)
+        if not text:
+            return {"error": (
+                f"{kind} on {escape_qlik_field_name(field)} states no text."),
+                "error_category": "invalid_filter"}
+        name = escape_qlik_field_name(field)
+        literal = quote_value(text)
+        upper_field = f"Upper({name})"
+        upper_value = f"Upper({literal})"
+        if kind == "contains":
+            condition = f"Index({upper_field}, {upper_value})>0"
+        elif kind == "starts_with":
+            condition = f"Index({upper_field}, {upper_value})=1"
+        else:
+            condition = (f"Upper(Right({name}, Len({literal})))={upper_value}")
+        return {"modifier": f'{name}={{"={condition}"}}', "field": field,
+                kind: text}
 
     def build_filters(self, app_handle: int, app_id: str,
-                      filters: List[Dict[str, Any]]) -> Dict[str, Any]:
+                      filters: List[Dict[str, Any]],
+                      scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Turn a list of filter descriptions into one set modifier.
 
         Every filter narrows the result further — they combine with AND,
@@ -520,8 +695,77 @@ class EngineFiltersMixin:
             has_period = any(k in entry for k in
                              ("from", "to", "period", "greater_than",
                               "less_than"))
-            values = entry.get("values")
-            if has_period and values:
+            # Which of the set operators this filter uses, if any. More
+            # than one at a time is a contradiction, not a combination.
+            # Values of this field that satisfy a condition on another —
+            # what P() and E() answer, and nothing else does.
+            if entry.get("matching") is not None or entry.get(
+                    "not_matching") is not None:
+                outcome = self._element_set(app_handle, app_id, field, entry)
+                if outcome.get("error"):
+                    return outcome
+                parts.append(outcome["modifier"])
+                applied.append({k: v for k, v in outcome.items()
+                                if k != "modifier"})
+                continue
+
+            # Matching by text rather than by exact value.
+            pattern = [key for key in ("contains", "starts_with", "ends_with")
+                       if key in entry]
+            if len(pattern) > 1:
+                return {
+                    "error": (
+                        f"Filter on {escape_qlik_field_name(field)} states "
+                        f"{' and '.join(pattern)} at once."
+                    ),
+                    "error_category": "invalid_filter",
+                }
+            if pattern:
+                outcome = self.pattern_modifier(
+                    app_handle, field, pattern[0], entry[pattern[0]])
+                if outcome.get("error"):
+                    return outcome
+                parts.append(outcome["modifier"])
+                applied.append({k: v for k, v in outcome.items()
+                                if k != "modifier"})
+                continue
+
+            # A condition the vocabulary cannot state, written by the
+            # caller. The server wraps it and asks Qlik whether it holds;
+            # it does not read it.
+            if entry.get("match_expression") is not None:
+                condition = str(entry["match_expression"]).strip()
+                if not condition:
+                    return {"error": (
+                        f"match_expression on "
+                        f"{escape_qlik_field_name(field)} is empty."),
+                        "error_category": "invalid_filter"}
+                if condition.count('"') % 2 or condition.count(
+                        "{") != condition.count("}"):
+                    return {"error": (
+                        f"match_expression {condition!r} does not close "
+                        f"its quotes or braces."),
+                        "error_category": "invalid_filter"}
+                name = escape_qlik_field_name(field)
+                parts.append(f'{name}={{"={condition}"}}')
+                applied.append({"field": field,
+                                "match_expression": condition})
+                continue
+
+            named = [key for key in SET_OPERATORS if key in entry]
+            if len(named) > 1:
+                return {
+                    "error": (
+                        f"Filter on {escape_qlik_field_name(field)} states "
+                        f"{' and '.join(named)} at once."
+                    ),
+                    "error_category": "invalid_filter",
+                    "hint": ("One operator per filter. Use two filters on "
+                             "the same field to combine them."),
+                }
+            operator = named[0] if named else "values"
+            values = entry.get(operator)
+            if has_period and values is not None:
                 return {
                     "error": (
                         f"Filter on {field!r} asks for a period and a value "
@@ -578,7 +822,8 @@ class EngineFiltersMixin:
             elif values is not None:
                 outcome = self.values_modifier(
                     app_handle, field,
-                    values if isinstance(values, list) else [values])
+                    values if isinstance(values, list) else [values],
+                    operator=operator)
             else:
                 return {
                     "error": (
@@ -592,6 +837,25 @@ class EngineFiltersMixin:
             parts.append(outcome["modifier"])
             applied.append({k: v for k, v in outcome.items() if k != "modifier"})
 
+        identifier = ""
+        if scope:
+            if not isinstance(scope, dict):
+                return {"error": f"scope must be an object, got {scope!r}.",
+                        "error_category": "invalid_argument"}
+            resolved = _set_identifier(scope)
+            if resolved.get("error"):
+                return resolved
+            identifier = resolved["identifier"]
+
         if not parts:
+            # An identifier with nothing to modify is still a set: "all the
+            # records" or "what this bookmark holds".
+            if identifier:
+                return {"modifier": "{" + identifier + "}", "applied": [],
+                        "scope": identifier}
             return {"modifier": "", "applied": []}
-        return {"modifier": "{<" + ",".join(parts) + ">}", "applied": applied}
+        modifier = "{" + identifier + "<" + ",".join(parts) + ">}"
+        outcome = {"modifier": modifier, "applied": applied}
+        if identifier:
+            outcome["scope"] = identifier
+        return outcome
