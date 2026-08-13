@@ -1574,3 +1574,24 @@ class TestACheckThatCouldNotRun:
             filters=[{"field": "OrderDate", "period": "2011"}])])
         checks = result["results"][0].get("period_check") or []
         assert checks and "could not be checked" in checks[0]["note"]
+
+
+class TestSetsCountTowardsTheCeiling:
+    """Nesting combinations doubles the sets at every level; counting only
+    the filters let one small request build hundreds of thousands of them
+    on the connection every query shares."""
+
+    def test_a_deeply_nested_combination_is_refused(self):
+        scope = {"combine": "union", "of": [{"ignore_selections": True},
+                                            {"current_selection": True}]}
+        for _ in range(8):
+            scope = {"combine": "union", "of": [dict(scope), dict(scope)]}
+        result = _Engine().run_queries(1, "app", [
+            dict(_query(), scope=scope)])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_combination_still_runs(self):
+        result = _Engine().run_queries(1, "app", [dict(_query(), scope={
+            "combine": "union", "of": [{"ignore_selections": True},
+                                       {"current_selection": True}]})])
+        assert result["queries_failed"] == 0
