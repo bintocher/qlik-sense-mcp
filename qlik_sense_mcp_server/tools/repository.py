@@ -10,6 +10,7 @@ from . import context
 from .context import mcp
 from .helpers import (
     _check,
+    _err,
     _engine_serialised,
     _ok,
     _timed,
@@ -222,6 +223,17 @@ def get_apps(
         return e
     lim = min(max(limit or DEFAULT_APPS_LIMIT, 1), MAX_APPS_LIMIT)
     off = max(offset or 0, 0)
+    # An unrecognised value used to answer exactly like the correct one:
+    # `published="all"` fell through to "no filter", which is what "both"
+    # means, so a typo looked like it worked.
+    if published is not None and str(published).strip().lower() not in (
+            "true", "1", "yes", "y", "false", "0", "no", "n", "both"):
+        return _err(
+            f"published={published!r} is not one of the values this filter "
+            f"takes.",
+            error_category="invalid_argument",
+            allowed_values=["true", "false", "both"],
+        )
     return _ok(context.repo_api.get_comprehensive_apps(lim, off, name, stream,
                                                _to_tribool(published)))
 
