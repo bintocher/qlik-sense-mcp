@@ -227,12 +227,35 @@ def truncate_text(text: str, max_length: int = 100, suffix: str = "...") -> str:
 
 
 def escape_qlik_field_name(field_name: str) -> str:
-    """Escape field name for Qlik expressions when it contains special characters."""
+    """A field name as it is written into a Qlik expression: in brackets.
+
+    Always in brackets, never conditionally. A bare name is read as an
+    expression, so `Тип ставки` comes back from Qlik as "Garbage after
+    expression: 'ставки'" while `[Тип ставки]` is read as the field it is.
+    Wrapping only "when it looks like it needs it" is the same guess with
+    a smaller blast radius.
+
+    A name that arrives already bracketed is left alone — the caller wrote
+    what it meant, and the server has nothing to add.
+    """
     if not field_name:
         return ""
-    if " " in field_name or any(char in field_name for char in "()[]{}+-*/=<>!@#$%^&"):
-        return f"[{field_name}]"
-    return field_name
+    name = field_name.strip()
+    if name.startswith("[") and name.endswith("]") and len(name) > 1:
+        return name
+    return f"[{name}]"
+
+
+def bare_field_name(field_name: str) -> str:
+    """The name without the brackets a caller may have written around it.
+
+    For comparing against the model's own field list, and for saying which
+    name was not found.
+    """
+    name = (field_name or "").strip()
+    if name.startswith("[") and name.endswith("]") and len(name) > 1:
+        return name[1:-1]
+    return name
 
 
 def generate_xrfkey() -> str:

@@ -15,6 +15,8 @@ plausible number rather than an error.
 import logging
 import time
 import uuid
+
+from ..utils import bare_field_name, escape_qlik_field_name
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -98,12 +100,18 @@ class EngineQueriesMixin:
                 return {"id": query_id, "error": (
                     f"Query {query_id!r} lists a grouping field with no name."),
                     "error_category": "invalid_argument"}
-            if any(ch in field.strip("[]") for ch in _UNSAFE_IN_FIELD_NAME):
+            if any(ch in bare_field_name(field) for ch in _UNSAFE_IN_FIELD_NAME):
                 return {"id": query_id, "error": (
-                    f"Grouping field {field!r} carries a bracket, which "
-                    f"cannot be written into an expression unambiguously."),
+                    f"Grouping field {escape_qlik_field_name(field)} carries a "
+                    f"bracket, which cannot be written into an expression "
+                    f"unambiguously."),
                     "error_category": "invalid_argument"}
-            dimensions.append({"field": field})
+            # Bracketed once, here. The text of an expression is the key by
+            # which Engine's verdict finds its way back to the query, and it
+            # is built in two places independently — the batch collects it
+            # for checking, the check builds it again. Wrap in one of them
+            # and the keys drift apart, silently.
+            dimensions.append({"field": escape_qlik_field_name(field)})
 
         filters = query.get("filters") or []
         built = self.build_filters(app_handle, app_id, filters)
@@ -131,6 +139,7 @@ class EngineQueriesMixin:
             "modifier": modifier,
             "filters_applied": built.get("applied", []),
             "limit": query.get("limit", DEFAULT_QUERY_LIMIT),
+            "exclude_null_dimensions": query.get("exclude_null_dimensions", False),
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
@@ -162,21 +171,22 @@ class EngineQueriesMixin:
                     f"writes."),
                     "error_category": "invalid_argument",
                     "allowed_values": sorted(AGGREGATIONS)}
-            field = str(metric.get("field") or "").strip().strip("[]")
+            field = bare_field_name(str(metric.get("field") or ""))
             if not field:
                 return [], {"id": query_id, "error": (
                     f"Metric {metric!r} names no field."),
                     "error_category": "invalid_argument"}
             if any(ch in field for ch in _UNSAFE_IN_FIELD_NAME):
                 return [], {"id": query_id, "error": (
-                    f"Field name {field!r} carries a bracket, which cannot be "
+                    f"Field name [{field}] carries a bracket, which cannot be "
                     f"written into an expression unambiguously."),
                     "error_category": "invalid_argument",
                     "hint": ("A metric names one field. For an expression, "
                              "use `measures`.")}
             expression = AGGREGATIONS[aggregation].format(
                 modifier=prefix.rstrip() if prefix else "",
-                field=f"[{field}]").replace("(  ", "(").replace("( ", "(")
+                field=escape_qlik_field_name(field)).replace(
+                    "(  ", "(").replace("( ", "(")
             measures.append({
                 "expression": expression,
                 "label": str(metric.get("label") or f"{aggregation}_{field}"),
@@ -558,9 +568,25 @@ class EngineQueriesMixin:
                     "hint": (f"Pass an integer between 1 and "
                              f"{self.HARD_MAX_ROWS}, or omit it for "
                              f"{DEFAULT_QUERY_LIMIT}.")}
-        limit = min(limit, self.HARD_MAX_ROWS)
+        if limit > self.HARD_MAX_ROWS:
+            return {"error": (
+                f"limit={limit} is above the ceiling of "
+                f"{self.HARD_MAX_ROWS} rows."),
+                "error_category": "limit_exceeded",
+                "hint": (f"Ask for at most {self.HARD_MAX_ROWS}, or narrow "
+                         f"the query with filters.")}
         if n_cols and n_cols * limit > self.HARD_MAX_CELLS:
-            limit = max(1, self.HARD_MAX_CELLS // n_cols)
+            # Refused rather than reduced: a limit quietly cut to fit
+            # returns fewer rows than were asked for, and nothing in the
+            # reply says which of the two happened.
+            fits = max(1, self.HARD_MAX_CELLS // n_cols)
+            return {"error": (
+                f"{n_cols} columns times {limit} rows is "
+                f"{n_cols * limit} cells, above Qlik's ceiling of "
+                f"{self.HARD_MAX_CELLS} per page."),
+                "error_category": "cell_cap_exceeded",
+                "hint": (f"At {n_cols} columns the most that fits is "
+                         f"limit={fits}. Fewer measures raise it.")}
 
         sort_index = None
         direction = None
@@ -592,14 +618,23 @@ class EngineQueriesMixin:
                     "qSortByNumeric": direction, "qSortByAscii": direction,
                     "qSortByExpression": 0, "qExpression": ""}
 
-        offset = max(0, int(plan.get("offset") or 0))
+        offset = plan.get("offset")
+        if offset is None:
+            offset = 0
+        if (not isinstance(offset, int) or isinstance(offset, bool)
+                or offset < 0):
+            return {"error": f"offset={offset!r} is not a row number.",
+                    "error_category": "invalid_argument",
+                    "hint": "Pass 0 or a positive integer, or omit it."}
         return {
             "object": {
                 "qInfo": {"qId": f"query-{uuid.uuid4().hex[:12]}",
                           "qType": "HyperCube"},
                 "qHyperCubeDef": self._hypercube_def(
                     dimensions, measures, offset, limit, order,
-                    suppress_zero=False, exclude_null_dimensions=True),
+                    suppress_zero=False,
+                    exclude_null_dimensions=bool(
+                        plan.get("exclude_null_dimensions"))),
             },
             "column_names": column_names,
             "n_dims": n_dims,

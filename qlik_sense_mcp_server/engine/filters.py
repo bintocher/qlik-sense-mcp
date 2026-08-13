@@ -27,6 +27,8 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..utils import bare_field_name, escape_qlik_field_name
+
 logger = logging.getLogger(__name__)
 
 # Day zero of Qlik's date serial numbers.
@@ -208,7 +210,7 @@ class EngineFiltersMixin:
                 "error_category": "invalid_filter",
                 "accepted_forms": list(BOUND_FORMS) + ["400", "400.5"],
             }
-        name = f"[{field}]"
+        name = escape_qlik_field_name(field)
         parts = []
         if low is not None:
             parts.append(f"{'>' if low_exclusive else '>='}{_plain_number(low)}")
@@ -262,7 +264,15 @@ class EngineFiltersMixin:
                 "accepted_forms": list(BOUND_FORMS),
             }
         if high < low:
-            low, high = high, low
+            return {
+                "error": (
+                    f"Period on {escape_qlik_field_name(field)} starts at "
+                    f"{low.isoformat()} and ends at {high.isoformat()}, which "
+                    f"is earlier."
+                ),
+                "error_category": "invalid_period",
+                "hint": "Swap `from` and `to` if that is what was meant.",
+            }
 
         # The upper bound is exclusive at the next day. A date field that
         # carries a time of day holds 31.12.2024 23:59 as a value larger
@@ -290,7 +300,7 @@ class EngineFiltersMixin:
     def _period_forms(self, field: str, serial_from: int,
                       serial_to: int) -> List[Tuple[str, str]]:
         """Candidate modifiers for one period, cheapest first."""
-        name = f"[{field}]"
+        name = escape_qlik_field_name(field)
         return [
             ("numeric", f'{name}={{">={serial_from}<{serial_to}"}}'),
             ("expression",
@@ -306,7 +316,7 @@ class EngineFiltersMixin:
         candidate is accepted only when it counts the same values. Both
         counts go out in one pipelined batch.
         """
-        name = f"[{field}]"
+        name = escape_qlik_field_name(field)
         remembered = self._remembered_form(app_id, field)
         candidates = self._period_forms(field, serial_from, serial_to)
         if remembered:
@@ -382,13 +392,29 @@ class EngineFiltersMixin:
         table; here it produces a refusal naming the values that are
         missing and what the field holds instead.
         """
-        wanted = [v for v in (values or []) if v is not None and str(v) != ""]
+        wanted = list(values or [])
         if not wanted:
             return {
-                "error": f"Filter on {field!r} lists no values.",
+                "error": (
+                    f"Filter on {escape_qlik_field_name(field)} lists no "
+                    f"values."
+                ),
                 "error_category": "invalid_filter",
             }
-        name = f"[{field}]"
+        empty = [position for position, value in enumerate(wanted)
+                 if value is None or str(value) == ""]
+        if empty:
+            return {
+                "error": (
+                    f"Filter on {escape_qlik_field_name(field)} has an empty "
+                    f"value at position {empty[0]}."
+                ),
+                "error_category": "invalid_filter",
+                "hint": ("Every value is matched against the field; an empty "
+                         "one matches nothing and would narrow the result to "
+                         "nothing."),
+            }
+        name = escape_qlik_field_name(field)
         probes = [
             f"=Count({{<{name}={{{quote_value(v)}}}>}} DISTINCT {name})"
             for v in wanted
@@ -401,47 +427,21 @@ class EngineFiltersMixin:
         if missing:
             return {
                 "error": (
-                    f"Field {field!r} holds none of these values: "
+                    f"Field {escape_qlik_field_name(field)} holds none of "
+                    f"these values: "
                     + ", ".join(repr(v) for v in missing)
                 ),
                 "error_category": "value_not_found",
                 "unknown_values": missing,
-                "did_you_mean": self._nearby_values(app_handle, field, missing),
                 "next_actions": [
-                    f"read the values with get_app_field on {field!r}",
+                    f"read the values with get_app_field on "
+                    f"{escape_qlik_field_name(field)}",
                     "copy a value exactly as Qlik stores it",
                 ],
             }
         listed = ",".join(quote_value(v) for v in wanted)
         return {"modifier": f"{name}={{{listed}}}", "field": field,
                 "values": wanted}
-
-    def _nearby_values(self, app_handle: int, field: str,
-                       missing: List[Any]) -> Dict[str, List[str]]:
-        """What the field holds that resembles a value it does not have.
-
-        Qlik's own search decides the resemblance — it matches a prefix,
-        case-insensitively, which is how `Moscow` finds `Moskva`. One search
-        per missing value and no more: measured on a field with 295k values,
-        each search costs about two and a half seconds, and three retries
-        per value turned a refusal into a seven-second wait.
-        """
-        suggestions: Dict[str, List[str]] = {}
-        for value in missing[:2]:
-            text = str(value)
-            probe = text[:3]
-            if not probe:
-                continue
-            try:
-                found = self.search_app(app_handle, probe, fields=[field],
-                                        max_fields=1, max_values=5)
-            except Exception as exc:
-                logger.debug("Value suggestion search failed: %s", exc)
-                break
-            matches = found.get("matches") or []
-            if matches and matches[0].get("values"):
-                suggestions[text] = matches[0]["values"]
-        return suggestions
 
     def build_filters(self, app_handle: int, app_id: str,
                       filters: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -462,7 +462,7 @@ class EngineFiltersMixin:
                              '{"field": "Region", "values": ["North"]} for '
                              'named values.'),
                 }
-            field = str(entry.get("field") or "").strip().strip("[]")
+            field = bare_field_name(str(entry.get("field") or ""))
             if not field:
                 return {
                     "error": f"Filter {entry!r} names no field.",
@@ -475,10 +475,27 @@ class EngineFiltersMixin:
                 # than sent as a broken modifier Qlik would quietly drop.
                 return {
                     "error": (
-                        f"Field name {field!r} carries a bracket, which "
+                        f"Field name [{field}] carries a bracket, which "
                         f"cannot be written into a filter unambiguously."
                     ),
                     "error_category": "invalid_filter",
+                }
+            # Does the app have this field at all? Asked before the bounds
+            # are read, because a missing field has no tags, reads as "not
+            # a date", and sends perfectly good dates into a numeric parse
+            # that then blames the bounds: "2026-08-01 is neither a date
+            # nor a number" for a filter whose only fault is the name.
+            if not self.get_field_description(app_handle, field):
+                return {
+                    "error": (
+                        f"Filter names a field this app does not have: "
+                        f"{escape_qlik_field_name(field)}"
+                    ),
+                    "error_category": "field_not_found",
+                    "next_actions": [
+                        "read the field names with get_app_details",
+                        "field names are case-sensitive; copy them exactly",
+                    ],
                 }
             has_period = any(k in entry for k in
                              ("from", "to", "period", "greater_than",
@@ -499,6 +516,26 @@ class EngineFiltersMixin:
                 # name; `from` and `to` include it. "More than 400" and
                 # "from 400" are different questions, and the rows sitting
                 # exactly on the bound are the difference.
+                if "from" in entry and "greater_than" in entry:
+                    return {
+                        "error": (
+                            f"Filter on {escape_qlik_field_name(field)} states "
+                            f"both `from` and `greater_than`."
+                        ),
+                        "error_category": "invalid_filter",
+                        "hint": ("`from` includes the bound, `greater_than` "
+                                 "excludes it. State one."),
+                    }
+                if "to" in entry and "less_than" in entry:
+                    return {
+                        "error": (
+                            f"Filter on {escape_qlik_field_name(field)} states "
+                            f"both `to` and `less_than`."
+                        ),
+                        "error_category": "invalid_filter",
+                        "hint": ("`to` includes the bound, `less_than` "
+                                 "excludes it. State one."),
+                    }
                 low = entry.get("from", entry.get("greater_than", period))
                 high = entry.get("to", entry.get("less_than", period))
                 low_exclusive = ("greater_than" in entry

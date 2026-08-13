@@ -150,11 +150,12 @@ class TestPeriodForm:
         assert result["error_category"] == "invalid_period"
         assert result["accepted_forms"] == list(BOUND_FORMS)
 
-    def test_reversed_bounds_are_read_in_the_order_meant(self):
+    def test_reversed_bounds_are_refused_rather_than_swapped(self):
+        """Which of the two the caller meant is the caller's to say."""
         engine = _Engine()
         result = engine.period_modifier(1, "app", "F", "2011-12-31", "2011-01-01")
-        assert result["from"] == "2011-01-01"
-        assert result["to"] == "2011-12-31"
+        assert result["error_category"] == "invalid_period"
+        assert "earlier" in result["error"]
 
     def test_a_single_day_needs_only_one_bound(self):
         engine = _Engine(days=(40544,))
@@ -201,10 +202,14 @@ class TestValueFilters:
         assert result["error_category"] == "value_not_found"
         assert result["unknown_values"] == ["Moscow"]
 
-    def test_the_refusal_says_what_the_field_holds_instead(self):
+    def test_the_refusal_names_the_field_in_brackets(self):
+        """No suggestion: the model can list the values itself, and the
+        search behind the old one cost about 2.5 seconds per refusal."""
         engine = _Engine(values=("Moskva",))
         result = engine.values_modifier(1, "Region", ["Moscow"])
-        assert result["did_you_mean"]["Moscow"] == ["Moskva"]
+        assert "[Region]" in result["error"]
+        assert "did_you_mean" not in result
+        assert any("get_app_field" in a for a in result["next_actions"])
 
     def test_an_empty_list_is_refused_rather_than_ignored(self):
         result = _Engine().values_modifier(1, "Region", [])
@@ -393,3 +398,45 @@ class TestStrictBounds:
         result = self._counting().build_filters(
             1, "app", [{"field": "price", "greater_than": 400}])
         assert result["applied"][0]["from_excluded"] is True
+
+
+class TestContradictoryBounds:
+    """Two bounds for the same end contradict each other; picking one
+    silently hides half of what was asked for."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_from_and_greater_than_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "from": 400, "greater_than": 400}])
+        assert result["error_category"] == "invalid_filter"
+        assert "greater_than" in result["error"]
+
+    def test_to_and_less_than_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "to": 500, "less_than": 500}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_one_of_each_is_fine(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "from": 400, "less_than": 500}])
+        assert result["modifier"] == '{<[price]={">=400<500"}>}'
+
+
+class TestEmptyValueInAList:
+    def test_an_empty_value_is_named_rather_than_dropped(self):
+        engine = _Engine(values=("North", "South"))
+        result = engine.values_modifier(1, "Region", ["North", "", "South"])
+        assert result["error_category"] == "invalid_filter"
+        assert "position 1" in result["error"]
+
+    def test_a_list_of_real_values_still_works(self):
+        engine = _Engine(values=("North", "South"))
+        result = engine.values_modifier(1, "Region", ["North", "South"])
+        assert result["modifier"] == "[Region]={'North','South'}"

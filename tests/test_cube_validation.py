@@ -120,9 +120,35 @@ class TestUnknownDimension:
         assert result["error_category"] == "field_not_found"
         assert result["unknown_fields"] == ["Regionn"]
 
-    def test_a_near_miss_is_suggested(self):
+    def test_a_name_with_a_space_reaches_qlik_in_brackets(self):
+        """Bare, Qlik reads it as two tokens: "Garbage after expression".
+
+        The wrapping happens where the plan is built, so what the check
+        sees is what the cube will run.
+        """
+        from tests.test_hypercube import _PagingEngine
+
+        engine = _PagingEngine(total_rows=1, first_page=1)
+        result = engine.create_hypercube(
+            1, dimensions=[{"field": "Тип ставки"}],
+            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert result["dimensions"][0]["field"] == "[Тип ставки]"
+
+    def test_an_expression_dimension_is_left_alone(self):
+        from tests.test_hypercube import _PagingEngine
+
+        engine = _PagingEngine(total_rows=1, first_page=1)
+        result = engine.create_hypercube(
+            1, dimensions=[{"field": "=Year(OrderDate)"}],
+            measures=[{"expression": "Sum(Sales)"}], max_rows=5)
+        assert result["dimensions"][0]["field"] == "=Year(OrderDate)"
+
+    def test_no_spelling_is_suggested(self):
+        """The model reads the field list itself; a guess from string
+        similarity is not a fact about the app."""
         result = _Engine()._validate_cube_inputs(1, _dims("Regionn"), [])
-        assert result["did_you_mean"]["Regionn"] == ["Region"]
+        assert "did_you_mean" not in result
+        assert any("get_app_details" in a for a in result["next_actions"])
 
     def test_known_fields_pass(self):
         result = _Engine()._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Sales)"))
@@ -159,9 +185,10 @@ class TestUnknownNamesInMeasures:
         assert result["error_category"] == "field_not_found"
         assert result["unknown_fields"] == ["Salez"]
 
-    def test_the_refusal_suggests_the_real_name(self):
+    def test_the_refusal_names_the_field_in_brackets(self):
         result = _Engine()._validate_cube_inputs(1, _dims("Region"), _measures("Sum(Salez)"))
-        assert result["did_you_mean"]["Salez"] == ["Sales"]
+        assert "[Salez]" in result["error"]
+        assert "did_you_mean" not in result
 
     def test_a_variable_expansion_is_resolved_before_checking(self):
         """`$(vTarget)` is Qlik's to expand; the name inside is not a field."""
@@ -199,41 +226,6 @@ class TestEmptyMeasureDetection:
 
     def test_no_rows_means_nothing_to_say(self):
         assert QlikEngineAPI._measure_columns_are_empty([], 1, self.COLUMNS) == []
-
-
-class TestSuggestions:
-    """The wrong case is the most common way to miss a field name.
-
-    Qlik field names are case-sensitive, so `REGION_NAME` is a genuine
-    miss — but answering it with no suggestion at all leaves the caller
-    with nothing to act on, when the field is right there.
-    """
-
-    def test_a_different_case_is_suggested(self):
-        engine = _Engine(known=("region_name", "region_code"))
-        result = engine._validate_cube_inputs(1, _dims("REGION_NAME"), [])
-        assert result["did_you_mean"]["REGION_NAME"][0] == "region_name"
-
-    def test_the_suggestion_keeps_the_real_spelling(self):
-        engine = _Engine(known=("OrderDate",))
-        result = engine._validate_cube_inputs(1, _dims("orderdate"), [])
-        assert result["did_you_mean"]["orderdate"] == ["OrderDate"]
-
-    def test_a_join_key_is_suggested_once(self):
-        """The same field in two tables came back three times in the list."""
-        class _Duplicated(_Engine):
-            def get_fields(self, app_handle):
-                return {"fields": [{"field_name": "region_code"},
-                                   {"field_name": "region_code"},
-                                   {"field_name": "region_name"}]}
-
-        result = _Duplicated()._validate_cube_inputs(1, _dims("regioncode"), [])
-        assert result["did_you_mean"]["regioncode"].count("region_code") == 1
-
-    def test_nothing_similar_means_no_key_at_all(self):
-        engine = _Engine(known=("Region",))
-        result = engine._validate_cube_inputs(1, _dims("zzzzzz"), [])
-        assert "zzzzzz" not in result.get("did_you_mean", {})
 
 
 class TestDimensionShape:
@@ -277,65 +269,54 @@ class TestDimensionShape:
 
 
 class TestSetModifierFields:
-    """What can honestly be said about a hand-written set modifier.
+    """What can be said about a hand-written set modifier: nothing.
 
-    Engine lists the modifier fields it recognised and says nothing about
-    the ones it did not, so a modifier naming two fields where only one
-    exists comes back looking sound. Naming the survivors is therefore the
-    limit of what this check can claim — a filter that is verified end to
-    end is one stated as `filters`, where the server writes the names and
-    proves each one selects something.
+    Measured on a live Engine, `GetFieldsFromExpression` answers with every
+    field of the expression rather than the ones a modifier filters on —
+    `Sum([Amount])` comes back as `['Amount']`. So no call distinguishes a
+    filter field from an aggregated one, and the warning that used to claim
+    the difference fired on every measure that named an existing field.
+
+    A filter that is checked end to end is one stated as `filters`, where
+    the server writes the names and proves each one selects something.
     """
 
-    def test_the_fields_a_modifier_filters_on_are_named(self):
+    def test_a_modifier_on_a_known_field_passes_quietly(self):
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
-        assert any("'Category'" in w for w in result["warnings"])
+        assert result == {"warnings": []}
 
-    def test_the_warning_says_a_missing_name_would_be_dropped(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
-        assert any("dropped by Qlik" in w for w in result["warnings"])
-
-    def test_it_points_at_the_filter_that_is_checked_end_to_end(self):
-        result = _Engine()._validate_cube_inputs(
-            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
-        assert any("`filters`" in w for w in result["warnings"])
-
-    def test_a_measure_with_no_modifier_says_nothing(self):
+    def test_a_plain_measure_passes_quietly(self):
         result = _Engine()._validate_cube_inputs(
             1, _dims("Region"), _measures("Sum(Sales)"))
-        assert result["warnings"] == []
+        assert result == {"warnings": []}
 
-    def test_a_bracketed_name_with_a_space_is_read_by_engine(self):
+    def test_no_claim_is_made_about_the_modifier(self):
+        """The old warning fired on every measure with a known field."""
+        result = _Engine()._validate_cube_inputs(
+            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
+        assert not any("Set analysis" in w for w in result["warnings"])
+
+    def test_a_bracketed_name_with_a_space_is_accepted(self):
         engine = _Engine(known=("Region", "Sales", "Order Date"))
         result = engine._validate_cube_inputs(
             1, _dims("Region"), _measures('Sum({<[Order Date]={">=1<2"}>} Sales)'))
         assert "error" not in result
-        assert any("Order Date" in w for w in result["warnings"])
 
-    def test_engine_decides_what_is_a_modifier_not_this_code(self):
-        """Every expression is asked about, whatever its text looks like.
-
-        Deciding which ones carry a modifier by reading them would be this
-        server guessing at Qlik syntax — the guess missed `{$<...>}` and
-        `{1<...>}` entirely.
-        """
+    def test_engine_is_not_asked_about_modifier_fields_any_more(self):
+        """The call cannot answer the question, so it is not made."""
         asked = []
 
         class _Recording(_Engine):
             def send_requests_pipelined(self, requests, raise_on_error=True,
                                         timeout=None):
-                if requests[0]["method"] == "GetFieldsFromExpression":
-                    asked.extend(r["params"][0] for r in requests)
+                asked.append(requests[0]["method"])
                 return super().send_requests_pipelined(
                     requests, raise_on_error, timeout)
 
         _Recording()._validate_cube_inputs(
-            1, _dims("Region"),
-            _measures("Sum(Sales)", "Sum({$<Category={'Books'}>} Sales)"))
-        assert "Sum(Sales)" in asked
-        assert "Sum({$<Category={'Books'}>} Sales)" in asked
+            1, _dims("Region"), _measures("Sum({<Category={'Books'}>} Sales)"))
+        assert "GetFieldsFromExpression" not in asked
 
 
 class TestExpressionSyntax:
