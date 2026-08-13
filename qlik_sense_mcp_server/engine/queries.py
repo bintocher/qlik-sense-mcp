@@ -23,6 +23,17 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _scope_says_something(built: Dict[str, Any]) -> bool:
+    """Whether a built slice states anything at all.
+
+    `{}` names no set, and neither does every key set to false. Reading
+    the presence of the key rather than its content made such a scope
+    throw away the filters inherited from the query, and the answer came
+    back as a plausible number over every row.
+    """
+    return bool(built.get("modifier")) or bool(built.get("applied"))
+
+
 def _filter_cost(query: Any) -> int:
     """How many Engine calls the filters of a query will cost.
 
@@ -44,7 +55,9 @@ def _filter_cost(query: Any) -> int:
                 # The field itself is one call, then one per value.
                 total += 1
                 for operator in ("values", "exclude", "add", "intersect"):
-                    total += len(entry.get(operator) or [])
+                    stated = entry.get(operator)
+                    total += (len(stated) if isinstance(stated, (list, tuple))
+                              else (1 if stated is not None else 0))
                 for nested in ("matching", "not_matching"):
                     total += _filter_cost(entry.get(nested))
         elif isinstance(value, (list, dict)):
@@ -305,7 +318,8 @@ class EngineQueriesMixin:
         return "", None
 
     @staticmethod
-    def _write_operation(metric, modifier, query_id, slice_for=None):
+    def _write_operation(metric, modifier, query_id, slice_for=None,
+                         inherited_scope=None):
         """One arithmetic expression over two or more aggregations.
 
         Stated as an operator and its parts, not as text: `Sum(A)/Count(B)`
@@ -341,22 +355,25 @@ class EngineQueriesMixin:
             own = modifier
             own_applied = None
             own_scope = None
-            if part.get("scope") is not None and part.get("filters") is None:
-                built = slice_for([], part.get("scope"))
+            stated_scope = (part.get("scope") if part.get("scope") is not None
+                            else inherited_scope)
+            if stated_scope is not None and part.get("filters") is None:
+                built = slice_for([], stated_scope)
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
                     return {}, failed
-                own = built.get("modifier", "")
-                own_applied = built.get("applied", [])
-                own_scope = built.get("scope")
+                if _scope_says_something(built):
+                    own = built.get("modifier", "")
+                    own_applied = built.get("applied", [])
+                    own_scope = built.get("scope")
             if "filters" in part and part["filters"] is not None:
                 if slice_for is None or not isinstance(part["filters"], list):
                     return {}, {"id": query_id, "error": (
                         f"Part filters={part.get('filters')!r} is not a "
                         f"list."),
                         "error_category": "invalid_argument"}
-                built = slice_for(part["filters"], part.get("scope"))
+                built = slice_for(part["filters"], stated_scope)
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
@@ -365,10 +382,13 @@ class EngineQueriesMixin:
                 own_applied = built.get("applied", [])
                 own_scope = built.get("scope")
             one, failure = EngineQueriesMixin._write_metric(
-                part, own, query_id, slice_for)
+                part, own, query_id, slice_for, inherited_scope=stated_scope)
             if failure:
                 return {}, failure
-            written.append(one["expression"])
+            written.append(
+                f"({one['expression']})"
+                if (part.get("op") is not None or part.get("of") is not None)
+                else one["expression"])
             if own_applied is not None or own_scope is not None:
                 part_filters.append({
                     "position": position,
@@ -402,7 +422,8 @@ class EngineQueriesMixin:
         return written_metric, None
 
     @staticmethod
-    def _write_metric(metric, modifier, query_id, slice_for=None):
+    def _write_metric(metric, modifier, query_id, slice_for=None,
+                      inherited_scope=None):
         """Turn one metric into a Qlik expression.
 
         Two shapes. Flat is an aggregation over rows. Nested is an
@@ -424,7 +445,9 @@ class EngineQueriesMixin:
         # its own grouping, its own nesting.
         if metric.get("op") is not None or metric.get("of") is not None:
             return EngineQueriesMixin._write_operation(
-                metric, modifier, query_id, slice_for)
+                metric, modifier, query_id, slice_for,
+                inherited_scope=(metric.get("scope") if metric.get("scope")
+                                 is not None else inherited_scope))
 
         prefix = (modifier + " ") if modifier else ""
         aggregation = str(metric.get("agg") or "sum").strip().lower()
@@ -576,9 +599,10 @@ class EngineQueriesMixin:
                     failed = dict(built)
                     failed["id"] = query_id
                     return [], failed
-                own = built.get("modifier", "")
-                own_applied = built.get("applied", [])
-                own_scope = built.get("scope")
+                if _scope_says_something(built):
+                    own = built.get("modifier", "")
+                    own_applied = built.get("applied", [])
+                    own_scope = built.get("scope")
             if "filters" in metric and metric["filters"] is not None:
                 if not isinstance(metric["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -600,7 +624,8 @@ class EngineQueriesMixin:
                 own_applied = built.get("applied", [])
                 own_scope = built.get("scope")
             written, failure = EngineQueriesMixin._write_metric(
-                metric, own, query_id, slice_for)
+                metric, own, query_id, slice_for,
+                inherited_scope=metric.get("scope"))
             if failure:
                 return [], failure
             if own_applied is not None:
@@ -634,9 +659,10 @@ class EngineQueriesMixin:
                     failed = dict(built)
                     failed["id"] = query_id
                     return [], failed
-                own = built.get("modifier", "")
-                own_applied = built.get("applied", [])
-                own_scope = built.get("scope")
+                if _scope_says_something(built):
+                    own = built.get("modifier", "")
+                    own_applied = built.get("applied", [])
+                    own_scope = built.get("scope")
             if "filters" in measure and measure["filters"] is not None:
                 if slice_for is None or not isinstance(measure["filters"], list):
                     return [], {"id": query_id, "error": (

@@ -911,3 +911,88 @@ class TestThePartIsNamedByItsOwnPosition:
                 {"field": "Amount", "agg": "sum"}]}])])
         checks = result["results"][0].get("period_check") or []
         assert [c["field"] for c in checks] == ["OrderDate"]
+
+
+class TestAScopeThatNamesNothing:
+    """`{}` names no set, and neither does every key left false. Reading
+    the presence of the key rather than its content threw away the filters
+    the query had already stated."""
+
+    @pytest.mark.parametrize("scope", [{}, {"ignore_selections": False},
+                                       {"bookmark": None}])
+    def test_an_empty_scope_keeps_the_query_filters(self, scope):
+        plan = _Engine()._plan_query(1, "app", _query(
+            filters=[{"field": "Region", "values": ["North"]}],
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum({<[Region]={'North'}>} [Amount])")
+
+    def test_a_scope_that_names_something_still_replaces_them(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            filters=[{"field": "Region", "values": ["North"]}],
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "scope": {"ignore_selections": True}}]), 0)
+        assert plan["measures"][0]["expression"] == "Sum({1} [Amount])"
+
+
+class TestTheScopeReachesThePartsOfAnOperation:
+    """A part that adds a filter of its own used to fall back to the
+    query's set, so the numerator and the denominator of one ratio were
+    counted over different sets."""
+
+    def test_the_scope_of_a_metric_reaches_its_parts(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide",
+                      "scope": {"ignore_selections": True}, "of": [
+                          {"field": "Amount", "agg": "sum", "filters": [
+                              {"field": "Region", "values": ["North"]}]},
+                          {"field": "Amount", "agg": "sum"}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum({1<[Region]={'North'}>} [Amount])" in expression
+        assert "Sum({1} [Amount])" in expression
+
+    def test_a_part_may_still_state_its_own(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide",
+                      "scope": {"ignore_selections": True}, "of": [
+                          {"field": "Amount", "agg": "sum",
+                           "scope": {"bookmark": "BM01"}},
+                          {"field": "Amount", "agg": "sum"}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum({BM01} [Amount])" in expression
+
+
+class TestAnOperationInsideAnOperation:
+    """Arithmetic reads by precedence, not by structure: written flat,
+    `Sum(A) + Sum(B) / Sum(C)` is not the sum divided by the third."""
+
+    def test_a_nested_operation_keeps_its_own_precedence(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"op": "add", "of": [{"field": "Amount", "agg": "sum"},
+                                     {"field": "Amount", "agg": "count"}]},
+                {"field": "Amount", "agg": "sum"}]}]), 0)
+        assert "(Sum([Amount]) + Count([Amount])) / Sum([Amount])" in (
+            plan["measures"][0]["expression"])
+
+    def test_a_plain_part_is_not_wrapped(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "count"}]}]), 0)
+        assert "Sum([Amount]) / Count([Amount])" in (
+            plan["measures"][0]["expression"])
+
+
+class TestOneValueIsAValue:
+    """A single value written without a list used to be counted by its
+    characters, and the count threw before the queries were told apart -
+    taking the healthy neighbours of a batch down with it."""
+
+    def test_a_single_value_does_not_break_the_batch(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [
+            _query(filters=[{"field": "Region", "values": "North"}]),
+            _query()])
+        assert result["queries_failed"] == 0
+        assert len(result["results"]) == 2
