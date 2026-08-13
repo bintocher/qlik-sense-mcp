@@ -175,6 +175,19 @@ def _probe_complaint(result: Dict[str, Any]) -> str:
     return ""
 
 
+def _unproven(result: Dict[str, Any], what: str) -> Optional[str]:
+    """A note when a probe answered neither a number nor a complaint.
+
+    The filter still goes out - a dropped frame is not the caller's
+    mistake - but the reply must not read like one Qlik confirmed.
+    """
+    if not result or result.get("number") is not None:
+        return None
+    if _probe_complaint(result):
+        return None
+    return f"{what} could not be checked: Qlik did not answer the probe."
+
+
 def _probe_unusable(result: Dict[str, Any]) -> str:
     """Whether a probe says nothing that can be built on.
 
@@ -393,12 +406,19 @@ class EngineFiltersMixin:
                     "then ask for bounds inside it",
                 ],
             }
-        return {
+        note = _unproven(counted[0] if counted else {},
+                         f"Whether any value of "
+                         f"{escape_qlik_field_name(field)} falls in the "
+                         f"range")
+        outcome = {
             "modifier": modifier, "field": field,
             "from": low, "to": high,
             "from_excluded": low_exclusive, "to_excluded": high_exclusive,
             "distinct_values_in_range": int(matched) if matched is not None else None,
         }
+        if note:
+            outcome["note"] = note
+        return outcome
 
     def period_modifier(self, app_handle: int, app_id: str, field: str,
                         start: Any, end: Any,
@@ -797,6 +817,11 @@ class EngineFiltersMixin:
                    "element_set": joined}
         if matched is not None:
             outcome["matched"] = int(matched)
+        note = _unproven(counted[0] if counted else {},
+                         f"Whether any value of {name} satisfies the "
+                         f"condition stated for it")
+        if note:
+            outcome["note"] = note
         return outcome
 
     def pattern_modifier(self, app_handle: int, field: str, kind: str,
@@ -852,6 +877,12 @@ class EngineFiltersMixin:
         outcome = {"modifier": modifier, "field": field, kind: text}
         if matched is not None:
             outcome["matched"] = int(matched)
+        note = _unproven(counted[0] if counted else {},
+                         f"Whether any value of "
+                         f"{escape_qlik_field_name(field)} "
+                         f"{kind.replace('_', ' ')} {text!r}")
+        if note:
+            outcome["note"] = note
         return outcome
 
     def _combined_sets(self, app_handle: int, app_id: str,
@@ -1193,6 +1224,11 @@ class EngineFiltersMixin:
                 record = {"field": field, "match_expression": condition}
                 if matched is not None:
                     record["matched"] = int(matched)
+                note = _unproven(counted[0] if counted else {},
+                                 f"Whether any value of {name} satisfies "
+                                 f"{condition!r}")
+                if note:
+                    record["note"] = note
                 applied.append(record)
                 continue
 

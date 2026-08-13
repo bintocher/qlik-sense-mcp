@@ -1448,3 +1448,36 @@ class TestAKeyWrittenDownBesideACombination:
         result = engine.build_filters(1, "app", [], scope={
             "of": [{"ignore_selections": True}], "bookmark": "BM"})
         assert "a list of sets" in result["error"]
+
+
+class TestEveryKindOfFilterSaysWhenItWasNotChecked:
+    """The mark reached one path of five: a text search, a range, an
+    element set and a written condition answered as if Qlik had confirmed
+    them."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": None, "is_numeric": False, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("stated", [
+        {"field": "Region", "contains": "no"},
+        {"field": "price", "greater_than": 10},
+        {"field": "Client", "matching": {
+            "filters": [{"field": "Region", "values": ["North"]}]}},
+    ])
+    def test_the_note_is_carried(self, stated):
+        result = self._engine().build_filters(1, "app", [stated])
+        assert "could not be checked" in result["applied"][0]["note"]
+
+    def test_a_checked_filter_carries_no_note(self):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "contains": "no"}])
+        assert "note" not in result["applied"][0]
