@@ -23,6 +23,42 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _metric_cost(metrics: Any) -> int:
+    """How many expressions a list of metrics will build.
+
+    A metric made of parts builds one per part, and a part may itself be
+    made of parts. Counting the list alone let one allowed metric carry an
+    expression of any size into a connection shared by every query.
+    """
+    if not isinstance(metrics, (list, tuple)):
+        return 0
+    total = 0
+    for metric in metrics:
+        if not isinstance(metric, dict):
+            total += 1
+            continue
+        parts = metric.get("of")
+        total += (_metric_cost(parts) if isinstance(parts, (list, tuple))
+                  else 1)
+    return total
+
+
+def _scope_names_a_set(scope: Any) -> bool:
+    """Whether a scope description names a set at all.
+
+    `{}` names none, and neither does every key left false or empty. Such
+    a description is not a statement, and treating it as one cancelled the
+    set the query had already named.
+    """
+    if scope is None:
+        return False
+    if not isinstance(scope, dict):
+        # Not an object at all: let the check that refuses it see it.
+        return True
+    return any(value is not None and value is not False and value != ""
+               for value in scope.values())
+
+
 def _scope_says_something(built: Dict[str, Any]) -> bool:
     """Whether a built slice states anything at all.
 
@@ -59,7 +95,11 @@ def _filter_cost(query: Any) -> int:
                     total += (len(stated) if isinstance(stated, (list, tuple))
                               else (1 if stated is not None else 0))
                 for nested in ("matching", "not_matching"):
-                    total += _filter_cost(entry.get(nested))
+                    inner = entry.get(nested)
+                    total += _filter_cost(inner)
+                    # Reading from another field costs one more question.
+                    if isinstance(inner, dict) and inner.get("of_field"):
+                        total += 1
         elif isinstance(value, (list, dict)):
             total += _filter_cost(value)
     return total
@@ -197,7 +237,7 @@ class EngineQueriesMixin:
         scope = query.get("scope")
 
         def slice_for(wanted, own_scope=None):
-            chosen = own_scope if own_scope is not None else scope
+            chosen = own_scope if _scope_names_a_set(own_scope) else scope
             signature = json.dumps([wanted, chosen], sort_keys=True,
                                    ensure_ascii=False, default=str)
             if signature not in slices:
@@ -357,8 +397,11 @@ class EngineQueriesMixin:
             own_scope = None
             stated_scope = (part.get("scope") if part.get("scope") is not None
                             else inherited_scope)
-            if stated_scope is not None and part.get("filters") is None:
-                built = slice_for([], stated_scope)
+            # Only a scope this part stated itself replaces what it
+            # inherited. An inherited one arrives already built into
+            # `modifier`, together with the filters that came with it.
+            if part.get("scope") is not None and part.get("filters") is None:
+                built = slice_for([], part.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
@@ -851,7 +894,7 @@ class EngineQueriesMixin:
         started = time.monotonic()
         expressions = sum(
             len(q.get("group_by") or q.get("dimensions") or [])
-            + len(q.get("metrics") or []) + len(q.get("measures") or [])
+            + _metric_cost(q.get("metrics")) + len(q.get("measures") or [])
             + _filter_cost(q)
             for q in queries if isinstance(q, dict))
         if expressions > MAX_EXPRESSIONS_PER_CALL:

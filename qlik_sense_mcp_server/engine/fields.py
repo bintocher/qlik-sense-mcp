@@ -379,7 +379,7 @@ class EngineFieldsMixin:
                     # ListObject path; a single-dimension hypercube still
                     # materialises the values.
                     fallback = self._get_field_values_via_hypercube(
-                        app_handle, field_name, max_values)
+                        app_handle, field_name, max_values, offset=offset)
                     if fallback.get("values"):
                         fallback["fallback_used"] = "hypercube"
                         return fallback
@@ -559,7 +559,8 @@ class EngineFieldsMixin:
         return edges
 
     def _get_field_values_via_hypercube(
-        self, app_handle: int, field_name: str, max_values: int = 100
+        self, app_handle: int, field_name: str, max_values: int = 100,
+        offset: int = 0
     ) -> Dict[str, Any]:
         """
         Fallback for `get_field_values`: build a one-dimension hypercube
@@ -591,7 +592,10 @@ class EngineFieldsMixin:
                     {"qDef": {"qDef": f"Count([{field_name}])", "qLabel": "cnt"}}
                 ],
                 "qInitialDataFetch": [
-                    {"qTop": 0, "qLeft": 0, "qHeight": max_values, "qWidth": 2}
+                    # The page top, so the second page of a high-cardinality
+                    # field is the second page and not the first one again.
+                    {"qTop": max(0, offset), "qLeft": 0,
+                     "qHeight": max_values, "qWidth": 2}
                 ],
                 "qSuppressZero": False,
                 "qSuppressMissing": False,

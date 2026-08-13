@@ -114,7 +114,7 @@ two at once is refused rather than answered by the first of them.
 | `{"field": "Region", "add": ["South"]}` | add to what is selected |
 | `{"field": "Region", "intersect": ["North"]}` | keep what is in both |
 | `{"field": "Amount", "greater_than": 400}` | above a bound |
-| `{"field": "OrderDate", "period": "2024-Q1"}` | a period, in any of the forms below |
+| `{"field": "OrderDate", "period": "2024-03"}` | a period: a year, a month or a day |
 | `{"field": "Client", "contains": "ltd"}` | text search, case-insensitive |
 | `{"field": "Client", "matching": {...}}` | values of this field that satisfy a condition on another |
 | `{"field": "Client", "match_expression": "Sum(Amount) > 1000"}` | values an expression holds for |
