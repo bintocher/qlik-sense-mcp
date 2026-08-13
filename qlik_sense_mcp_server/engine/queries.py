@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 
 MAX_NESTING = 20
 
+# A reference count plus the candidate forms of a date field.
+RANGE_PROBE_COST = 3
+
+
+def _listed(value: Any) -> int:
+    """How many entries a list holds, counting anything else as one.
+
+    The count runs before the query is read, so it meets whatever the
+    caller wrote. A number where a list belongs is refused later, by name;
+    here it must not end the count with an interpreter error.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    return 1
+
 
 def _metric_cost(metrics: Any, depth: int = 0) -> int:
     """How many expressions a list of metrics will build.
@@ -58,8 +75,7 @@ def _scope_names_a_set(scope: Any) -> bool:
     if not isinstance(scope, dict):
         # Not an object at all: let the check that refuses it see it.
         return True
-    return any(value is not None and value is not False and value != ""
-               for value in scope.values())
+    return any(bool(value) for value in scope.values())
 
 
 def _filter_cost(query: Any, depth: int = 0) -> int:
@@ -84,6 +100,12 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
                     continue
                 # The field itself is one call, then one per value.
                 total += 1
+                # A range is not one call: the working form of a date field
+                # is chosen by measuring a reference against the candidate
+                # forms, all in one batch but all of them expressions.
+                if any(entry.get(key) is not None for key in
+                       ("from", "to", "period", "greater_than", "less_than")):
+                    total += RANGE_PROBE_COST
                 for operator in ("values", "exclude", "add", "intersect"):
                     stated = entry.get(operator)
                     total += (len(stated) if isinstance(stated, (list, tuple))
@@ -94,8 +116,8 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
                     # Reading from another field costs one more question.
                     # The same field is the one already asked about.
                     if (isinstance(inner, dict) and inner.get("of_field")
-                            and str(inner["of_field"]).strip()
-                            != str(entry.get("field") or "").strip()):
+                            and bare_field_name(str(inner["of_field"]))
+                            != bare_field_name(str(entry.get("field") or ""))):
                         total += 1
         elif isinstance(value, (list, dict)):
             total += _filter_cost(value, depth + 1)
@@ -204,6 +226,14 @@ class EngineQueriesMixin:
             group_by = query.get("dimensions") or []
         if isinstance(group_by, str):
             group_by = [group_by]
+        # A list of fields, or one field named plainly. An object was walked
+        # by its keys, so the keys became the grouping and the values were
+        # never read.
+        if not isinstance(group_by, (list, tuple)):
+            return {"id": query_id, "error": (
+                f"group_by={group_by!r} is not a list of fields."),
+                "error_category": "invalid_argument",
+                "hint": 'A list of names: ["Region"], or one name: "Region".'}
         dimensions = []
         for item in group_by:
             field = item.get("field") if isinstance(item, dict) else item
@@ -392,7 +422,8 @@ class EngineQueriesMixin:
             own = modifier
             own_applied = None
             own_scope = None
-            stated_scope = (part.get("scope") if part.get("scope") is not None
+            stated_scope = (part.get("scope")
+                            if _scope_names_a_set(part.get("scope"))
                             else inherited_scope)
             # Only a scope this part stated itself replaces what it
             # inherited. An inherited one arrives already built into
@@ -616,14 +647,17 @@ class EngineQueriesMixin:
         """
         measures: List[Dict[str, Any]] = []
 
+        for key, shape in (("metrics", 'a list of metrics: [{"field": '
+                                       '"Amount", "agg": "sum"}]'),
+                           ("measures", 'a list of expressions: '
+                                        '["Sum([Amount])"]')):
+            stated = query.get(key)
+            if stated is not None and not isinstance(stated, (list, tuple)):
+                return [], {"id": query_id, "error": (
+                    f"{key}={stated!r} is not a list."),
+                    "error_category": "invalid_argument",
+                    "hint": f"Use {shape}."}
         stated_metrics = query.get("metrics")
-        if stated_metrics is not None and not isinstance(
-                stated_metrics, (list, tuple)):
-            return [], {"id": query_id, "error": (
-                f"metrics={stated_metrics!r} is not a list."),
-                "error_category": "invalid_argument",
-                "hint": ('A list of metrics: [{"field": "Amount", "agg": '
-                         '"sum"}].')}
         for metric in stated_metrics or []:
             if isinstance(metric, str):
                 metric = {"field": metric, "agg": "sum"}
@@ -896,8 +930,8 @@ class EngineQueriesMixin:
         """
         started = time.monotonic()
         expressions = sum(
-            len(q.get("group_by") or q.get("dimensions") or [])
-            + _metric_cost(q.get("metrics")) + len(q.get("measures") or [])
+            _listed(q.get("group_by") or q.get("dimensions"))
+            + _metric_cost(q.get("metrics")) + _listed(q.get("measures"))
             + _filter_cost(q)
             for q in queries if isinstance(q, dict))
         if expressions > MAX_EXPRESSIONS_PER_CALL:
