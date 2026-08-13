@@ -369,6 +369,28 @@ def engine_query(
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
+    SETS
+        `scope` says what a query counts over before any filter narrows
+        it: `{"ignore_selections": true}` for the whole model,
+        `{"bookmark": "BM01"}`, `{"state": "Compare"}`,
+        `{"selection_back": 1}` for the selections a step ago. Two sets
+        join with one operation between them:
+
+            {"combine": "union",
+             "of": [{"ignore_selections": true,
+                     "filters": [{"field": "Year", "values": ["2023"]}]},
+                    {"ignore_selections": true,
+                     "filters": [{"field": "Region",
+                                  "values": ["South"]}]}]}
+
+        `union` is everything in either, `intersect` only what is in both,
+        `exclude` the first without the second, `symmetric_difference`
+        what belongs to exactly one of two. Each set carries filters of its
+        own; a filter written outside the combination is refused, because
+        Qlik reads no modifier around one. A scope stated on the query
+        reaches every measure; stated on a metric or on one part of an
+        arithmetic metric, only that one.
+
     PAGE AND SHAPE
         `limit` and `offset` walk the result; `has_more` and `next_offset`
         say whether there is another page. `exclude_null_dimensions` drops

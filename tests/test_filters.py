@@ -1235,3 +1235,96 @@ class TestAComplaintIsARefusalOnEveryPath:
             1, "app", [{"field": "F", "period": "2011"}])
         assert result["error_category"] == "invalid_period"
         assert "expected" in result["error"]
+
+
+class TestWhatASetInACombinationMaySay:
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("stated", [{}, {"field": "Region"}, "Region", 5])
+    def test_filters_that_are_not_a_list_are_refused(self, stated):
+        """An object read as "no filters" widened the set to everything and
+        the answer came back larger, with nothing to show for it."""
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True, "filters": stated},
+                {"current_selection": True}]})
+        assert result["error_category"] == "invalid_filter"
+
+    def test_a_bookmark_named_with_a_brace_keeps_its_name(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [{"bookmark": "BM{1}"},
+                                       {"current_selection": True}]})
+        assert result["modifier"] == "{(BM{1}) + ($)}"
+
+    def test_symmetric_difference_joins_two_sets(self):
+        """Qlik applies it pairwise, so three sets would answer "in an odd
+        number of them" - a different question."""
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "symmetric_difference", "of": [
+                {"ignore_selections": True}, {"current_selection": True},
+                {"bookmark": "BM01"}]})
+        assert result["error_category"] == "invalid_argument"
+
+    def test_the_others_take_more_than_two(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True}, {"current_selection": True},
+                {"bookmark": "BM01"}]})
+        assert result["modifier"] == "{(1) + ($) + (BM01)}"
+
+
+class TestAQuestionThatNeverArrived:
+    """Reading silence as "not a date" turns a period into a numeric range
+    and answers a plausible wrong number - 18,774 where the truth was
+    1,898,591."""
+
+    def test_a_dropped_call_is_not_an_answer(self):
+        from qlik_sense_mcp_server.exceptions import QlikProbeUnavailable
+
+        class _Silent(_Engine):
+            def get_field_description(self, app_handle, field):
+                raise ConnectionError("WebSocket recv() failed")
+
+        with pytest.raises(QlikProbeUnavailable):
+            _Silent()._is_temporal_field(1, "OrderDate")
+
+    def test_the_query_is_refused_rather_than_guessed(self):
+        class _Silent(_Engine):
+            def get_field_description(self, app_handle, field):
+                raise ConnectionError("WebSocket recv() failed")
+
+        result = _Silent().build_filters(
+            1, "app", [{"field": "OrderDate", "period": "2011"}])
+        assert result["error_category"] == "engine_api_error"
+
+    def test_qlik_saying_no_is_an_answer(self):
+        from qlik_sense_mcp_server.exceptions import QlikEngineError
+
+        class _Answering(_Engine):
+            def get_field_description(self, app_handle, field):
+                raise QlikEngineError("Invalid parameters")
+
+        assert _Answering()._is_temporal_field(1, "price") is False
+
+
+class TestEveryFormRefused:
+    """Falling back to a form Qlik has already called unreadable sends out
+    a filter that cannot work."""
+
+    def test_a_period_refused_in_every_form_is_refused(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": "Error: Error in expression: ')' expected",
+             "number": None, "is_numeric": False, "error": None}
+            for index, _ in enumerate(exprs)]
+        result = engine.build_filters(1, "app", [{"field": "F",
+                                                  "period": "2011"}])
+        assert result["error_category"] == "invalid_period"

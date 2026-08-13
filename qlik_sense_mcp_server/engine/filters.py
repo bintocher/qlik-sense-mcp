@@ -27,7 +27,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..exceptions import QlikEngineError
+from ..exceptions import QlikEngineError, QlikProbeUnavailable
 from ..utils import bare_field_name, escape_qlik_field_name
 
 logger = logging.getLogger(__name__)
@@ -292,9 +292,18 @@ class EngineFiltersMixin:
         """
         try:
             description = self.get_field_description(app_handle, field)
-        except Exception as exc:
-            logger.debug("Could not describe %r: %s", field, exc)
+        except QlikEngineError as exc:
+            # Qlik answered, and the answer is that it has no such field.
+            logger.debug("No description for %r: %s", field, exc)
             return False
+        except Exception as exc:
+            # The question never arrived. Reading that as "not a date"
+            # turns a period into a numeric range and answers a plausible
+            # wrong number - the very failure this check exists to stop.
+            raise QlikProbeUnavailable(
+                f"Qlik could not be asked whether "
+                f"{escape_qlik_field_name(field)} holds dates: {exc}"
+            ) from exc
         tags = description.get("tags") or []
         return any(str(tag).lstrip("$") in ("date", "timestamp")
                    for tag in tags)
@@ -506,12 +515,25 @@ class EngineFiltersMixin:
                 ],
             }
 
+        complaints = []
         for (label, modifier), value in zip(candidates, values[1:]):
+            complaint = _probe_complaint(value)
+            if complaint:
+                complaints.append(complaint)
+                continue
             number = value.get("number")
             if number is not None and int(number) == reference:
                 self._remember_form(app_id, field, label)
                 return {"modifier": modifier, "form": label,
                         "matched": reference}
+
+        if len(complaints) == len(candidates):
+            # Qlik refused every form there is. Falling back to one of them
+            # would send out a filter Qlik has already called unreadable.
+            return {"error": (
+                f"Qlik cannot read any form of a period filter on "
+                f"{escape_qlik_field_name(field)}: {complaints[0]}"),
+                "error_category": "invalid_period"}
 
         # Every candidate disagreed with the reference. The expression form
         # is the one built from the same comparison the reference uses, so
@@ -809,6 +831,15 @@ class EngineFiltersMixin:
             return {"error": "`of` holds fewer than two sets.",
                     "error_category": "invalid_argument",
                     "hint": "An operation between sets needs two of them."}
+        if operation == "symmetric_difference" and len(parts) > 2:
+            # Qlik applies it pairwise, so three sets answer "in an odd
+            # number of them" rather than "in exactly one of them". Saying
+            # that plainly beats answering a different question.
+            return {"error": ("symmetric_difference joins exactly two sets, "
+                              f"and `of` holds {len(parts)}."),
+                    "error_category": "invalid_argument",
+                    "hint": ("Qlik applies it in pairs, so three sets would "
+                             "answer \"in an odd number of them\" instead.")}
         if filters:
             # Measured: Qlik refuses a modifier written outside the
             # combination - `{((A) + (B))<Field={'x'}>}` comes back as
@@ -826,14 +857,25 @@ class EngineFiltersMixin:
             if not isinstance(part, dict):
                 return {"error": f"of[{position}] is not an object: {part!r}",
                         "error_category": "invalid_argument"}
-            own_filters = part.get("filters") or []
+            own_filters = part.get("filters")
+            if own_filters is not None and not isinstance(own_filters,
+                                                          (list, tuple)):
+                return {"error": (
+                    f"of[{position}].filters={own_filters!r} is not a list."),
+                    "error_category": "invalid_filter",
+                    "hint": "A list of filter objects, or nothing at all."}
+            own_filters = list(own_filters or [])
             own_scope = {k: v for k, v in part.items() if k != "filters"}
             built = self.build_filters(app_handle, app_id, own_filters,
                                        scope=own_scope or None)
             if built.get("error"):
                 return built
             modifier = built.get("modifier") or "{$}"
-            written.append("(" + modifier.strip("{}") + ")")
+            # The outermost braces, not every brace: a bookmark named with
+            # one would lose part of its name to `strip`.
+            inner = modifier[1:-1] if (modifier.startswith("{")
+                                       and modifier.endswith("}")) else modifier
+            written.append("(" + inner + ")")
             applied.append({"set": position, "modifier": modifier,
                             "filters_applied": built.get("applied", [])})
 
@@ -1136,7 +1178,15 @@ class EngineFiltersMixin:
                 # any other. Asking Qlik which this is costs one cheap call
                 # and is the difference between "more than 400 off" and
                 # "some time in 1901".
-                if self._is_temporal_field(app_handle, field):
+                try:
+                    temporal = self._is_temporal_field(app_handle, field)
+                except QlikProbeUnavailable as exc:
+                    return {"error": str(exc),
+                            "error_category": "engine_api_error",
+                            "hint": ("Ask again; without this answer a "
+                                     "period and a numeric range cannot be "
+                                     "told apart.")}
+                if temporal:
                     outcome = self.period_modifier(
                         app_handle, app_id, field, low, high, base=identifier)
                 else:

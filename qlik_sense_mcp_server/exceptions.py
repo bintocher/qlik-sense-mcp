@@ -37,3 +37,12 @@ class QlikAppNotFoundError(QlikError):
 
 class QlikConfigError(QlikError):
     """Raised when configuration is invalid or missing."""
+
+
+class QlikProbeUnavailable(Exception):
+    """A check this server relies on could not be run at all.
+
+    Told apart from Qlik answering "no": a question that never arrived says
+    nothing about the data, and treating silence as an answer is how a
+    period becomes a numeric range and a wrong number looks plausible.
+    """

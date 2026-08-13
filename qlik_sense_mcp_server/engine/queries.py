@@ -927,16 +927,29 @@ class EngineQueriesMixin:
         # the top: a period named inside a metric narrows that metric, and
         # a period that fails to apply is exactly what these probes exist
         # to catch. The measure's own modifier is used for its own probe.
-        stated = [(plan.get("modifier", ""), applied)
-                  for applied in plan.get("filters_applied", [])]
+        # A combination of sets records what each of its sets narrowed, one
+        # level down: a period stated inside one of them can fail to apply
+        # like any other, and the reply promises to say so.
+        def _narrowings(records, modifier):
+            for record in records or []:
+                if isinstance(record, dict) and "filters_applied" in record:
+                    for inner in _narrowings(record["filters_applied"],
+                                             record.get("modifier")
+                                             or modifier):
+                        yield inner
+                elif isinstance(record, dict):
+                    yield (modifier, record)
+
+        stated = list(_narrowings(plan.get("filters_applied"),
+                                  plan.get("modifier", "")))
         for measure in plan.get("measures", []):
-            for applied in measure.get("filters_applied") or []:
-                stated.append((measure.get("modifier", ""), applied))
+            stated.extend(_narrowings(measure.get("filters_applied"),
+                                      measure.get("modifier", "")))
             # A part of an arithmetic metric carries its own filters, and a
             # period stated there can fail to apply like any other.
             for part in measure.get("part_filters") or []:
-                for applied in part.get("filters_applied") or []:
-                    stated.append((part.get("modifier", ""), applied))
+                stated.extend(_narrowings(part.get("filters_applied"),
+                                          part.get("modifier", "")))
 
         probes = []
         seen = set()
@@ -995,13 +1008,22 @@ class EngineQueriesMixin:
         low = earliest_num.get("number")
         high = latest_num.get("number")
         if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
-            # Two filters that each select something can still select
-            # nothing together — January and a region with no January
-            # sales. Engine answers Min/Max over an empty set with its
-            # "NaN" sentinel, and comparing that to a day number raised
-            # TypeError and took the whole batch down.
+            # Two very different answers arrive in the same shape. Qlik
+            # complaining is a check that failed to run; an empty
+            # intersection is a check with nothing to look at - January and
+            # a region with no January sales. Engine answers Min/Max over
+            # an empty set with its "NaN" sentinel.
+            complaint = ""
+            for value in (earliest_num, latest_num, earliest, latest):
+                text = str((value or {}).get("text") or "")
+                if text.startswith("Error"):
+                    complaint = text.split("Error:", 1)[-1].strip() or text
+                    break
             check["filter_applied"] = None
             check["note"] = (
+                f"The period could not be checked: Qlik answered "
+                f"{complaint}"
+                if complaint else
                 "The filters together select no rows, so there is nothing "
                 "to check the period against."
             )
