@@ -42,6 +42,7 @@ class _Engine(QlikEngineAPI):
         self.destroyed = []
         self.pages = {}
         self.cube_defs = []
+        self.short_page = 0
 
     def send_requests_pipelined(self, requests, raise_on_error=True, timeout=None):
         self.batches.append([r["method"] for r in requests])
@@ -80,6 +81,14 @@ class _Engine(QlikEngineAPI):
             self.pages[handle] = (fetch[0].get("qTop", 0),
                                   fetch[0].get("qHeight"))
             return {"qReturn": {"qHandle": handle}}
+        if method == "GetHyperCubeData":
+            page = (params or [None, [{}]])[1][0]
+            top, height = page.get("qTop", 0), page.get("qHeight", 0)
+            more = self.rows[top:top + height]
+            return {"qDataPages": [{"qMatrix": [
+                [{"qText": str(v),
+                  "qNum": v if isinstance(v, (int, float)) else "NaN"}
+                 for v in row] for row in more]}]}
         if method == "GetLayout":
             return {"qLayout": {"qHyperCube": self._cube(handle)}}
         if method == "DestroySessionObject":
@@ -102,6 +111,8 @@ class _Engine(QlikEngineAPI):
         width = len(self.rows[0]) if self.rows else 1
         top, height = self.pages.get(handle, (0, None))
         shown = self.rows[top:top + height] if height else self.rows[top:]
+        if self.short_page:
+            shown = shown[:self.short_page]
         return {
             "qSize": {"qcy": len(self.rows), "qcx": width},
             "qDimensionInfo": [{"qNumFormat": {"qType": "A"}}],
@@ -1414,11 +1425,11 @@ class TestAKeyAcceptedIsAKeyObeyed:
     def test_the_raw_layout_comes_back_when_asked_for(self):
         result = _Engine().run_queries(1, "app", [
             dict(_query(), include_raw_layout=True)])
-        assert "raw_layout" in result["results"][0]
+        assert "hypercube_data" in result["results"][0]
 
     def test_it_stays_out_when_not_asked_for(self):
         result = _Engine().run_queries(1, "app", [_query()])
-        assert "raw_layout" not in result["results"][0]
+        assert "hypercube_data" not in result["results"][0]
 
     def test_suppress_zero_reaches_the_cube(self):
         engine = _Engine()
@@ -1431,3 +1442,22 @@ class TestAKeyAcceptedIsAKeyObeyed:
         engine = _Engine()
         engine.run_queries(1, "app", [_query()])
         assert engine.cube_defs[-1]["qSuppressZero"] is False
+
+
+class TestAShortPageIsReadOn:
+    """Engine may hand back fewer rows than the page asked for. The
+    hypercube path reads the rest; this one used to answer with fewer rows
+    for the same question and no word about it."""
+
+    def test_the_missing_rows_are_read(self):
+        engine = _Engine(rows=[["North", 1], ["South", 2], ["East", 3]])
+        engine.short_page = 1
+        result = engine.run_queries(1, "app", [_query(limit=3)])
+        reply = result["results"][0]
+        assert reply["returned_rows"] == 3
+        assert [row[0] for row in reply["rows"]] == ["North", "South", "East"]
+
+    def test_a_full_page_asks_for_nothing_more(self):
+        engine = _Engine(rows=[["North", 1], ["South", 2]])
+        result = engine.run_queries(1, "app", [_query(limit=2)])
+        assert not any("GetHyperCubeData" in batch for batch in engine.batches)

@@ -200,6 +200,10 @@ def engine_query(
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     limit: int = 100,
+    offset: int = 0,
+    exclude_null_dimensions: bool = False,
+    suppress_zero: bool = False,
+    include_raw_layout: bool = False,
 ) -> str:
     """
     Answer a question about an app's data: group by fields, aggregate
@@ -365,9 +369,20 @@ def engine_query(
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
+    PAGE AND SHAPE
+        `limit` and `offset` walk the result; `has_more` and `next_offset`
+        say whether there is another page. `exclude_null_dimensions` drops
+        the group with no value for the grouping field — off by default,
+        because such a fact is still a fact. `suppress_zero` drops groups
+        whose measures are all zero. `include_raw_layout` adds
+        `hypercube_data`, the untouched Qlik answer, beside the shaped
+        one - the same key `engine_create_hypercube` uses.
+        Every one of them can also be stated per query inside `queries`.
+
     DOES NOT RETURN
-        Raw Qlik layout, per-cell state, or the expressions it wrote.
-        Row-level records — every reply is aggregated.
+        Per-cell state or the expressions it wrote. Row-level records —
+        every reply is aggregated. The untouched Qlik layout only on
+        request, through `include_raw_layout`.
 
     A filter that selects nothing is refused before the query runs, and a
     value the field does not hold is answered with what the field holds
@@ -387,6 +402,10 @@ def engine_query(
             "sort_by": sort_by,
             "sort_order": sort_order,
             "limit": limit,
+            "offset": offset,
+            "exclude_null_dimensions": exclude_null_dimensions,
+            "suppress_zero": suppress_zero,
+            "include_raw_layout": include_raw_layout,
         }]
     if not isinstance(queries, list) or not queries:
         return _err(
