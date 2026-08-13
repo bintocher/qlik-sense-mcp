@@ -567,3 +567,78 @@ class TestAFailedQuestionIsNotAnAnswer:
         result = engine.build_filters(
             1, "app", [{"field": "Region", "values": ["North"]}])
         assert "error" not in result
+
+
+class TestAnAnswerIsNotAFailureToAsk:
+    """Engine refusing a call and the call not getting through are
+    different things, and the difference decides whether a field is
+    reported missing."""
+
+    def test_engine_saying_no_such_field_is_a_refusal(self):
+        from qlik_sense_mcp_server.exceptions import QlikEngineError
+
+        class _Missing(_Engine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetFieldDescription":
+                    raise QlikEngineError("Engine API error: Invalid parameters")
+                return {}
+
+        result = _Missing().build_filters(
+            1, "app", [{"field": "Regoin", "values": ["North"]}])
+        assert result["error_category"] == "field_not_found"
+        assert "[Regoin]" in result["error"]
+
+    def test_a_dropped_frame_is_not(self):
+        class _Broken(_Engine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetFieldDescription":
+                    raise ConnectionError("WebSocket recv() failed")
+                return {}
+
+        engine = _Broken()
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 3, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
+
+    def test_a_field_that_exists_passes(self):
+        engine = _Engine()
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 3, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
+
+
+class TestControlValuesFollowTheFilter:
+    """A period stated inside a metric narrows that metric, and a period
+    that fails to apply is what these probes exist to catch."""
+
+    def test_a_period_on_a_metric_is_checked_too(self):
+        engine = _Engine(period_bounds=(40544, 40908))
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "filters": [{"field": "OrderDate", "period": "2011"}]}])])
+        checks = result["results"][0].get("period_check") or []
+        assert [c["field"] for c in checks] == ["OrderDate"]
+
+    def test_a_period_on_a_metric_that_did_not_apply_is_reported(self):
+        engine = _Engine(period_bounds=(10, 90000))
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "filters": [{"field": "OrderDate", "period": "2011"}]}])])
+        reply = result["results"][0]
+        assert reply["period_check"][0]["filter_applied"] is False
+        assert any("did not narrow" in w for w in reply["warnings"])
+
+    def test_the_same_period_is_not_checked_twice(self):
+        engine = _Engine(period_bounds=(40544, 40908))
+        same = [{"field": "OrderDate", "period": "2011"}]
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "filters": same},
+                     {"field": "Amount", "agg": "count", "filters": same}],
+            filters=same)])
+        assert len(result["results"][0]["period_check"]) == 1
