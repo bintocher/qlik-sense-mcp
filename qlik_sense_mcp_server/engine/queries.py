@@ -279,6 +279,15 @@ class EngineQueriesMixin:
         """Turn one typed query into dimensions, measures and a modifier."""
         query_id = str(query.get("id") or f"q{position + 1}")
 
+        stated_filters = query.get("filters")
+        if stated_filters is not None and not isinstance(stated_filters,
+                                                         (list, tuple)):
+            return {"id": query_id, "error": (
+                f"filters={stated_filters!r} is not a list."),
+                "error_category": "invalid_filter",
+                "hint": ('A list of filter objects: [{"field": "Region", '
+                         '"values": ["North"]}].')}
+
         for key in ("exclude_null_dimensions", "suppress_zero",
                     "include_raw_layout"):
             refusal = _yes_or_no(query.get(key), key, query_id)
@@ -1208,7 +1217,10 @@ class EngineQueriesMixin:
             values = []
             for outcome in probe_outcomes[start:start + 4]:
                 if isinstance(outcome, Exception):
-                    values.append({"text": None, "number": None})
+                    # The text matters: it is what tells a check that could
+                    # not run from filters that select nothing together.
+                    values.append({"text": f"Error: {outcome}",
+                                   "number": None})
                     continue
                 value = (outcome or {}).get("qValue") or {}
                 values.append({"text": value.get("qText"),

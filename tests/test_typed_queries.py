@@ -1536,3 +1536,41 @@ class TestEachQuerySaysWhyItCameUpShort:
         assert any("Engine stopped sending" in w for w in first["warnings"])
         assert second["returned_rows"] == 1
         assert not any("came back;" in w for w in second.get("warnings") or [])
+
+
+class TestAListWhereAListBelongs:
+    """The same rule at the top of a query as inside a metric or a set: an
+    object read as "no filters" ran the query unfiltered and answered as if
+    nothing were wrong."""
+
+    @pytest.mark.parametrize("stated", [{}, {"field": "Region"}, "Region", 5])
+    def test_filters_that_are_not_a_list_are_refused(self, stated):
+        result = _Engine().run_queries(1, "app", [
+            dict(_query(), filters=stated)])
+        assert result["results"][0]["error_category"] == "invalid_filter"
+
+    def test_a_list_still_works(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North"]}])])
+        assert result["queries_failed"] == 0
+
+
+class TestACheckThatCouldNotRun:
+    """Engine failing on the control expression is not "the filters select
+    nothing together" - saying so passes unchecked numbers off as checked."""
+
+    def test_the_reason_names_what_qlik_said(self):
+        class _Failing(_Engine):
+            def send_requests_pipelined(self, requests, raise_on_error=True,
+                                        timeout=None):
+                replies = super().send_requests_pipelined(
+                    requests, raise_on_error, timeout)
+                return [RuntimeError("the socket went away")
+                        if r["method"] == "EvaluateEx" else reply
+                        for r, reply in zip(requests, replies)]
+
+        engine = _Failing(period_bounds=(40544, 40908))
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "OrderDate", "period": "2011"}])])
+        checks = result["results"][0].get("period_check") or []
+        assert checks and "could not be checked" in checks[0]["note"]
