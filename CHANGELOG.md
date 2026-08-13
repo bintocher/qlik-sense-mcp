@@ -95,7 +95,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ### Changed
 
-- The group with no dimension value is kept by default. Dropping it is a
+- The group with no dimension value is kept by default in both tools -
+  the hypercube used to drop it unasked, which contradicted the same
+  sentence written for the typed query. Dropping it is a
   statement about the data — facts with no value for the grouping field
   are still facts — so it is the caller's to make: `exclude_null_dimensions`
   is available in `engine_query` as well, and defaults to keeping the

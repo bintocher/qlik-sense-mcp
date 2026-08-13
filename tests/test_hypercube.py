@@ -159,7 +159,6 @@ class TestHypercubeDefinition:
         eng = _FakeEngine()
         eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
         assert eng.cube_def["qSuppressMissing"] is False
-        assert eng.cube_def["qDimensions"][0]["qNullSuppression"] is True
 
     def test_keeping_null_groups_leaves_every_suppression_off(self):
         eng = _FakeEngine()
@@ -175,11 +174,13 @@ class TestHypercubeDefinition:
         eng.create_hypercube(1, DIMS, MEASURES, 10, suppress_zero=True)
         assert eng.cube_def["qSuppressZero"] is True
 
-    def test_null_dimension_rows_are_dropped_by_default(self):
-        """Unattributed facts pile into the "-" row and hijack a top-N."""
+    def test_null_dimension_rows_are_kept_by_default(self):
+        """Facts with no value for the grouping field are still facts, so
+        dropping them is the caller's statement to make. Both tools answer
+        the same way; one of them used to drop them unasked."""
         eng = _FakeEngine()
         eng.create_hypercube(1, DIMS, MEASURES, 10, sort_by="GGR")
-        assert eng.cube_def["qDimensions"][0]["qNullSuppression"] is True
+        assert eng.cube_def["qDimensions"][0]["qNullSuppression"] is False
 
     def test_null_dimension_rows_can_be_kept(self):
         eng = _FakeEngine()
@@ -189,7 +190,8 @@ class TestHypercubeDefinition:
     def test_null_suppression_applies_to_every_dimension(self):
         eng = _FakeEngine()
         dims = [{"field": "clientid"}, {"field": "Region"}]
-        eng.create_hypercube(1, dims, MEASURES, 10)
+        eng.create_hypercube(1, dims, MEASURES, 10,
+                             exclude_null_dimensions=True)
         assert all(d["qNullSuppression"] is True for d in eng.cube_def["qDimensions"])
 
     def test_page_height_follows_limit(self):

@@ -40,6 +40,7 @@ class _Engine(QlikEngineAPI):
         self.period_bounds = period_bounds
         self.batches = []
         self.destroyed = []
+        self.pages = {}
 
     def send_requests_pipelined(self, requests, raise_on_error=True, timeout=None):
         self.batches.append([r["method"] for r in requests])
@@ -51,6 +52,7 @@ class _Engine(QlikEngineAPI):
     def _reply(self, request):
         method = request["method"]
         params = request.get("params") or []
+        handle = request.get("handle")
         if method == "ExpandExpression":
             return {"qExpandedExpression": params[0]}
         if method == "CheckExpression":
@@ -68,10 +70,15 @@ class _Engine(QlikEngineAPI):
         if method == "CreateSessionObject":
             fetch = ((params[0] or {}).get("qHyperCubeDef") or {}).get(
                 "qInitialDataFetch") or [{}]
-            self.page = (fetch[0].get("qTop", 0), fetch[0].get("qHeight"))
-            return {"qReturn": {"qHandle": 100 + len(self.batches)}}
+            handle = 100 + len(self.pages)
+            # Per object, not per stub: a batch holds several queries with
+            # pages of their own, and one shared attribute gave them all
+            # the page of whichever object was created last.
+            self.pages[handle] = (fetch[0].get("qTop", 0),
+                                  fetch[0].get("qHeight"))
+            return {"qReturn": {"qHandle": handle}}
         if method == "GetLayout":
-            return {"qLayout": {"qHyperCube": self._cube()}}
+            return {"qLayout": {"qHyperCube": self._cube(handle)}}
         if method == "DestroySessionObject":
             self.destroyed.append(params[0])
             return {"qReturn": True}
@@ -88,9 +95,9 @@ class _Engine(QlikEngineAPI):
             return {"qText": f"day-{value}", "qNumber": "NaN"}
         return {"qText": str(value), "qNumber": value, "qIsNumeric": True}
 
-    def _cube(self):
+    def _cube(self, handle=None):
         width = len(self.rows[0]) if self.rows else 1
-        top, height = getattr(self, "page", (0, None))
+        top, height = self.pages.get(handle, (0, None))
         shown = self.rows[top:top + height] if height else self.rows[top:]
         return {
             "qSize": {"qcy": len(self.rows), "qcx": width},
@@ -293,8 +300,8 @@ class TestResultShape:
 
     def test_an_unsorted_cut_result_says_the_rows_are_arbitrary(self):
         engine = _Engine(rows=[["North", 10.0]])
-        engine._cube = lambda: dict(
-            _Engine._cube(engine), qSize={"qcy": 500, "qcx": 2})
+        engine._cube = lambda handle=None: dict(
+            _Engine._cube(engine, handle), qSize={"qcy": 500, "qcx": 2})
         reply = engine.run_queries(1, "app", [_query()])["results"][0]
         assert any("no particular order" in w for w in reply["warnings"])
         assert reply["has_more"] is True
@@ -1357,4 +1364,40 @@ class TestEveryExpressionHasASize:
     def test_an_ordinary_measure_still_runs(self):
         result = _Engine().run_queries(1, "app", [_query(
             metrics=[], measures=["Sum([Amount])"])])
+        assert result["queries_failed"] == 0
+
+
+class TestEachQueryGetsItsOwnPage:
+    """A batch holds several queries with pages of their own."""
+
+    def test_two_queries_take_two_pages(self):
+        engine = _Engine(rows=[["North", 1], ["South", 2], ["East", 3]])
+        result = engine.run_queries(1, "app", [
+            dict(_query(offset=0, limit=1), id="first"),
+            dict(_query(offset=2, limit=1), id="second")])
+        first, second = result["results"]
+        assert first["rows"] == [["North", 1.0]]
+        assert second["rows"] == [["East", 3.0]]
+        assert first.get("has_more") is True
+        assert "has_more" not in second
+
+
+class TestYesOrNoEverywhere:
+    @pytest.mark.parametrize("key", ["exclude_null_dimensions",
+                                     "suppress_zero", "include_raw_layout"])
+    @pytest.mark.parametrize("value", ["false", 0, 1, "no"])
+    def test_a_query_key_takes_a_boolean(self, key, value):
+        result = _Engine().run_queries(1, "app", [dict(_query(), **{key: value})])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    @pytest.mark.parametrize("value", ["false", 1, "yes"])
+    def test_total_takes_a_boolean(self, value):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "total": value}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_plain_boolean_still_works(self):
+        result = _Engine().run_queries(1, "app", [dict(
+            _query(metrics=[{"field": "Amount", "agg": "sum", "total": True}]),
+            exclude_null_dimensions=True)])
         assert result["queries_failed"] == 0
