@@ -1098,3 +1098,76 @@ class TestThePartsCountTowardsTheCeiling:
             {"field": "Client", "matching": {
                 "filters": [{"field": "Year", "values": ["2023"]}]}}]})
         assert cost == without + 1
+
+
+class TestAScopeThatNamesNothingAnywhere:
+    """Read from the description, not from the result: a scope naming no
+    set neither replaces the query's filters nor triggers the branch that
+    rebuilds them - wherever it is written."""
+
+    def test_a_part_with_an_empty_scope_keeps_the_query_filters(self):
+        plan = _Engine()._plan_query(1, "app", dict(_query(
+            filters=[{"field": "Region", "values": ["North"]}],
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum", "scope": {}},
+                {"field": "Amount", "agg": "sum"}]}]),
+            scope={"ignore_selections": True}), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum({1} [Amount])" not in expression
+        assert expression.count("{1<[Region]={'North'}>}") == 3
+
+    def test_a_metric_with_an_empty_scope_keeps_them_too(self):
+        plan = _Engine()._plan_query(1, "app", dict(_query(
+            filters=[{"field": "Region", "values": ["North"]}],
+            metrics=[{"field": "Amount", "agg": "sum", "scope": {}}]),
+            scope={"ignore_selections": True}), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum({1<[Region]={'North'}>} [Amount])")
+
+
+class TestMetricsIsAList:
+    """An object was walked by its keys, so each key became a metric while
+    the ceiling counted none of them."""
+
+    @pytest.mark.parametrize("stated", [
+        {"a": {"field": "Amount", "agg": "sum"}}, "Amount", 5])
+    def test_anything_else_is_refused(self, stated):
+        result = _Engine().run_queries(1, "app", [
+            {"group_by": ["Region"], "metrics": stated}])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_list_still_works(self):
+        result = _Engine().run_queries(1, "app", [_query()])
+        assert result["queries_failed"] == 0
+
+
+class TestCountingTheCostIsBounded:
+    """A deeply nested request used to end the count with an interpreter
+    error instead of the refusal the ceiling exists to give."""
+
+    def test_a_deeply_nested_metric_is_refused(self):
+        deep = {"field": "Amount", "agg": "sum"}
+        for _ in range(400):
+            deep = {"op": "add", "of": [deep,
+                                        {"field": "Amount", "agg": "sum"}]}
+        result = _Engine().run_queries(1, "app", [_query(metrics=[deep])])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_deeply_nested_filter_is_refused(self):
+        deep = {"field": "Client", "values": ["a"]}
+        for _ in range(400):
+            deep = {"field": "Client", "matching": {"filters": [deep]}}
+        result = _Engine().run_queries(1, "app", [_query(filters=[deep])])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_element_set_on_the_same_field_costs_nothing_extra(self):
+        from qlik_sense_mcp_server.engine.queries import _filter_cost
+
+        same = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "of_field": "Client",
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        plain = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        assert same == plain
