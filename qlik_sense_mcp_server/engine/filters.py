@@ -175,6 +175,20 @@ def _probe_complaint(result: Dict[str, Any]) -> str:
     return ""
 
 
+def _probe_unusable(result: Dict[str, Any]) -> str:
+    """Whether a probe says nothing that can be built on.
+
+    Wider than a complaint: a call that failed outright reports through
+    `error` rather than through the text of a value, and a form of a filter
+    must not be chosen on the strength of an answer that never came.
+    """
+    complaint = _probe_complaint(result)
+    if complaint:
+        return complaint
+    stated = result.get("error")
+    return str(stated) if stated else ""
+
+
 def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     """The identifier that goes before the modifier, from a description.
 
@@ -531,7 +545,7 @@ class EngineFiltersMixin:
 
         complaints = []
         for (label, modifier), value in zip(candidates, values[1:]):
-            complaint = _probe_complaint(value)
+            complaint = _probe_unusable(value)
             if complaint:
                 complaints.append(complaint)
                 continue
@@ -555,7 +569,7 @@ class EngineFiltersMixin:
         # disagreed.
         usable = [(label, modifier)
                   for (label, modifier), value in zip(candidates, values[1:])
-                  if not _probe_complaint(value)]
+                  if not _probe_unusable(value)]
         if not usable:
             return {"error": (
                 f"Qlik cannot read any form of a period filter on "
@@ -836,6 +850,20 @@ class EngineFiltersMixin:
         `union`, 40 under `intersect` where one contains the other, and 0
         under `exclude` and `symmetric_difference` in the same case.
         """
+        # A key stated beside the combination is still a key: accepting
+        # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
+        # bookmark silently and answered over a different set.
+        beside = [key for key in scope
+                  if key not in ("combine", "of") and bool(scope.get(key))]
+        if beside:
+            return {
+                "error": ("scope states a combination and "
+                          + ", ".join(sorted(beside)) + " at once."),
+                "error_category": "invalid_argument",
+                "hint": ("Put the key inside the entry of `of` it belongs "
+                         "to - each set of a combination states its own."),
+            }
+
         operation = scope.get("combine")
         parts = scope.get("of")
         if operation is None or parts is None:

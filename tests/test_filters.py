@@ -1332,3 +1332,56 @@ class TestEveryFormRefused:
         result = engine.build_filters(1, "app", [{"field": "F",
                                                   "period": "2011"}])
         assert result["error_category"] == "invalid_period"
+
+
+class TestAKeyBesideACombination:
+    """Accepting a combination together with a bookmark dropped the
+    bookmark and answered over a different set."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("extra", [{"bookmark": "BM01"},
+                                       {"ignore_selections": True},
+                                       {"selection_back": 1}])
+    def test_a_key_beside_it_is_refused(self, extra):
+        scope = dict({"combine": "union", "of": [
+            {"ignore_selections": True}, {"current_selection": True}]}, **extra)
+        result = self._engine().build_filters(1, "app", [], scope=scope)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_an_unknown_key_beside_it_is_refused(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [{"ignore_selections": True},
+                                       {"current_selection": True}],
+            "steps_back": 2})
+        assert result["error_category"] == "invalid_argument"
+
+    def test_the_combination_alone_still_works(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [{"ignore_selections": True},
+                                       {"current_selection": True}]})
+        assert result["modifier"] == "{(1) + ($)}"
+
+
+class TestAFormIsNotChosenOnSilence:
+    """A call that failed reports through `error` rather than through the
+    text of a value, and a form must not be picked on an answer that never
+    came."""
+
+    def test_a_failed_probe_is_not_agreement(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": None, "number": None, "is_numeric": False,
+             "error": "the socket went away"}
+            for index, _ in enumerate(exprs)]
+        result = engine.build_filters(1, "app", [{"field": "F",
+                                                  "period": "2011"}])
+        assert result["error_category"] == "invalid_period"

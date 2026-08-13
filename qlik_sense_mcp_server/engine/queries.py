@@ -151,6 +151,13 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
     if not isinstance(query, dict):
         return 0
     total = 0
+    # A combination of sets builds each of its sets, and a set may itself
+    # be a combination: nesting them doubles the work at every level, and
+    # counting only the filters let one small request build hundreds of
+    # thousands of them on the connection every query shares.
+    of = query.get("of")
+    if isinstance(of, (list, tuple)):
+        total += len(of)
     for key, value in query.items():
         if key == "filters" and isinstance(value, list):
             for entry in value:
