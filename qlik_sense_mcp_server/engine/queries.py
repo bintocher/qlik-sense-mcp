@@ -336,6 +336,14 @@ class EngineQueriesMixin:
                     "error_category": "invalid_argument"}
             own = modifier
             own_applied = None
+            if part.get("scope") is not None and part.get("filters") is None:
+                built = slice_for([], part.get("scope"))
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return {}, failed
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
             if "filters" in part and part["filters"] is not None:
                 if slice_for is None or not isinstance(part["filters"], list):
                     return {}, {"id": query_id, "error": (
@@ -593,6 +601,15 @@ class EngineQueriesMixin:
                     "error_category": "invalid_argument"}
             own = modifier
             own_applied = None
+            if (measure.get("scope") is not None
+                    and measure.get("filters") is None):
+                built = slice_for([], measure.get("scope"))
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return [], failed
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
             if "filters" in measure and measure["filters"] is not None:
                 if slice_for is None or not isinstance(measure["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -1137,12 +1154,19 @@ class EngineQueriesMixin:
         # Where measures were narrowed differently from each other, say so
         # per measure: the number alone does not show which slice it came
         # from, and a KPI holding both is the point of the feature.
-        per_measure = [
-            {"label": measure.get("label"),
-             "filters_applied": measure["filters_applied"]}
-            for measure in plan.get("measures", [])
-            if "filters_applied" in measure
-        ]
+        per_measure = []
+        for measure in plan.get("measures", []):
+            if "filters_applied" in measure:
+                per_measure.append({"label": measure.get("label"),
+                                    "filters_applied": measure["filters_applied"]})
+            # A measure made of parts narrows each of them on its own, and
+            # the number alone does not show which part used which slice.
+            for position, (_, part_applied) in enumerate(
+                    measure.get("part_filters") or []):
+                per_measure.append({
+                    "label": f"{measure.get('label')} [{position + 1}]",
+                    "filters_applied": part_applied,
+                })
         if per_measure:
             reply["measure_filters"] = per_measure
         if plan.get("period_check"):

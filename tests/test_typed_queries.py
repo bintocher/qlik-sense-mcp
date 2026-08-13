@@ -791,3 +791,61 @@ class TestControlValuesFollowThePartsToo:
                 {"field": "Amount", "agg": "sum", "filters": []}]}])])
         checks = result["results"][0].get("period_check") or []
         assert [c["field"] for c in checks] == ["OrderDate"]
+
+
+class TestAScopeAppliesWhereverItIsStated:
+    """The rule was written for a metric and reached only a metric, so the
+    flagship shape of this round - "this part by its own scope, that part by
+    the total" - quietly counted one part by the filters of the query."""
+
+    def test_a_part_of_an_operation_can_state_a_scope_alone(self):
+        plan = _Engine()._plan_query(1, "app", dict(_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum",
+                 "scope": {"ignore_selections": True}}]}]),
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum({1} [Amount])" in expression
+        # ...and the other part still carries the filter of the query.
+        assert "[Region]" in expression
+
+    def test_a_hand_written_measure_can_state_a_scope_alone(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[],
+            measures=[{"expression": "Sum({filter} [Amount])",
+                       "scope": {"ignore_selections": True}}]), 0)
+        assert plan["measures"][0]["expression"] == "Sum({1} [Amount])"
+
+    def test_a_broken_scope_on_a_part_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum",
+                 "scope": {"bookmark": "BM", "ignore_selections": True}}]}]), 0)
+        assert "error" in plan
+
+
+class TestTheReplySaysWhichPartUsedWhichSlice:
+    """`measure_filters` answers "which measure used which slice". A metric
+    made of parts narrows each of them on its own, and the number alone does
+    not show it."""
+
+    def test_the_parts_of_an_operation_are_listed(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum",
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"field": "Amount", "agg": "sum", "filters": []}]}])])
+        listed = result["results"][0].get("measure_filters") or []
+        assert [item["label"] for item in listed] == ["share [1]", "share [2]"]
+        assert listed[0]["filters_applied"] and not listed[1]["filters_applied"]
+
+    def test_a_plain_metric_is_listed_as_before(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "north", "field": "Amount", "agg": "sum",
+                      "filters": [{"field": "Region", "values": ["North"]}]}])])
+        listed = result["results"][0].get("measure_filters") or []
+        assert [item["label"] for item in listed] == ["north"]
