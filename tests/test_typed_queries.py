@@ -329,3 +329,146 @@ class TestResultShape:
         shaped = engine._shape_cube(plan)
         assert shaped["object"]["qHyperCubeDef"]["qDimensions"][0][
             "qNullSuppression"] is True
+
+
+class TestNestedAggregations:
+    """An aggregation over groups answers a different question than the
+    same aggregation over rows.
+
+    Measured on four rows - issue A with 1 and 2 days, B with 10, C with
+    100: `Median([days])` returned 6, `Median(Aggr(Sum([days]), [issue]))`
+    returned 10. Asking the first when the second was meant gives a number
+    that looks entirely reasonable.
+    """
+
+    def test_the_motivating_example_is_written_as_qlik_writes_it(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "tis_days", "inner_agg": "sum",
+                      "per": "IssueId", "agg": "fractile", "p": 0.85}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Fractile(Aggr(Sum([tis_days]), [IssueId]), 0.85)")
+
+    def test_the_filter_goes_into_the_inner_aggregation(self):
+        """It is the only function there that reads rows."""
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "tis_days", "inner_agg": "sum",
+                      "per": "IssueId", "agg": "median"}],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert expression.startswith("Median(Aggr(Sum({<")
+        assert expression.endswith("[tis_days]), [IssueId]))")
+
+    def test_grouping_by_several_fields(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum",
+                      "per": ["IssueId", "Region"], "agg": "avg"}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Avg(Aggr(Sum([Amount]), [IssueId], [Region]))")
+
+    def test_a_flat_fractile_needs_no_grouping(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "fractile", "p": 0.5}]), 0)
+        assert plan["measures"][0]["expression"] == "Fractile([Amount], 0.5)"
+
+    def test_a_fractile_without_its_fraction_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "fractile"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "0.85" in plan["hint"]
+
+    def test_grouping_without_an_inner_aggregation_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "per": "IssueId", "agg": "median"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "inner_agg" in plan["hint"]
+
+    def test_an_inner_aggregation_with_nothing_to_group_by_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum",
+                      "agg": "median"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "per" in plan["hint"]
+
+    def test_count_distinct_over_groups_is_refused_with_the_reason(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum",
+                      "per": "IssueId", "agg": "count_distinct"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "counts the groups" in plan["hint"]
+
+    def test_a_fractile_inside_aggr_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "fractile",
+                      "per": "IssueId", "agg": "median"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "fractile" not in plan["allowed_values"]
+
+    def test_the_same_field_twice_in_per_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum",
+                      "per": ["IssueId", "IssueId"], "agg": "median"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "twice" in plan["error"]
+
+    def test_the_label_says_both_aggregations(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum",
+                      "per": "IssueId", "agg": "median"}]), 0)
+        assert plan["measures"][0]["label"] == "median_sum_Amount"
+
+    def test_an_unknown_aggregation_points_at_the_way_out(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "variance"}]), 0)
+        assert "engine_create_hypercube" in plan["hint"]
+
+
+class TestPerMetricFilters:
+    """A KPI needs its numerator and its denominator in one answer."""
+
+    @staticmethod
+    def _kpi():
+        return _query(
+            metrics=[
+                {"field": "Amount", "agg": "count_distinct", "label": "sliced"},
+                {"field": "Amount", "agg": "count_distinct", "label": "all",
+                 "filters": []},
+            ],
+            filters=[{"field": "Region", "values": ["North"]}])
+
+    def test_a_metric_without_filters_takes_the_query_filter(self):
+        plan = _Engine()._plan_query(1, "app", self._kpi(), 0)
+        assert "{<" in plan["measures"][0]["expression"]
+
+    def test_an_empty_list_means_no_filter_at_all(self):
+        plan = _Engine()._plan_query(1, "app", self._kpi(), 0)
+        assert plan["measures"][1]["expression"] == "Count(DISTINCT [Amount])"
+
+    def test_a_metric_can_narrow_differently(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "filters": [{"field": "Category", "values": ["Books"]}]}],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        assert "[Category]" in plan["measures"][0]["expression"]
+        assert "[Region]" not in plan["measures"][0]["expression"]
+
+    def test_the_answer_says_which_measure_used_which_slice(self):
+        result = _Engine().run_queries(1, "app", [self._kpi()])
+        reported = result["results"][0]["measure_filters"]
+        assert [entry["label"] for entry in reported] == ["all"]
+        assert reported[0]["filters_applied"] == []
+
+    def test_the_same_filter_asked_twice_is_built_once(self):
+        engine = _Engine()
+        same = [{"field": "Region", "values": ["North"]}]
+        engine._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum", "filters": same},
+                     {"field": "Amount", "agg": "count", "filters": same}],
+            filters=same), 0)
+        asked = [b for b in engine.batches if b[0] == "EvaluateEx"]
+        assert len(asked) == 1
+
+    def test_filters_that_are_not_a_list_are_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "filters": "Region"}]), 0)
+        assert plan["error_category"] == "invalid_argument"

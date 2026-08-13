@@ -12,6 +12,7 @@ hand-written filter on a date, and Qlik answers such a filter with a
 plausible number rather than an error.
 """
 
+import json
 import logging
 import time
 import uuid
@@ -44,6 +45,23 @@ AGGREGATIONS = {
     "max": "Max({modifier} {field})",
     "median": "Median({modifier} {field})",
     "stdev": "Stdev({modifier} {field})",
+    # A percentile needs the fraction to compute, so it carries `p`.
+    "fractile": "Fractile({modifier} {field}, {p})",
+}
+
+# Aggregations that make sense over the result of an Aggr — that is, over
+# one number per group rather than over rows. `count_distinct` is absent
+# deliberately: it would count how many different per-group values there
+# are, which is not "how many groups" and is rarely what anyone means.
+OUTER_AGGREGATIONS = {
+    "sum": "Sum({inner})",
+    "count": "Count({inner})",
+    "avg": "Avg({inner})",
+    "min": "Min({inner})",
+    "max": "Max({inner})",
+    "median": "Median({inner})",
+    "stdev": "Stdev({inner})",
+    "fractile": "Fractile({inner}, {p})",
 }
 
 # Rows returned per query unless the caller says otherwise. Smaller than
@@ -114,14 +132,28 @@ class EngineQueriesMixin:
             dimensions.append({"field": escape_qlik_field_name(field)})
 
         filters = query.get("filters") or []
-        built = self.build_filters(app_handle, app_id, filters)
+        # One modifier per distinct set of filters, built once and reused.
+        # A KPI asks for two — the slice and everything — and building them
+        # per measure would send the same values to Engine twice.
+        slices = {}
+
+        def slice_for(wanted):
+            signature = json.dumps(wanted, sort_keys=True, ensure_ascii=False,
+                                   default=str)
+            if signature not in slices:
+                slices[signature] = self.build_filters(
+                    app_handle, app_id, wanted)
+            return slices[signature]
+
+        built = slice_for(filters)
         if built.get("error"):
             reply = dict(built)
             reply["id"] = query_id
             return reply
         modifier = built.get("modifier", "")
 
-        measures, error = self._build_measures(query, modifier, query_id)
+        measures, error = self._build_measures(
+            query, modifier, query_id, slice_for)
         if error:
             return error
         if not measures:
@@ -146,8 +178,145 @@ class EngineQueriesMixin:
         }
 
     @staticmethod
-    def _build_measures(query: Dict[str, Any], modifier: str,
-                        query_id: str) -> "tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]":
+    def _field_for_expression(name, what, query_id):
+        """One field name, ready to be written into an expression."""
+        field = bare_field_name(str(name or ""))
+        if not field:
+            return "", {"id": query_id, "error": f"{what} names no field.",
+                        "error_category": "invalid_argument"}
+        if any(ch in field for ch in _UNSAFE_IN_FIELD_NAME):
+            return "", {"id": query_id, "error": (
+                f"{what} [{field}] carries a bracket, which cannot be "
+                f"written into an expression unambiguously."),
+                "error_category": "invalid_argument"}
+        return escape_qlik_field_name(field), None
+
+    @staticmethod
+    def _needs_fraction(query_id):
+        return {"id": query_id,
+                "error": "agg='fractile' names no p.",
+                "error_category": "invalid_argument",
+                "hint": ('Add "p": 0.85 for the 85th percentile. Qlik takes '
+                         'p between 0 and 1.')}
+
+    @staticmethod
+    def _write_metric(metric, modifier, query_id):
+        """Turn one metric into a Qlik expression.
+
+        Two shapes. Flat is an aggregation over rows. Nested is an
+        aggregation over one number per group, where `per` names the group
+        and `inner_agg` says how that number is made.
+
+        The second is not a convenience - it answers a different question.
+        Measured on the same four rows: `Median([days])` over rows returned
+        6, `Median(Aggr(Sum([days]), [issue]))` over issues returned 10.
+        Asking the first when the second was meant returns a number that
+        looks entirely reasonable.
+
+        The filter goes into the innermost aggregation. That is the only
+        function in the expression that reads rows of the table; `Aggr` and
+        whatever wraps it work over numbers that already exist.
+        """
+        prefix = (modifier + " ") if modifier else ""
+        aggregation = str(metric.get("agg") or "sum").strip().lower()
+        per = metric.get("per")
+        inner_agg = metric.get("inner_agg")
+        fraction = metric.get("p")
+
+        field, failure = EngineQueriesMixin._field_for_expression(
+            metric.get("field"), "Metric", query_id)
+        if failure:
+            return {}, failure
+        plain_field = bare_field_name(field)
+
+        if per is None and inner_agg is None:
+            if aggregation not in AGGREGATIONS:
+                return {}, {"id": query_id, "error": (
+                    f"Aggregation {aggregation!r} is not one this server "
+                    f"writes."),
+                    "error_category": "invalid_argument",
+                    "allowed_values": sorted(AGGREGATIONS),
+                    "hint": ("For a calculation this vocabulary cannot "
+                             "state, write the expression in `measures`, or "
+                             "use engine_create_hypercube.")}
+            if aggregation == "fractile" and fraction is None:
+                return {}, EngineQueriesMixin._needs_fraction(query_id)
+            expression = AGGREGATIONS[aggregation].format(
+                modifier=prefix.rstrip() if prefix else "",
+                field=field, p=fraction).replace("(  ", "(").replace("( ", "(")
+            return {"expression": expression,
+                    "label": str(metric.get("label")
+                                 or f"{aggregation}_{plain_field}")}, None
+
+        if inner_agg is None:
+            return {}, {"id": query_id, "error": (
+                f"Metric groups by per={per!r} but names no inner_agg."),
+                "error_category": "invalid_argument",
+                "allowed_values": sorted(AGGREGATIONS),
+                "hint": ('Add "inner_agg": "sum" - the value computed for '
+                         'each group, before the outer aggregation runs over '
+                         'those values.')}
+        if per is None:
+            return {}, {"id": query_id, "error": (
+                f"Metric names inner_agg={inner_agg!r} but nothing to group "
+                f"by."),
+                "error_category": "invalid_argument",
+                "hint": ('Add "per": "OrderId" - the field each inner value '
+                         'is computed for. Without it, drop inner_agg for a '
+                         'plain aggregation.')}
+
+        inner_name = str(inner_agg).strip().lower()
+        if inner_name not in AGGREGATIONS or inner_name == "fractile":
+            return {}, {"id": query_id, "error": (
+                f"inner_agg={inner_agg!r} is not one this server writes "
+                f"inside Aggr."),
+                "error_category": "invalid_argument",
+                "allowed_values": sorted(
+                    name for name in AGGREGATIONS if name != "fractile")}
+        if aggregation not in OUTER_AGGREGATIONS:
+            return {}, {"id": query_id, "error": (
+                f"Aggregation {aggregation!r} is not one this server writes "
+                f"over groups."),
+                "error_category": "invalid_argument",
+                "allowed_values": sorted(OUTER_AGGREGATIONS),
+                "hint": ("count_distinct over groups counts different group "
+                         "values, not groups; count counts the groups."
+                         if aggregation == "count_distinct" else
+                         "For anything else, write the expression in "
+                         "`measures`.")}
+        if aggregation == "fractile" and fraction is None:
+            return {}, EngineQueriesMixin._needs_fraction(query_id)
+
+        per_fields = [per] if isinstance(per, str) else list(per or [])
+        if not per_fields:
+            return {}, {"id": query_id, "error": "per names no field.",
+                        "error_category": "invalid_argument"}
+        written_per = []
+        for name in per_fields:
+            one, failure = EngineQueriesMixin._field_for_expression(
+                name, "per", query_id)
+            if failure:
+                return {}, failure
+            if one in written_per:
+                return {}, {"id": query_id,
+                            "error": f"per names {one} twice.",
+                            "error_category": "invalid_argument"}
+            written_per.append(one)
+
+        inner = AGGREGATIONS[inner_name].format(
+            modifier=prefix.rstrip() if prefix else "",
+            field=field, p=fraction).replace("(  ", "(").replace("( ", "(")
+        grouped = "Aggr(" + inner + ", " + ", ".join(written_per) + ")"
+        expression = OUTER_AGGREGATIONS[aggregation].format(
+            inner=grouped, p=fraction)
+        return {"expression": expression,
+                "label": str(metric.get("label")
+                             or f"{aggregation}_{inner_name}_{plain_field}")}, None
+
+    @staticmethod
+    def _build_measures(query: Dict[str, Any], modifier: str, query_id: str,
+                        slice_for=None
+                        ) -> "tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]":
         """Write one Qlik expression per metric.
 
         A metric names a field and an aggregation; the filter is folded
@@ -155,7 +324,6 @@ class EngineQueriesMixin:
         aggregation it sits in and to nothing else.
         """
         measures: List[Dict[str, Any]] = []
-        prefix = (modifier + " ") if modifier else ""
 
         for metric in query.get("metrics") or []:
             if isinstance(metric, str):
@@ -164,33 +332,38 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"A metric must be an object, got {metric!r}."),
                     "error_category": "invalid_argument"}
-            aggregation = str(metric.get("agg") or "sum").strip().lower()
-            if aggregation not in AGGREGATIONS:
-                return [], {"id": query_id, "error": (
-                    f"Aggregation {aggregation!r} is not one this server "
-                    f"writes."),
-                    "error_category": "invalid_argument",
-                    "allowed_values": sorted(AGGREGATIONS)}
-            field = bare_field_name(str(metric.get("field") or ""))
-            if not field:
-                return [], {"id": query_id, "error": (
-                    f"Metric {metric!r} names no field."),
-                    "error_category": "invalid_argument"}
-            if any(ch in field for ch in _UNSAFE_IN_FIELD_NAME):
-                return [], {"id": query_id, "error": (
-                    f"Field name [{field}] carries a bracket, which cannot be "
-                    f"written into an expression unambiguously."),
-                    "error_category": "invalid_argument",
-                    "hint": ("A metric names one field. For an expression, "
-                             "use `measures`.")}
-            expression = AGGREGATIONS[aggregation].format(
-                modifier=prefix.rstrip() if prefix else "",
-                field=escape_qlik_field_name(field)).replace(
-                    "(  ", "(").replace("( ", "(")
-            measures.append({
-                "expression": expression,
-                "label": str(metric.get("label") or f"{aggregation}_{field}"),
-            })
+            # A metric may narrow itself differently from the query, so a
+            # KPI can hold its numerator and denominator side by side. No
+            # key means the query's filters; an empty list means none at
+            # all, and the two are different statements.
+            own = modifier
+            own_applied = None
+            if "filters" in metric and metric["filters"] is not None:
+                if not isinstance(metric["filters"], list):
+                    return [], {"id": query_id, "error": (
+                        f"Metric filters={metric['filters']!r} is not a "
+                        f"list."),
+                        "error_category": "invalid_argument",
+                        "hint": ('Use [] for no filter at all, or a list of '
+                                 'filter objects.')}
+                if slice_for is None:
+                    return [], {"id": query_id, "error": (
+                        "Per-metric filters are not available here."),
+                        "error_category": "invalid_argument"}
+                built = slice_for(metric["filters"])
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return [], failed
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
+            written, failure = EngineQueriesMixin._write_metric(
+                metric, own, query_id)
+            if failure:
+                return [], failure
+            if own_applied is not None:
+                written["filters_applied"] = own_applied
+            measures.append(written)
 
         # A caller that needs something this vocabulary cannot say writes
         # the expression itself. A filter cannot be folded into an arbitrary
@@ -206,6 +379,22 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"Measure {measure!r} carries no expression."),
                     "error_category": "invalid_argument"}
+            own = modifier
+            own_applied = None
+            if "filters" in measure and measure["filters"] is not None:
+                if slice_for is None or not isinstance(measure["filters"], list):
+                    return [], {"id": query_id, "error": (
+                        f"Measure filters={measure.get('filters')!r} is not a "
+                        f"list."),
+                        "error_category": "invalid_argument"}
+                built = slice_for(measure["filters"])
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return [], failed
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
+            modifier = own
             if not modifier and FILTER_MARKER in expression:
                 return [], {"id": query_id, "error": (
                     f"Measure {expression!r} marks a place for a filter, but "
@@ -232,10 +421,11 @@ class EngineQueriesMixin:
                             "been applied."
                         )}
                 expression = expression.replace(FILTER_MARKER, modifier)
-            measures.append({
-                "expression": expression,
-                "label": str(measure.get("label") or expression),
-            })
+            written = {"expression": expression,
+                       "label": str(measure.get("label") or expression)}
+            if own_applied is not None:
+                written["filters_applied"] = own_applied
+            measures.append(written)
         return measures, None
 
     def _control_probes(self, plan: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -705,6 +895,17 @@ class EngineQueriesMixin:
         }
         if plan.get("filters_applied"):
             reply["filters_applied"] = plan["filters_applied"]
+        # Where measures were narrowed differently from each other, say so
+        # per measure: the number alone does not show which slice it came
+        # from, and a KPI holding both is the point of the feature.
+        per_measure = [
+            {"label": measure.get("label"),
+             "filters_applied": measure["filters_applied"]}
+            for measure in plan.get("measures", [])
+            if "filters_applied" in measure
+        ]
+        if per_measure:
+            reply["measure_filters"] = per_measure
         if plan.get("period_check"):
             reply["period_check"] = plan["period_check"]
         if total_rows > len(rows):
