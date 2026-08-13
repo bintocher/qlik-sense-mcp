@@ -250,7 +250,7 @@ class TestCombining:
         result = _Engine().build_filters(
             1, "app", [{"field": "F", "period": "2011", "values": ["North"]}])
         assert result["error_category"] == "invalid_filter"
-        assert "two filters" in result["hint"]
+        assert "several filters" in result["hint"]
 
     def test_a_filter_that_is_not_an_object_is_refused_with_an_example(self):
         result = _Engine().build_filters(1, "app", ["Region=North"])
@@ -648,3 +648,91 @@ class TestConditionByExpression:
         result = self._engine().build_filters(
             1, "app", [{"field": "Year", "match_expression": "   "}])
         assert result["error_category"] == "invalid_filter"
+
+
+class TestOneConditionPerFilter:
+    """Several kinds of condition in one filter is a contradiction, not a
+    combination. Taking the first and dropping the rest answered a
+    question nobody asked, with a plausible number to show for it."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_text_and_values_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "contains": "North",
+                        "values": ["South"]}])
+        assert result["error_category"] == "invalid_filter"
+        assert "contains" in result["error"] and "values" in result["error"]
+
+    def test_an_element_set_and_a_range_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "F", "period": "2011",
+                        "matching": {"filters": [{"field": "Region",
+                                                  "values": ["North"]}]}}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_an_expression_and_values_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "match_expression": "1=1",
+                        "values": ["North"]}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_values_and_exclude_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"],
+                        "exclude": ["South"]}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_one_condition_still_works(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
+
+
+class TestAKeyWithNoValueIsNotACondition:
+    """`contains: null` used to search for the text "None"."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_null_text_filter_is_not_a_search_for_none(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "contains": None,
+                        "values": ["North"]}])
+        assert "error" not in result
+        assert "None" not in result["modifier"]
+        assert "'North'" in result["modifier"]
+
+    def test_a_null_element_set_is_not_a_condition(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "matching": None,
+                        "values": ["North"]}])
+        assert "error" not in result
+
+
+class TestBoundsBeyondTheCalendar:
+    """A date written as 20240101 lands around the year 57000."""
+
+    @pytest.mark.parametrize("bound", [20240101, 10 ** 12, -10 ** 12])
+    def test_a_number_too_large_to_be_a_day_is_refused_as_a_bound(self, bound):
+        assert _parse_bound(bound, upper=False) is None
+
+    def test_the_refusal_carries_the_forms_it_reads(self):
+        engine = _Engine(date_fields=("F",))
+        result = engine.period_modifier(1, "app", "F", 20240101, None)
+        assert result["error_category"] == "invalid_period"
+        assert result["accepted_forms"]
+
+    def test_an_ordinary_serial_number_still_reads(self):
+        assert _parse_bound(45292, upper=False) is not None

@@ -68,7 +68,13 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        return _EPOCH + datetime.timedelta(days=int(value))
+        # A date written as 20240101 lands somewhere around the year 57000,
+        # which is past what a date can hold. That is a bound this server
+        # cannot read, and it belongs with the rest of them.
+        try:
+            return _EPOCH + datetime.timedelta(days=int(value))
+        except (OverflowError, ValueError, OSError):
+            return None
     text = str(value or "").strip()
     if not text:
         return None
@@ -692,13 +698,49 @@ class EngineFiltersMixin:
                         "field names are case-sensitive; copy them exactly",
                     ],
                 }
-            has_period = any(k in entry for k in
-                             ("from", "to", "period", "greater_than",
-                              "less_than"))
             # Which of the set operators this filter uses, if any. More
             # than one at a time is a contradiction, not a combination.
-            # Values of this field that satisfy a condition on another —
-            # what P() and E() answer, and nothing else does.
+            # One filter, one kind of condition. Stating several is a
+            # contradiction rather than a combination, and answering the
+            # first one silently drops the rest — with a plausible number
+            # to show for it.
+            kinds = {
+                "an element set": [k for k in ("matching", "not_matching")
+                                   if entry.get(k) is not None],
+                "text": [k for k in ("contains", "starts_with", "ends_with")
+                         if entry.get(k) is not None],
+                "an expression": (["match_expression"]
+                                  if entry.get("match_expression") is not None
+                                  else []),
+                "values": [k for k in SET_OPERATORS if entry.get(k) is not None],
+                "a range": [k for k in ("from", "to", "period", "greater_than",
+                                        "less_than")
+                            if entry.get(k) is not None],
+            }
+            stated = [name for name, keys in kinds.items() if keys]
+            if len(stated) > 1:
+                named = sorted(key for keys in kinds.values() for key in keys)
+                return {
+                    "error": (
+                        f"Filter on {escape_qlik_field_name(field)} states "
+                        f"{' and '.join(stated)} at once: "
+                        + ", ".join(named)
+                    ),
+                    "error_category": "invalid_filter",
+                    "hint": ("One condition per filter. Use several filters "
+                             "on the same field to combine them."),
+                }
+            if len(kinds["text"]) > 1 or len(kinds["values"]) > 1:
+                named = sorted(kinds["text"] + kinds["values"])
+                return {
+                    "error": (
+                        f"Filter on {escape_qlik_field_name(field)} states "
+                        + " and ".join(named) + " at once."
+                    ),
+                    "error_category": "invalid_filter",
+                }
+
+            has_period = bool(kinds["a range"])
             if entry.get("matching") is not None or entry.get(
                     "not_matching") is not None:
                 outcome = self._element_set(app_handle, app_id, field, entry)
@@ -710,16 +752,7 @@ class EngineFiltersMixin:
                 continue
 
             # Matching by text rather than by exact value.
-            pattern = [key for key in ("contains", "starts_with", "ends_with")
-                       if key in entry]
-            if len(pattern) > 1:
-                return {
-                    "error": (
-                        f"Filter on {escape_qlik_field_name(field)} states "
-                        f"{' and '.join(pattern)} at once."
-                    ),
-                    "error_category": "invalid_filter",
-                }
+            pattern = kinds["text"]
             if pattern:
                 outcome = self.pattern_modifier(
                     app_handle, field, pattern[0], entry[pattern[0]])
@@ -752,18 +785,7 @@ class EngineFiltersMixin:
                                 "match_expression": condition})
                 continue
 
-            named = [key for key in SET_OPERATORS if key in entry]
-            if len(named) > 1:
-                return {
-                    "error": (
-                        f"Filter on {escape_qlik_field_name(field)} states "
-                        f"{' and '.join(named)} at once."
-                    ),
-                    "error_category": "invalid_filter",
-                    "hint": ("One operator per filter. Use two filters on "
-                             "the same field to combine them."),
-                }
-            operator = named[0] if named else "values"
+            operator = kinds["values"][0] if kinds["values"] else "values"
             values = entry.get(operator)
             if has_period and values is not None:
                 return {
