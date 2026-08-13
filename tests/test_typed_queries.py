@@ -1484,3 +1484,25 @@ class TestReadingOnUntilThePageIsWhole:
         assert reply["returned_rows"] == 1
         assert any("came back" in w and "offset=1" in w
                    for w in reply["warnings"])
+
+
+class TestACombinationReachesEveryLevel:
+    def test_a_metric_can_state_one(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum", "scope": {
+                "combine": "union", "of": [
+                    {"ignore_selections": True,
+                     "filters": [{"field": "Region", "values": ["North"]}]},
+                    {"ignore_selections": True,
+                     "filters": [{"field": "Region", "values": ["South"]}]}]}}]
+            ), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum({(1<[Region]={'North'}>) + (1<[Region]={'South'}>)} "
+            "[Amount])")
+
+    def test_the_query_can_state_one(self):
+        plan = _Engine()._plan_query(1, "app", dict(_query(), scope={
+            "combine": "intersect", "of": [
+                {"ignore_selections": True},
+                {"current_selection": True}]}), 0)
+        assert "(1) * ($)" in plan["measures"][0]["expression"]

@@ -131,6 +131,8 @@ def _scope_names_a_set(scope: Any) -> bool:
     if not isinstance(scope, dict):
         # Not an object at all: let the check that refuses it see it.
         return True
+    if scope.get("combine") is not None or scope.get("of") is not None:
+        return True
     return any(bool(value) for value in scope.values())
 
 
