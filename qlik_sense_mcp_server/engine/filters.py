@@ -514,8 +514,10 @@ class EngineFiltersMixin:
         # A complaint is a refusal: Qlik answering the reference with the
         # text of an error says the bounds cannot be read at all, and
         # picking a form over that answer hides it.
-        complaint = _probe_complaint(values[0]) if values else ""
+        complaint = _probe_unusable(values[0]) if values else ""
         if complaint:
+            # The reference is what every candidate form is measured
+            # against; without it a form would be chosen on nothing.
             return {"error": (
                 f"Qlik cannot read the period on "
                 f"{escape_qlik_field_name(field)}: {complaint}"),
@@ -854,7 +856,8 @@ class EngineFiltersMixin:
         # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
         # bookmark silently and answered over a different set.
         beside = [key for key in scope
-                  if key not in ("combine", "of") and bool(scope.get(key))]
+                  if key not in ("combine", "of")
+                  and scope.get(key) is not None]
         if beside:
             return {
                 "error": ("scope states a combination and "

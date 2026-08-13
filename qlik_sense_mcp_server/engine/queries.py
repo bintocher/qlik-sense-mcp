@@ -155,9 +155,14 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
     # be a combination: nesting them doubles the work at every level, and
     # counting only the filters let one small request build hundreds of
     # thousands of them on the connection every query shares.
-    of = query.get("of")
-    if isinstance(of, (list, tuple)):
-        total += len(of)
+    # `of` says two different things: the sets of a combination, and the
+    # parts of an arithmetic metric. Only the first builds sets, and the
+    # second is already counted as expressions - counting it here refused
+    # ordinary "share of the whole" queries well inside the ceiling.
+    if query.get("combine") is not None:
+        of = query.get("of")
+        if isinstance(of, (list, tuple)):
+            total += len(of)
     for key, value in query.items():
         if key == "filters" and isinstance(value, list):
             for entry in value:
