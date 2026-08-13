@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 _FILTER_MARKER = "{filter}"
 
 
+MAX_EXPRESSION_CHARS = 20000
+
+
 class EngineHypercubeMixin:
     # How long a socket is trusted without probing after its last answered
     # frame. Anything shorter buys nothing: a socket that answered a moment
@@ -116,6 +119,21 @@ class EngineHypercubeMixin:
         every_text = dimension_texts + measure_texts
         if not every_text:
             return {"warnings": warnings}
+
+        # One expression has a size, whichever path built it. The typed
+        # query checks what it writes; this is the border every expression
+        # crosses, including the ones a caller wrote by hand.
+        for text in every_text:
+            if len(text) > MAX_EXPRESSION_CHARS:
+                return {
+                    "error": (
+                        f"An expression is {len(text)} characters long, "
+                        f"over the {MAX_EXPRESSION_CHARS} this server "
+                        f"sends."),
+                    "error_category": "limit_exceeded",
+                    "hint": ("Shorten it, or state the parts as separate "
+                             "measures."),
+                }
 
         if inspection is None:
             inspection = self.inspect_expressions(app_handle, every_text)
@@ -526,7 +544,7 @@ class EngineHypercubeMixin:
         sort_order: str = "desc",
         suppress_zero: bool = False,
         include_raw_layout: bool = False,
-        exclude_null_dimensions: bool = True,
+        exclude_null_dimensions: bool = False,
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:

@@ -415,7 +415,7 @@ def engine_create_hypercube(
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     suppress_zero: bool = False,
-    exclude_null_dimensions: bool = True,
+    exclude_null_dimensions: bool = False,
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
     offset: int = 0,

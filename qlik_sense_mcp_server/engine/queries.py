@@ -34,6 +34,16 @@ MAX_EXPRESSION_CHARS = 20000
 RANGE_PROBE_COST = 3
 
 
+def _yes_or_no(value: Any, key: str, query_id: str
+               ) -> Optional[Dict[str, Any]]:
+    """The refusal a non-boolean earns for a key that means yes or no."""
+    if value is None or isinstance(value, bool):
+        return None
+    return {"id": query_id, "error": f"{key}={value!r} is not yes or no.",
+            "error_category": "invalid_argument",
+            "hint": "true or false, not the word for it."}
+
+
 def _too_long(expression: str, query_id: str) -> Optional[Dict[str, Any]]:
     """The refusal an oversized expression earns, or nothing.
 
@@ -264,6 +274,12 @@ class EngineQueriesMixin:
         """Turn one typed query into dimensions, measures and a modifier."""
         query_id = str(query.get("id") or f"q{position + 1}")
 
+        for key in ("exclude_null_dimensions", "suppress_zero",
+                    "include_raw_layout"):
+            refusal = _yes_or_no(query.get(key), key, query_id)
+            if refusal:
+                return refusal
+
         group_by = query.get("group_by")
         if group_by is None:
             group_by = query.get("dimensions")
@@ -347,7 +363,8 @@ class EngineQueriesMixin:
             # the same query with no scope at all.
             "scope": built.get("scope"),
             "limit": query.get("limit", DEFAULT_QUERY_LIMIT),
-            "exclude_null_dimensions": query.get("exclude_null_dimensions", False),
+            "exclude_null_dimensions": query.get(
+                "exclude_null_dimensions", False),
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
@@ -401,6 +418,9 @@ class EngineQueriesMixin:
         share. `total_except: ["Region"]` ignores all of it but those
         fields, which is a share within a group.
         """
+        refusal = _yes_or_no(metric.get("total"), "total", query_id)
+        if refusal:
+            return "", refusal
         total = metric.get("total")
         except_fields = metric.get("total_except")
         if except_fields is not None:
@@ -523,6 +543,24 @@ class EngineQueriesMixin:
                     nested, position=position,
                     label_path=[position] + (nested.get("label_path") or
                                              [nested.get("position")])))
+
+        # Measured before it is built: the guard against zero writes every
+        # denominator a second time, so nesting divisions doubles the text
+        # at each level. Checking the finished string means the megabytes
+        # have already been allocated - and one call may hold several of
+        # these.
+        planned = sum(len(one) for one in written) + 6 * len(written)
+        if operation == "divide":
+            planned += sum(len(one) for one in written[1:]) + 12
+        if planned > MAX_EXPRESSION_CHARS:
+            return {}, {"id": query_id, "error": (
+                f"This measure would be about {planned} characters long, "
+                f"over the {MAX_EXPRESSION_CHARS} this server sends."),
+                "error_category": "limit_exceeded",
+                "hint": ("A division writes its denominator twice, so "
+                         "divisions inside divisions double the text at "
+                         "every level. State the inner ones as separate "
+                         "metrics.")}
 
         joined = OPERATIONS[operation].join(written)
         if operation == "divide":
