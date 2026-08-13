@@ -1171,3 +1171,70 @@ class TestCountingTheCostIsBounded:
             {"field": "Client", "matching": {
                 "filters": [{"field": "Year", "values": ["2023"]}]}}]})
         assert same == plain
+
+
+class TestZeroSaysNothing:
+    """`ignore_selections: 0` names no set, and a step count of zero is no
+    step - reading them as statements cancelled the query's filters."""
+
+    @pytest.mark.parametrize("scope", [{"ignore_selections": 0},
+                                       {"selection_back": 0},
+                                       {"bookmark": 0}])
+    def test_a_zero_keeps_the_query_filters(self, scope):
+        plan = _Engine()._plan_query(1, "app", _query(
+            filters=[{"field": "Region", "values": ["North"]}],
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum({<[Region]={'North'}>} [Amount])")
+
+
+class TestAPartInheritsFromItsMetric:
+    def test_an_empty_scope_beside_a_filter_inherits_the_metric_scope(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide",
+                      "scope": {"ignore_selections": True}, "of": [
+                          {"field": "Amount", "agg": "sum", "scope": {},
+                           "filters": [{"field": "Region",
+                                        "values": ["North"]}]},
+                          {"field": "Amount", "agg": "sum"}]}]), 0)
+        assert "Sum({1<[Region]={'North'}>} [Amount])" in (
+            plan["measures"][0]["expression"])
+
+
+class TestEveryListIsAList:
+    @pytest.mark.parametrize("key", ["group_by", "measures"])
+    @pytest.mark.parametrize("stated", [{"a": 1}, 5])
+    def test_anything_else_is_refused(self, key, stated):
+        query = {"group_by": ["Region"],
+                 "metrics": [{"field": "Amount", "agg": "sum"}]}
+        query[key] = stated
+        result = _Engine().run_queries(1, "app", [query])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_one_field_named_plainly_still_works(self):
+        result = _Engine().run_queries(1, "app", [
+            {"group_by": "Region",
+             "metrics": [{"field": "Amount", "agg": "sum"}]}])
+        assert result["results"][0]["columns"] == ["Region", "sum_Amount"]
+
+
+class TestTheCostOfAName:
+    def test_the_same_field_in_brackets_costs_nothing_extra(self):
+        from qlik_sense_mcp_server.engine.queries import _filter_cost
+
+        bracketed = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "of_field": "[Client]",
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        plain = _filter_cost({"filters": [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}]})
+        assert bracketed == plain
+
+    def test_a_range_costs_what_it_measures(self):
+        from qlik_sense_mcp_server.engine.queries import (
+            _filter_cost, RANGE_PROBE_COST)
+
+        ranged = _filter_cost({"filters": [
+            {"field": "OrderDate", "period": "2024"}]})
+        assert ranged == 1 + RANGE_PROBE_COST
