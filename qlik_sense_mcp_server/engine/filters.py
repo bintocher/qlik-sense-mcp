@@ -336,6 +336,12 @@ class EngineFiltersMixin:
         modifier = f'{name}={{"{"".join(parts)}"}}'
         counted = self.evaluate_expressions(
             app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+        complaint = _probe_complaint(counted[0]) if counted else ""
+        if complaint:
+            return {"error": (
+                f"Qlik cannot read the bounds on "
+                f"{escape_qlik_field_name(field)}: {complaint}"),
+                "error_category": "invalid_filter"}
         matched = counted[0].get("number") if counted else None
         if matched is not None and int(matched) == 0:
             return {
@@ -445,6 +451,12 @@ class EngineFiltersMixin:
                 counted = self.evaluate_expressions(
                     app_handle,
                     [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+                complaint = _probe_complaint(counted[0]) if counted else ""
+                if complaint:
+                    return {"error": (
+                        f"Qlik cannot read the period on "
+                        f"{escape_qlik_field_name(field)}: {complaint}"),
+                        "error_category": "invalid_period"}
                 matched = counted[0].get("number") if counted else None
                 if matched is not None and int(matched) > 0:
                     return {"modifier": modifier, "form": label,
@@ -462,6 +474,15 @@ class EngineFiltersMixin:
             for _, modifier in candidates
         ]
         values = self.evaluate_expressions(app_handle, probes)
+        # A complaint is a refusal: Qlik answering the reference with the
+        # text of an error says the bounds cannot be read at all, and
+        # picking a form over that answer hides it.
+        complaint = _probe_complaint(values[0]) if values else ""
+        if complaint:
+            return {"error": (
+                f"Qlik cannot read the period on "
+                f"{escape_qlik_field_name(field)}: {complaint}"),
+                "error_category": "invalid_period"}
         if not values or values[0].get("number") is None:
             # The probe itself did not run. Use the form that holds
             # everywhere rather than refusing a query over a failed check.
@@ -581,7 +602,8 @@ class EngineFiltersMixin:
         return outcome
 
     def _element_set(self, app_handle: int, app_id: str, field: str,
-                     entry: Dict[str, Any]) -> Dict[str, Any]:
+                     entry: Dict[str, Any],
+                     outer_set: str = "") -> Dict[str, Any]:
         """Values of a field that satisfy a condition on another field.
 
         This is what P() and E() are for, and nothing else expresses it: a
@@ -676,7 +698,8 @@ class EngineFiltersMixin:
         # field to nothing, and an empty answer reads as "no such data"
         # rather than as "no such client".
         counted = self.evaluate_expressions(
-            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
+            app_handle,
+            [f"=Count({{{outer_set}<{modifier}>}} DISTINCT {name})"])
         complaint = _probe_complaint(counted[0]) if counted else ""
         if complaint:
             return {"error": (
@@ -957,7 +980,8 @@ class EngineFiltersMixin:
             has_period = bool(kinds["a range"])
             if entry.get("matching") is not None or entry.get(
                     "not_matching") is not None:
-                outcome = self._element_set(app_handle, app_id, field, entry)
+                outcome = self._element_set(app_handle, app_id, field, entry,
+                                            outer_set=identifier)
                 if outcome.get("error"):
                     return outcome
                 parts.append(outcome["modifier"])

@@ -1506,3 +1506,33 @@ class TestACombinationReachesEveryLevel:
                 {"ignore_selections": True},
                 {"current_selection": True}]}), 0)
         assert "(1) * ($)" in plan["measures"][0]["expression"]
+
+
+class TestTheEstimateMatchesWhatIsWritten:
+    """An allowed expression on the boundary used to be refused for length
+    it never had."""
+
+    @pytest.mark.parametrize("parts", [2, 3, 50, 400])
+    def test_the_estimate_is_exact(self, parts):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"} for _ in range(parts)]}]), 0)
+        written = ["Sum([Amount])"] * parts
+        planned = (sum(len(one) for one in written) + 3 * (parts - 1)
+                   + sum(len(one) + 6 for one in written[1:])
+                   + 4 * max(0, parts - 2) + 14)
+        assert len(plan["measures"][0]["expression"]) == planned
+
+
+class TestEachQuerySaysWhyItCameUpShort:
+    def test_the_reason_is_that_query_own(self):
+        engine = _Engine(rows=[["A", 1], ["B", 2], ["C", 3]])
+        engine.short_page = 1
+        engine.stops_sending = True
+        result = engine.run_queries(1, "app", [
+            dict(_query(limit=3), id="first"),
+            dict(_query(limit=1), id="second")])
+        first, second = result["results"]
+        assert any("Engine stopped sending" in w for w in first["warnings"])
+        assert second["returned_rows"] == 1
+        assert not any("came back;" in w for w in second.get("warnings") or [])
