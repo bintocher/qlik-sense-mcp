@@ -153,6 +153,21 @@ SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
               "selection_back", "selection_forward")
 
 
+def _probe_complaint(result: Dict[str, Any]) -> str:
+    """What Qlik said about a probe, when what it said was a complaint.
+
+    A probe that comes back with no number has two very different causes.
+    Qlik answers a broken expression with the text of the error, and that
+    is a refusal to pass on. A probe that never ran at all - a dropped
+    frame, a timeout - says nothing about the query and must not be read
+    as one.
+    """
+    text = str(result.get("text") or "")
+    if text.startswith("Error"):
+        return text.split("Error:", 1)[-1].strip() or text
+    return ""
+
+
 def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     """The identifier that goes before the modifier, from a description.
 
@@ -517,6 +532,13 @@ class EngineFiltersMixin:
             for v in wanted
         ]
         counts = self.evaluate_expressions(app_handle, probes)
+        for result in counts:
+            complaint = _probe_complaint(result)
+            if complaint:
+                return {"error": (
+                    f"Qlik cannot read the filter on "
+                    f"{escape_qlik_field_name(field)}: {complaint}"),
+                    "error_category": "invalid_filter"}
         missing = [
             value for value, result in zip(wanted, counts)
             if result.get("number") is not None and int(result["number"]) == 0
@@ -636,8 +658,34 @@ class EngineFiltersMixin:
         # No braces around it: an element set is assigned to the field
         # directly, `Customer = P({...} Customer)`, the way Qlik's own
         # examples are written. Wrapped in braces it does not parse.
-        return {"modifier": f"{escape_qlik_field_name(field)}={joined}",
-                "field": field, "element_set": joined}
+        name = escape_qlik_field_name(field)
+        modifier = f"{name}={joined}"
+        # Proven to select something, like every other kind of condition.
+        # "The clients who bought in a year nobody bought in" narrows the
+        # field to nothing, and an empty answer reads as "no such data"
+        # rather than as "no such client".
+        counted = self.evaluate_expressions(
+            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
+        complaint = _probe_complaint(counted[0]) if counted else ""
+        if complaint:
+            return {"error": (
+                f"Qlik cannot read the condition on {name}: {complaint}"),
+                "error_category": "invalid_filter"}
+        matched = counted[0].get("number") if counted else None
+        if matched is not None and int(matched) == 0:
+            return {"error": (
+                f"No value of {name} satisfies the condition stated for "
+                f"it."),
+                "error_category": "value_not_found",
+                "next_actions": [
+                    f"read the values with get_app_field on {name}",
+                    "check the filters inside `matching` select something",
+                ]}
+        outcome = {"modifier": modifier, "field": field,
+                   "element_set": joined}
+        if matched is not None:
+            outcome["matched"] = int(matched)
+        return outcome
 
     def pattern_modifier(self, app_handle: int, field: str, kind: str,
                          value: Any, base: str = "") -> Dict[str, Any]:
@@ -671,6 +719,12 @@ class EngineFiltersMixin:
         # "there is no such data" instead of "there is no such spelling".
         counted = self.evaluate_expressions(
             app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+        complaint = _probe_complaint(counted[0]) if counted else ""
+        if complaint:
+            return {"error": (
+                f"Qlik cannot read the {kind} filter on "
+                f"{escape_qlik_field_name(field)}: {complaint}"),
+                "error_category": "invalid_filter"}
         matched = counted[0].get("number") if counted else None
         if matched is not None and int(matched) == 0:
             return {
@@ -858,36 +912,31 @@ class EngineFiltersMixin:
                 # a set modifier Qlik reads a broken condition as text and
                 # answers zero, so the condition is checked on its own,
                 # where Qlik does say what is wrong with it.
-                try:
-                    verdict = self.send_request(
-                        "CheckExpression", [condition], handle=app_handle)
-                    complaint = str(verdict.get("qErrorMsg") or "").strip()
-                    # Qlik answers with two things, and a name it does not
-                    # know is the second: a misspelled field is read as a
-                    # value of itself, so the condition scores false
-                    # everywhere and the answer is empty rather than wrong.
-                    unknown = [
-                        condition[bad["qFrom"]:bad["qFrom"] + bad["qCount"]]
-                        for bad in verdict.get("qBadFieldNames") or []
-                    ]
-                except Exception:
-                    complaint, unknown = "", []
-                if complaint:
+                # The same two questions the measures go through, asked
+                # by the same code: a variable is expanded first, because
+                # the name that reaches Qlik is the expanded one, and both
+                # halves of the verdict are read - the parse error and the
+                # names the model does not have.
+                expanded = self.expand_expressions(
+                    app_handle, [condition]).get(condition, condition)
+                fault = self.check_expressions(
+                    app_handle, [expanded]).get(expanded) or {}
+                if fault.get("error"):
                     return {"error": (
                         f"match_expression on "
                         f"{escape_qlik_field_name(field)} is not an "
-                        f"expression Qlik reads: {complaint}"),
+                        f"expression Qlik reads: {fault['error']}"),
                         "error_category": "invalid_expression",
                         "hint": ("It is scored for each value of the field, "
                                  "so it reads like a measure: "
                                  "Sum([Amount]) > 1000.")}
-                if unknown:
+                if fault.get("bad_fields"):
                     return {"error": (
                         f"match_expression on "
                         f"{escape_qlik_field_name(field)} names a field this "
                         f"app does not have: "
                         + ", ".join(escape_qlik_field_name(name)
-                                    for name in unknown)),
+                                    for name in fault["bad_fields"])),
                         "error_category": "field_not_found",
                         "next_actions": [
                             "call get_app_details(app_id) and read "
@@ -900,6 +949,17 @@ class EngineFiltersMixin:
                 counted = self.evaluate_expressions(
                     app_handle,
                     [f"=Count({{{identifier}<{modifier}>}} DISTINCT {name})"])
+                complaint = _probe_complaint(counted[0]) if counted else ""
+                if complaint:
+                    # A double quote inside the condition closes the search
+                    # early: measured, Qlik answers the whole modifier with
+                    # "Error in set modifier ad hoc element list". The
+                    # condition alone reads fine, so only the built
+                    # modifier shows it.
+                    return {"error": (
+                        f"Qlik cannot read match_expression on {name}: "
+                        f"{complaint}"),
+                        "error_category": "invalid_expression"}
                 matched = counted[0].get("number") if counted else None
                 if matched is not None and int(matched) == 0:
                     return {"error": (
@@ -910,8 +970,10 @@ class EngineFiltersMixin:
                             f"read the values with get_app_field on {name}",
                         ]}
                 parts.append(modifier)
-                applied.append({"field": field,
-                                "match_expression": condition})
+                record = {"field": field, "match_expression": condition}
+                if matched is not None:
+                    record["matched"] = int(matched)
+                applied.append(record)
                 continue
 
             operator = kinds["values"][0] if kinds["values"] else "values"
