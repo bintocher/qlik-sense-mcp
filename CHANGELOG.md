@@ -29,6 +29,34 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   reply says in `measure_filters` which measure used which slice.
 - `engine_query` accepts `measures` in a single query, not only inside
   `queries`.
+- A filter says which of the four things it does with the values it
+  names: keep them (`values`), drop them (`exclude`), add them to what is
+  selected (`add`) or keep what is in both (`intersect`). Only one per
+  filter — several conditions on one field are several filters, and
+  stating two at once is refused rather than answered by the first.
+- A filter can name values of its field by a condition on another field:
+  `matching` for the clients who bought in 2023, `not_matching` for those
+  who did not, both together for "bought then and not since". `of_field`
+  reads the values from a different field than the one being narrowed.
+  Measured on a model of a hundred: 60 bought in 2023, 40 did not, 30
+  bought in 2023 and not in 2024.
+- A filter can search text (`contains`, `starts_with`, `ends_with`,
+  case-insensitive) or keep the values an expression holds for
+  (`match_expression`).
+- `scope` says what a query counts over before any filter narrows it: the
+  whole model whatever is selected, a bookmark, an alternate state, or
+  the selections as they were a few steps back. Stated on the query it
+  reaches every measure; stated on one metric, or on one part of an
+  arithmetic metric, only that one.
+- `total` and `total_except` count across the grouping instead of within
+  it, so a share of the whole is one metric beside the value it is a
+  share of. Measured on 40 and 60 against a total of 100: the shares came
+  back 0.4 and 0.6, and with `total_except` by region each client's row
+  carried its own region's total.
+- `op` and `of` state arithmetic over aggregations — a ratio, a
+  difference, a product — with each part free to carry its own filters
+  and its own scope. Division answers with no value rather than an error
+  when the denominator is zero. The reply names the slice each part used.
 
 ### Fixed
 
