@@ -23,23 +23,26 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-def _metric_cost(metrics: Any) -> int:
+MAX_NESTING = 20
+
+
+def _metric_cost(metrics: Any, depth: int = 0) -> int:
     """How many expressions a list of metrics will build.
 
     A metric made of parts builds one per part, and a part may itself be
     made of parts. Counting the list alone let one allowed metric carry an
     expression of any size into a connection shared by every query.
     """
-    if not isinstance(metrics, (list, tuple)):
-        return 0
+    if depth > MAX_NESTING or not isinstance(metrics, (list, tuple)):
+        return 0 if depth <= MAX_NESTING else MAX_EXPRESSIONS_PER_CALL + 1
     total = 0
     for metric in metrics:
         if not isinstance(metric, dict):
             total += 1
             continue
         parts = metric.get("of")
-        total += (_metric_cost(parts) if isinstance(parts, (list, tuple))
-                  else 1)
+        total += (_metric_cost(parts, depth + 1)
+                  if isinstance(parts, (list, tuple)) else 1)
     return total
 
 
@@ -59,18 +62,7 @@ def _scope_names_a_set(scope: Any) -> bool:
                for value in scope.values())
 
 
-def _scope_says_something(built: Dict[str, Any]) -> bool:
-    """Whether a built slice states anything at all.
-
-    `{}` names no set, and neither does every key set to false. Reading
-    the presence of the key rather than its content made such a scope
-    throw away the filters inherited from the query, and the answer came
-    back as a plausible number over every row.
-    """
-    return bool(built.get("modifier")) or bool(built.get("applied"))
-
-
-def _filter_cost(query: Any) -> int:
+def _filter_cost(query: Any, depth: int = 0) -> int:
     """How many Engine calls the filters of a query will cost.
 
     Every filter asks Engine about its field, and every value asks whether
@@ -78,8 +70,10 @@ def _filter_cost(query: Any) -> int:
     metric carry three hundred of its own, or an element set hide them one
     level down, and pass a budget meant to bound exactly that.
     """
+    if depth > MAX_NESTING:
+        return MAX_EXPRESSIONS_PER_CALL + 1
     if isinstance(query, list):
-        return sum(_filter_cost(item) for item in query)
+        return sum(_filter_cost(item, depth + 1) for item in query)
     if not isinstance(query, dict):
         return 0
     total = 0
@@ -96,12 +90,15 @@ def _filter_cost(query: Any) -> int:
                               else (1 if stated is not None else 0))
                 for nested in ("matching", "not_matching"):
                     inner = entry.get(nested)
-                    total += _filter_cost(inner)
+                    total += _filter_cost(inner, depth + 1)
                     # Reading from another field costs one more question.
-                    if isinstance(inner, dict) and inner.get("of_field"):
+                    # The same field is the one already asked about.
+                    if (isinstance(inner, dict) and inner.get("of_field")
+                            and str(inner["of_field"]).strip()
+                            != str(entry.get("field") or "").strip()):
                         total += 1
         elif isinstance(value, (list, dict)):
-            total += _filter_cost(value)
+            total += _filter_cost(value, depth + 1)
     return total
 
 
@@ -400,16 +397,16 @@ class EngineQueriesMixin:
             # Only a scope this part stated itself replaces what it
             # inherited. An inherited one arrives already built into
             # `modifier`, together with the filters that came with it.
-            if part.get("scope") is not None and part.get("filters") is None:
+            if (_scope_names_a_set(part.get("scope"))
+                    and part.get("filters") is None):
                 built = slice_for([], part.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
                     return {}, failed
-                if _scope_says_something(built):
-                    own = built.get("modifier", "")
-                    own_applied = built.get("applied", [])
-                    own_scope = built.get("scope")
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in part and part["filters"] is not None:
                 if slice_for is None or not isinstance(part["filters"], list):
                     return {}, {"id": query_id, "error": (
@@ -619,7 +616,15 @@ class EngineQueriesMixin:
         """
         measures: List[Dict[str, Any]] = []
 
-        for metric in query.get("metrics") or []:
+        stated_metrics = query.get("metrics")
+        if stated_metrics is not None and not isinstance(
+                stated_metrics, (list, tuple)):
+            return [], {"id": query_id, "error": (
+                f"metrics={stated_metrics!r} is not a list."),
+                "error_category": "invalid_argument",
+                "hint": ('A list of metrics: [{"field": "Amount", "agg": '
+                         '"sum"}].')}
+        for metric in stated_metrics or []:
             if isinstance(metric, str):
                 metric = {"field": metric, "agg": "sum"}
             if not isinstance(metric, dict):
@@ -635,17 +640,16 @@ class EngineQueriesMixin:
             own_scope = None
             # A scope of its own applies even with no filters beside it:
             # "everything, ignoring selections" is a statement in itself.
-            if metric.get("scope") is not None and metric.get(
-                    "filters") is None:
+            if (_scope_names_a_set(metric.get("scope"))
+                    and metric.get("filters") is None):
                 built = slice_for([], metric.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
                     return [], failed
-                if _scope_says_something(built):
-                    own = built.get("modifier", "")
-                    own_applied = built.get("applied", [])
-                    own_scope = built.get("scope")
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in metric and metric["filters"] is not None:
                 if not isinstance(metric["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -695,17 +699,16 @@ class EngineQueriesMixin:
             own = modifier
             own_applied = None
             own_scope = None
-            if (measure.get("scope") is not None
+            if (_scope_names_a_set(measure.get("scope"))
                     and measure.get("filters") is None):
                 built = slice_for([], measure.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
                     return [], failed
-                if _scope_says_something(built):
-                    own = built.get("modifier", "")
-                    own_applied = built.get("applied", [])
-                    own_scope = built.get("scope")
+                own = built.get("modifier", "")
+                own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in measure and measure["filters"] is not None:
                 if slice_for is None or not isinstance(measure["filters"], list):
                     return [], {"id": query_id, "error": (
