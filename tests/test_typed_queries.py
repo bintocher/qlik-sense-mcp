@@ -1565,8 +1565,14 @@ class TestACheckThatCouldNotRun:
                                         timeout=None):
                 replies = super().send_requests_pipelined(
                     requests, raise_on_error, timeout)
+                # Only the control probes - the ones that look at the
+                # result. The probes that build the filter must still
+                # work, or the query is refused before there is anything
+                # to check.
                 return [RuntimeError("the socket went away")
-                        if r["method"] == "EvaluateEx" else reply
+                        if (r["method"] == "EvaluateEx"
+                            and "Min(" in str((r.get("params") or [""])[0]))
+                        else reply
                         for r, reply in zip(requests, replies)]
 
         engine = _Failing(period_bounds=(40544, 40908))
@@ -1595,3 +1601,29 @@ class TestSetsCountTowardsTheCeiling:
             "combine": "union", "of": [{"ignore_selections": True},
                                        {"current_selection": True}]})])
         assert result["queries_failed"] == 0
+
+
+class TestOfMeansTwoDifferentThings:
+    """The sets of a combination and the parts of an arithmetic metric
+    share a key name. Counting the second as sets refused ordinary "share
+    of the whole" queries well inside the ceiling."""
+
+    def test_a_batch_of_shares_is_not_refused(self):
+        from qlik_sense_mcp_server.engine.queries import (
+            MAX_EXPRESSIONS_PER_CALL)
+
+        share = {"label": "share", "op": "divide", "of": [
+            {"field": "Amount", "agg": "sum"},
+            {"field": "Amount", "agg": "sum", "total": True}]}
+        many = [dict(share) for _ in range(MAX_EXPRESSIONS_PER_CALL // 4)]
+        result = _Engine().run_queries(1, "app", [_query(metrics=many)])
+        assert result.get("error_category") != "limit_exceeded"
+        assert result["queries_failed"] == 0
+
+    def test_sets_are_still_counted(self):
+        scope = {"combine": "union", "of": [{"ignore_selections": True},
+                                            {"current_selection": True}]}
+        for _ in range(8):
+            scope = {"combine": "union", "of": [dict(scope), dict(scope)]}
+        result = _Engine().run_queries(1, "app", [dict(_query(), scope=scope)])
+        assert result["error_category"] == "limit_exceeded"
