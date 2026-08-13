@@ -485,7 +485,21 @@ class EngineFiltersMixin:
             # a date", and sends perfectly good dates into a numeric parse
             # that then blames the bounds: "2026-08-01 is neither a date
             # nor a number" for a filter whose only fault is the name.
-            if not self.get_field_description(app_handle, field):
+            # An empty description means Engine does not know the field —
+            # but `get_field_description` also answers empty when the call
+            # itself failed, and a dropped frame must not be reported as a
+            # missing field. Asked directly here so the two are told apart.
+            try:
+                described = self.send_request(
+                    "GetFieldDescription", [field], handle=app_handle)
+                exists = bool((described.get("qReturn") or {}).get("qName"))
+            except Exception as exc:
+                # Could not ask. The filter goes through unchecked rather
+                # than being refused on the strength of a failed question;
+                # a wrong name still fails later, and loudly.
+                logger.debug("Could not describe %r: %s", field, exc)
+                exists = True
+            if not exists:
                 return {
                     "error": (
                         f"Filter names a field this app does not have: "

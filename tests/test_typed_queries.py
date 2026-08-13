@@ -472,3 +472,98 @@ class TestPerMetricFilters:
             metrics=[{"field": "Amount", "agg": "sum",
                       "filters": "Region"}]), 0)
         assert plan["error_category"] == "invalid_argument"
+
+
+class TestOneMeasureDoesNotColourTheNext:
+    """The query filter is the base for every measure, and stays it.
+
+    Writing the resolved modifier back into the shared variable made the
+    first measure with its own filter the base for the next one, so a
+    measure that stated no filter inherited its neighbour's — silently,
+    with a plausible number to show for it.
+    """
+
+    def test_a_measure_without_filters_takes_the_querys(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[],
+            measures=[
+                {"expression": "Sum({filter} [Amount])",
+                 "filters": [{"field": "Category", "values": ["Books"]}]},
+                {"expression": "Count({filter} [Amount])"},
+            ],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        second = plan["measures"][1]["expression"]
+        assert "[Region]" in second
+        assert "[Category]" not in second
+
+    def test_the_measure_with_its_own_filter_keeps_it(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[],
+            measures=[
+                {"expression": "Sum({filter} [Amount])",
+                 "filters": [{"field": "Category", "values": ["Books"]}]},
+                {"expression": "Count({filter} [Amount])"},
+            ],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        assert "[Category]" in plan["measures"][0]["expression"]
+
+    def test_an_empty_filter_does_not_disarm_the_next_measure(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[],
+            measures=[
+                {"expression": "Count({filter} [Amount])", "filters": []},
+                {"expression": "Sum({filter} [Amount])"},
+            ],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        assert plan["measures"][0]["expression"] == "Count([Amount])"
+        assert "[Region]" in plan["measures"][1]["expression"]
+
+
+class TestFractionBounds:
+    """Qlik answers a fraction outside 0..1 with a dash, not an error —
+    measured — and a dash reads as a value."""
+
+    @pytest.mark.parametrize("fraction", [1.5, -0.2, 2, -1])
+    def test_a_fraction_outside_the_range_is_refused(self, fraction):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "fractile", "p": fraction}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "between 0 and 1" in plan["error"]
+
+    @pytest.mark.parametrize("fraction", [0, 0.5, 1])
+    def test_the_ends_of_the_range_are_allowed(self, fraction):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "fractile", "p": fraction}]), 0)
+        assert "error" not in plan
+
+    def test_a_fraction_that_is_not_a_number_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "fractile", "p": "85%"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+    def test_the_nested_form_checks_it_too(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum", "per": "IssueId",
+                      "agg": "fractile", "p": 1.5}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+
+class TestAFailedQuestionIsNotAnAnswer:
+    """`get_field_description` answers empty both for a missing field and
+    for a call that failed. Refusing on the second would turn a dropped
+    frame into "this field does not exist"."""
+
+    def test_a_transport_failure_does_not_read_as_a_missing_field(self):
+        class _Broken(_Engine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetFieldDescription":
+                    raise ConnectionError("WebSocket recv() failed")
+                return {}
+
+        engine = _Broken()
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 3, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
