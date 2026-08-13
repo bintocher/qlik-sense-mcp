@@ -9,8 +9,8 @@ list of arbitrary rows.
 from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
+from ..utils import bare_field_name, escape_qlik_field_name
 from typing import Dict, List, Any, Optional
-import difflib
 import logging
 import time
 import uuid
@@ -40,39 +40,6 @@ class EngineHypercubeMixin:
         "lowest": 1, "bottom": 1, "1": 1,
     }
 
-    def _known_field_names(self, app_handle: int) -> List[str]:
-        """Every field in the data model, for suggesting a near miss.
-
-        Only called on the error path — it walks the model, which the
-        happy path has no reason to pay for.
-        """
-        try:
-            # Whatever model has already been read, without reading one and
-            # without writing one back. This runs on the error path, where
-            # a suggestion is worth having but not worth a round-trip — and
-            # a model stored from here would carry no reload stamp, which
-            # would then make `get_app_details` reread the model it had.
-            # getattr: instances that skip __init__ have neither the cache
-            # nor a cached app id, and an AttributeError here would
-            # silently cost the caller its "did you mean" suggestions.
-            store = getattr(self, "_schema_store", None)
-            app_id = getattr(self, "_cached_app_id", "") or ""
-            entry = store().get(app_id) if store and app_id else None
-            model = entry["model"] if entry else self.get_fields(app_handle)
-        except Exception as exc:
-            logger.debug("Could not list fields for a suggestion: %s", exc)
-            return []
-        # get_fields names the key `field_name`; the tool layer renames it to
-        # `name` on the way out. Accept both so this keeps working whichever
-        # one it is handed. Deduplicated: a join key appears once per table it
-        # belongs to, and suggesting it three times helps nobody.
-        names = [
-            f.get("field_name") or f.get("name") or ""
-            for f in (model.get("fields") or [])
-            if f.get("field_name") or f.get("name")
-        ]
-        return list(dict.fromkeys(names))
-
     def inspect_expressions(self, app_handle: int,
                             texts: List[str]) -> Dict[str, Any]:
         """Ask Engine everything worth knowing about a set of expressions.
@@ -95,34 +62,24 @@ class EngineHypercubeMixin:
         field, a calculated dimension and an aggregation, and it stops at
         the set modifier.
 
-        `GetFieldsFromExpression` covers what `CheckExpression` does not:
-        the fields a set modifier filters on. A modifier whose field Engine
-        does not recognise is dropped by Qlik, and the measure then returns
-        the unfiltered total — larger than the truth, with nothing to mark
-        it as wrong.
+        `GetFieldsFromExpression` is deliberately not asked. Measured, it
+        answers with every field of the expression rather than the ones a
+        set modifier filters on: `Sum([Amount])` comes back as `['Amount']`.
+        It therefore cannot tell a filter field from an aggregated one, and
+        anything built on the difference would be a guess.
         """
         wanted = [t for t in dict.fromkeys(texts) if t]
         if not wanted:
-            return {"expanded": {}, "faults": {}, "filter_fields": {}}
+            return {"expanded": {}, "faults": {}}
 
         expanded = self.expand_expressions(app_handle, wanted)
         faults = self.check_expressions(
-            app_handle, [expanded.get(text, text) for text in wanted])
-        # Asked for every expression, not only the ones that look like they
-        # carry a modifier. Deciding that by reading the text would be this
-        # module guessing at Qlik syntax, and the call costs 2ms in the
-        # same batch — Engine answers with the modifier fields it
-        # recognised, and with nothing for an expression that has no
-        # modifier at all.
-        recognised = self.fields_in_expressions(
             app_handle, [expanded.get(text, text) for text in wanted])
         return {
             # Keyed by what the caller wrote, which is what it has to fix.
             "expanded": expanded,
             "faults": {text: faults[expanded.get(text, text)]
                        for text in wanted if expanded.get(text, text) in faults},
-            "filter_fields": {text: recognised.get(expanded.get(text, text))
-                              for text in wanted},
         }
 
     def _validate_cube_inputs(
@@ -185,25 +142,6 @@ class EngineHypercubeMixin:
                 ),
             }
 
-        # Which fields a set modifier really filters on, as Engine reads
-        # it. Worth saying whenever there are any: Engine reports the names
-        # it recognised and stays silent about the ones it did not, so a
-        # modifier naming two fields where only one exists comes back
-        # looking sound. Naming the survivors is the whole of what can
-        # honestly be said about a hand-written modifier — a filter that is
-        # checked end to end is one stated as `filters`, where the server
-        # writes the names itself and proves each one selects something.
-        for text in measure_texts:
-            fields = inspection["filter_fields"].get(text)
-            if fields:
-                warnings.append(
-                    f"Set analysis in {text!r} filters on: "
-                    + ", ".join(repr(f) for f in fields)
-                    + ". A field named there that this app does not have is "
-                      "dropped by Qlik rather than reported; state the filter "
-                      "as `filters` to have every name checked."
-                )
-
         unknown_dimension_fields = list(dict.fromkeys(
             name for text in dimension_texts
             for name in by_original.get(text, {}).get("bad_fields", [])
@@ -216,51 +154,23 @@ class EngineHypercubeMixin:
         ]
 
         if unknown_dimension_fields:
-            known = self._known_field_names(app_handle)
-            # Matching case-insensitively and answering with the real name:
-            # field names are case-sensitive in Qlik, so the wrong case is
-            # the most common way to miss — and `REGION_NAME` is exactly the
-            # miss a case-sensitive comparison fails to explain.
-            folded = {name.casefold(): name for name in known}
-            suggestions = {}
-            for name in unknown_dimension_fields:
-                matches = difflib.get_close_matches(
-                    name.casefold(), list(folded), n=3, cutoff=0.6)
-                if matches:
-                    suggestions[name] = [folded[m] for m in matches]
-            # A list of candidates still leaves the caller to rebuild the
-            # whole call. Hand back the corrected one instead.
-            corrected = None
-            if len(unknown_dimension_fields) == 1:
-                only = unknown_dimension_fields[0]
-                best = suggestions.get(only)
-                if best:
-                    corrected = [
-                        (best[0] if d.get("field", "").strip("[]") == only
-                         else d.get("field"))
-                        for d in dimensions
-                    ]
             return {
                 "error": (
                     "Unknown field(s) in dimensions: "
-                    + ", ".join(repr(f) for f in unknown_dimension_fields)
+                    + ", ".join(f"[{f}]" for f in unknown_dimension_fields)
                 ),
                 "error_category": "field_not_found",
                 "failed_step": "validate",
                 "unknown_fields": unknown_dimension_fields,
-                "did_you_mean": {k: v for k, v in suggestions.items() if v},
-                "next_actions": ([
-                    f"retry with dimensions={corrected!r}",
-                ] if corrected else [
+                "next_actions": [
                     "call get_app_details(app_id) and read `fields[].name`",
                     "field names are case-sensitive; copy them exactly",
-                ]) + ["do not guess another spelling without checking"],
+                ],
                 "hint": (
                     "Qlik does not refuse an unknown dimension — it evaluates "
                     "the name as an expression, and the cube collapses to one "
                     "row holding the grand total, which reads as a real "
-                    "answer. Check the name with get_app_details (field names "
-                    "are case-sensitive)."
+                    "answer."
                 ),
             }
 
@@ -269,23 +179,14 @@ class EngineHypercubeMixin:
             # name the data model does not have, and Qlik scores such a name
             # as 0. The measure would come back as a column of zeros that
             # reads as a real answer, so the query stops here.
-            known = self._known_field_names(app_handle)
-            folded = {name.casefold(): name for name in known}
-            suggestions = {}
-            for name in unknown_measure_fields:
-                matches = difflib.get_close_matches(
-                    name.casefold(), list(folded), n=3, cutoff=0.6)
-                if matches:
-                    suggestions[name] = [folded[m] for m in matches]
             return {
                 "error": (
                     "Unknown field(s) in measures: "
-                    + ", ".join(repr(f) for f in unknown_measure_fields)
+                    + ", ".join(f"[{f}]" for f in unknown_measure_fields)
                 ),
                 "error_category": "field_not_found",
                 "failed_step": "validate",
                 "unknown_fields": unknown_measure_fields,
-                "did_you_mean": {k: v for k, v in suggestions.items() if v},
                 "next_actions": [
                     "call get_app_details(app_id) and read `fields[].name`",
                     "field names are case-sensitive; copy them exactly",
@@ -346,8 +247,14 @@ class EngineHypercubeMixin:
 
         Column order is fixed by the Engine API: every dimension first
         (0..D-1, in declaration order), then every measure (D..D+M-1).
+
+        A dimension is bracketed on its way into the expression; a column
+        heading is a label, not an expression, so it carries the plain
+        name. Brackets belong where a name could be mistaken for
+        surrounding text — in messages about it.
         """
-        names = [str(d.get("field", "")) for d in converted_dimensions]
+        names = [bare_field_name(str(d.get("field", "")))
+                 for d in converted_dimensions]
         for i, m in enumerate(converted_measures):
             names.append(str(m.get("label") or m.get("expression") or f"Measure_{i}"))
         return names
@@ -691,6 +598,14 @@ class EngineHypercubeMixin:
                             "`measures`, not here."
                         ),
                     }
+                # A field name goes into the expression in brackets; an
+                # expression is left exactly as written. `=` is the whole
+                # distinction, and it is the caller's own declaration —
+                # the same one this tool documents — not something read out
+                # of the text.
+                field_text = str(dim["field"]).strip()
+                if not field_text.startswith("="):
+                    dim["field"] = escape_qlik_field_name(field_text)
                 dim.setdefault("sort_by", {
                     "qSortByNumeric": 0,
                     "qSortByAscii": 1,  # Default: ASCII ascending

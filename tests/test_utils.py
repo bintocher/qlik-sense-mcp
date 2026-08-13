@@ -19,6 +19,7 @@ from qlik_sense_mcp_server.utils import (
     format_qlik_date,
     create_summary_stats,
     truncate_text,
+    bare_field_name,
     escape_qlik_field_name,
     generate_xrfkey,
 )
@@ -266,17 +267,43 @@ class TestTruncateText:
 
 
 class TestEscapeQlikFieldName:
-    def test_simple(self):
-        assert escape_qlik_field_name("Region") == "Region"
+    """A field name is always written in brackets.
 
-    def test_with_space(self):
+    Not conditionally: Qlik reads a bare name as an expression, so
+    `Тип ставки` comes back as "Garbage after expression: 'ставки'".
+    Wrapping only when the name "looks like it needs it" is the same
+    guess with a smaller blast radius.
+    """
+
+    def test_a_plain_name_is_bracketed_too(self):
+        assert escape_qlik_field_name("Region") == "[Region]"
+
+    def test_a_name_with_a_space(self):
         assert escape_qlik_field_name("Sales Amount") == "[Sales Amount]"
 
-    def test_with_special_chars(self):
-        assert escape_qlik_field_name("Price+Tax") == "[Price+Tax]"
+    def test_a_russian_name_with_a_space(self):
+        assert escape_qlik_field_name("Тип ставки") == "[Тип ставки]"
+
+    def test_a_name_already_bracketed_is_left_alone(self):
+        """The caller wrote what it meant."""
+        assert escape_qlik_field_name("[Sales Amount]") == "[Sales Amount]"
+
+    def test_surrounding_space_is_trimmed(self):
+        assert escape_qlik_field_name("  Region  ") == "[Region]"
 
     def test_empty(self):
         assert escape_qlik_field_name("") == ""
+
+
+class TestBareFieldName:
+    def test_brackets_come_off(self):
+        assert bare_field_name("[Sales Amount]") == "Sales Amount"
+
+    def test_a_plain_name_is_unchanged(self):
+        assert bare_field_name("Region") == "Region"
+
+    def test_a_lone_bracket_is_not_a_pair(self):
+        assert bare_field_name("[") == "["
 
 
 class TestGenerateXrfkey:

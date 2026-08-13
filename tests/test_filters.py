@@ -201,10 +201,14 @@ class TestValueFilters:
         assert result["error_category"] == "value_not_found"
         assert result["unknown_values"] == ["Moscow"]
 
-    def test_the_refusal_says_what_the_field_holds_instead(self):
+    def test_the_refusal_names_the_field_in_brackets(self):
+        """No suggestion: the model can list the values itself, and the
+        search behind the old one cost about 2.5 seconds per refusal."""
         engine = _Engine(values=("Moskva",))
         result = engine.values_modifier(1, "Region", ["Moscow"])
-        assert result["did_you_mean"]["Moscow"] == ["Moskva"]
+        assert "[Region]" in result["error"]
+        assert "did_you_mean" not in result
+        assert any("get_app_field" in a for a in result["next_actions"])
 
     def test_an_empty_list_is_refused_rather_than_ignored(self):
         result = _Engine().values_modifier(1, "Region", [])

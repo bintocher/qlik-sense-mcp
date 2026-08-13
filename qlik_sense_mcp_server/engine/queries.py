@@ -15,6 +15,8 @@ plausible number rather than an error.
 import logging
 import time
 import uuid
+
+from ..utils import bare_field_name, escape_qlik_field_name
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -98,12 +100,18 @@ class EngineQueriesMixin:
                 return {"id": query_id, "error": (
                     f"Query {query_id!r} lists a grouping field with no name."),
                     "error_category": "invalid_argument"}
-            if any(ch in field.strip("[]") for ch in _UNSAFE_IN_FIELD_NAME):
+            if any(ch in bare_field_name(field) for ch in _UNSAFE_IN_FIELD_NAME):
                 return {"id": query_id, "error": (
-                    f"Grouping field {field!r} carries a bracket, which "
-                    f"cannot be written into an expression unambiguously."),
+                    f"Grouping field {escape_qlik_field_name(field)} carries a "
+                    f"bracket, which cannot be written into an expression "
+                    f"unambiguously."),
                     "error_category": "invalid_argument"}
-            dimensions.append({"field": field})
+            # Bracketed once, here. The text of an expression is the key by
+            # which Engine's verdict finds its way back to the query, and it
+            # is built in two places independently — the batch collects it
+            # for checking, the check builds it again. Wrap in one of them
+            # and the keys drift apart, silently.
+            dimensions.append({"field": escape_qlik_field_name(field)})
 
         filters = query.get("filters") or []
         built = self.build_filters(app_handle, app_id, filters)
@@ -162,21 +170,22 @@ class EngineQueriesMixin:
                     f"writes."),
                     "error_category": "invalid_argument",
                     "allowed_values": sorted(AGGREGATIONS)}
-            field = str(metric.get("field") or "").strip().strip("[]")
+            field = bare_field_name(str(metric.get("field") or ""))
             if not field:
                 return [], {"id": query_id, "error": (
                     f"Metric {metric!r} names no field."),
                     "error_category": "invalid_argument"}
             if any(ch in field for ch in _UNSAFE_IN_FIELD_NAME):
                 return [], {"id": query_id, "error": (
-                    f"Field name {field!r} carries a bracket, which cannot be "
+                    f"Field name [{field}] carries a bracket, which cannot be "
                     f"written into an expression unambiguously."),
                     "error_category": "invalid_argument",
                     "hint": ("A metric names one field. For an expression, "
                              "use `measures`.")}
             expression = AGGREGATIONS[aggregation].format(
                 modifier=prefix.rstrip() if prefix else "",
-                field=f"[{field}]").replace("(  ", "(").replace("( ", "(")
+                field=escape_qlik_field_name(field)).replace(
+                    "(  ", "(").replace("( ", "(")
             measures.append({
                 "expression": expression,
                 "label": str(metric.get("label") or f"{aggregation}_{field}"),
