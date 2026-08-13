@@ -139,6 +139,7 @@ class EngineQueriesMixin:
             "modifier": modifier,
             "filters_applied": built.get("applied", []),
             "limit": query.get("limit", DEFAULT_QUERY_LIMIT),
+            "exclude_null_dimensions": query.get("exclude_null_dimensions", False),
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
@@ -567,9 +568,25 @@ class EngineQueriesMixin:
                     "hint": (f"Pass an integer between 1 and "
                              f"{self.HARD_MAX_ROWS}, or omit it for "
                              f"{DEFAULT_QUERY_LIMIT}.")}
-        limit = min(limit, self.HARD_MAX_ROWS)
+        if limit > self.HARD_MAX_ROWS:
+            return {"error": (
+                f"limit={limit} is above the ceiling of "
+                f"{self.HARD_MAX_ROWS} rows."),
+                "error_category": "limit_exceeded",
+                "hint": (f"Ask for at most {self.HARD_MAX_ROWS}, or narrow "
+                         f"the query with filters.")}
         if n_cols and n_cols * limit > self.HARD_MAX_CELLS:
-            limit = max(1, self.HARD_MAX_CELLS // n_cols)
+            # Refused rather than reduced: a limit quietly cut to fit
+            # returns fewer rows than were asked for, and nothing in the
+            # reply says which of the two happened.
+            fits = max(1, self.HARD_MAX_CELLS // n_cols)
+            return {"error": (
+                f"{n_cols} columns times {limit} rows is "
+                f"{n_cols * limit} cells, above Qlik's ceiling of "
+                f"{self.HARD_MAX_CELLS} per page."),
+                "error_category": "cell_cap_exceeded",
+                "hint": (f"At {n_cols} columns the most that fits is "
+                         f"limit={fits}. Fewer measures raise it.")}
 
         sort_index = None
         direction = None
@@ -601,14 +618,23 @@ class EngineQueriesMixin:
                     "qSortByNumeric": direction, "qSortByAscii": direction,
                     "qSortByExpression": 0, "qExpression": ""}
 
-        offset = max(0, int(plan.get("offset") or 0))
+        offset = plan.get("offset")
+        if offset is None:
+            offset = 0
+        if (not isinstance(offset, int) or isinstance(offset, bool)
+                or offset < 0):
+            return {"error": f"offset={offset!r} is not a row number.",
+                    "error_category": "invalid_argument",
+                    "hint": "Pass 0 or a positive integer, or omit it."}
         return {
             "object": {
                 "qInfo": {"qId": f"query-{uuid.uuid4().hex[:12]}",
                           "qType": "HyperCube"},
                 "qHyperCubeDef": self._hypercube_def(
                     dimensions, measures, offset, limit, order,
-                    suppress_zero=False, exclude_null_dimensions=True),
+                    suppress_zero=False,
+                    exclude_null_dimensions=bool(
+                        plan.get("exclude_null_dimensions"))),
             },
             "column_names": column_names,
             "n_dims": n_dims,

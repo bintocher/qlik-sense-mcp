@@ -264,7 +264,15 @@ class EngineFiltersMixin:
                 "accepted_forms": list(BOUND_FORMS),
             }
         if high < low:
-            low, high = high, low
+            return {
+                "error": (
+                    f"Period on {escape_qlik_field_name(field)} starts at "
+                    f"{low.isoformat()} and ends at {high.isoformat()}, which "
+                    f"is earlier."
+                ),
+                "error_category": "invalid_period",
+                "hint": "Swap `from` and `to` if that is what was meant.",
+            }
 
         # The upper bound is exclusive at the next day. A date field that
         # carries a time of day holds 31.12.2024 23:59 as a value larger
@@ -384,11 +392,27 @@ class EngineFiltersMixin:
         table; here it produces a refusal naming the values that are
         missing and what the field holds instead.
         """
-        wanted = [v for v in (values or []) if v is not None and str(v) != ""]
+        wanted = list(values or [])
         if not wanted:
             return {
-                "error": f"Filter on {field!r} lists no values.",
+                "error": (
+                    f"Filter on {escape_qlik_field_name(field)} lists no "
+                    f"values."
+                ),
                 "error_category": "invalid_filter",
+            }
+        empty = [position for position, value in enumerate(wanted)
+                 if value is None or str(value) == ""]
+        if empty:
+            return {
+                "error": (
+                    f"Filter on {escape_qlik_field_name(field)} has an empty "
+                    f"value at position {empty[0]}."
+                ),
+                "error_category": "invalid_filter",
+                "hint": ("Every value is matched against the field; an empty "
+                         "one matches nothing and would narrow the result to "
+                         "nothing."),
             }
         name = escape_qlik_field_name(field)
         probes = [
@@ -492,6 +516,26 @@ class EngineFiltersMixin:
                 # name; `from` and `to` include it. "More than 400" and
                 # "from 400" are different questions, and the rows sitting
                 # exactly on the bound are the difference.
+                if "from" in entry and "greater_than" in entry:
+                    return {
+                        "error": (
+                            f"Filter on {escape_qlik_field_name(field)} states "
+                            f"both `from` and `greater_than`."
+                        ),
+                        "error_category": "invalid_filter",
+                        "hint": ("`from` includes the bound, `greater_than` "
+                                 "excludes it. State one."),
+                    }
+                if "to" in entry and "less_than" in entry:
+                    return {
+                        "error": (
+                            f"Filter on {escape_qlik_field_name(field)} states "
+                            f"both `to` and `less_than`."
+                        ),
+                        "error_category": "invalid_filter",
+                        "hint": ("`to` includes the bound, `less_than` "
+                                 "excludes it. State one."),
+                    }
                 low = entry.get("from", entry.get("greater_than", period))
                 high = entry.get("to", entry.get("less_than", period))
                 low_exclusive = ("greater_than" in entry

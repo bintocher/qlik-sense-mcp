@@ -293,8 +293,39 @@ class TestResultShape:
         assert reply["error_category"] == "invalid_sort"
         assert reply["available_columns"] == ["Region", "sum_Amount"]
 
-    def test_a_limit_wider_than_the_cell_cap_is_brought_down(self):
+    def test_a_limit_wider_than_the_cell_cap_is_refused(self):
+        """Not quietly reduced: a cut limit returns fewer rows than were
+        asked for, and nothing in the reply says which happened."""
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(limit=5000), 0)
+        shaped = engine._shape_cube(plan)
+        assert shaped["error_category"] == "cell_cap_exceeded"
+        assert "limit=" in shaped["hint"]
+
+    def test_a_limit_above_the_row_ceiling_is_refused(self):
         engine = _Engine()
         plan = engine._plan_query(1, "app", _query(limit=99999), 0)
+        assert engine._shape_cube(plan)["error_category"] == "limit_exceeded"
+
+    @pytest.mark.parametrize("offset", [-1, "next", 2.5, True])
+    def test_an_offset_that_is_not_a_row_number_is_refused(self, offset):
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(offset=offset), 0)
+        assert engine._shape_cube(plan)["error_category"] == "invalid_argument"
+
+    def test_the_null_group_is_kept_unless_asked_otherwise(self):
+        """Dropping it is a statement about the data, so the caller makes
+        it. Facts with no value for the grouping field are still facts."""
+        engine = _Engine()
+        plan = engine._plan_query(1, "app", _query(), 0)
         shaped = engine._shape_cube(plan)
-        assert shaped["limit"] * 2 <= engine.HARD_MAX_CELLS
+        assert shaped["object"]["qHyperCubeDef"]["qDimensions"][0][
+            "qNullSuppression"] is False
+
+    def test_the_caller_can_ask_for_it_to_be_dropped(self):
+        engine = _Engine()
+        plan = engine._plan_query(
+            1, "app", _query(exclude_null_dimensions=True), 0)
+        shaped = engine._shape_cube(plan)
+        assert shaped["object"]["qHyperCubeDef"]["qDimensions"][0][
+            "qNullSuppression"] is True
