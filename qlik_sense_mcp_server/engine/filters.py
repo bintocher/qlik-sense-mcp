@@ -673,7 +673,10 @@ class EngineFiltersMixin:
         which is what "revenue in 2024 for the North region" means.
         """
         identifier = ""
-        if scope:
+        # `is not None`, not truthiness: 0, "" and False are not objects,
+        # and passing them silently as "no scope" hides a mistake in the
+        # request behind a number counted over the current selections.
+        if scope is not None:
             if not isinstance(scope, dict):
                 return {"error": f"scope must be an object, got {scope!r}.",
                         "error_category": "invalid_argument"}

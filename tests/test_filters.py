@@ -916,3 +916,59 @@ class TestAnEmptyHalfOfAPair:
         result = _Engine(date_fields=("F",)).build_filters(
             1, "app", [], scope={"state": "Compare", "bookmark": "BM01"})
         assert result["modifier"] == "{Compare::BM01}"
+
+
+class TestAScopeThatIsNotAnObject:
+    @pytest.mark.parametrize("scope", [0, "", False, [], "BM01", 5])
+    def test_a_scope_that_is_not_an_object_is_refused(self, scope):
+        result = _Engine(date_fields=("F",)).build_filters(1, "app", [],
+                                                           scope=scope)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_no_scope_at_all_is_still_fine(self):
+        result = _Engine(date_fields=("F",)).build_filters(1, "app", [])
+        assert "error" not in result
+
+
+class TestTheFieldCheckReachesEngine:
+    """The refusal on an unknown field name runs through `send_request`,
+    and the two outcomes it tells apart - Engine saying "no such field" and
+    the call itself failing - decide whether a query is refused or run."""
+
+    class _Asked(_Engine):
+        def __init__(self, *args, breaks=False, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.asked = []
+            self.breaks = breaks
+
+        def send_request(self, method, params=None, handle=-1, timeout=None):
+            if method == "GetFieldDescription":
+                from qlik_sense_mcp_server.exceptions import QlikEngineError
+                name = (params or [""])[0]
+                self.asked.append(name)
+                if self.breaks:
+                    raise TimeoutError("the socket went away")
+                if name != "Region":
+                    raise QlikEngineError("Invalid parameters")
+                return {"qReturn": {"qName": name}}
+            return {}
+
+    def test_an_unknown_name_is_refused(self):
+        engine = self._Asked(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 1, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Regionn", "values": ["North"]}])
+        assert result["error_category"] == "field_not_found"
+        assert engine.asked == ["Regionn"]
+
+    def test_a_failed_call_does_not_read_as_a_missing_field(self):
+        engine = self._Asked(values=("North",), date_fields=("F",),
+                             breaks=True)
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 1, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
