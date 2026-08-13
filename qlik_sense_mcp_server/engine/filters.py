@@ -161,7 +161,8 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     selections of every state at once, so naming the state says which part
     of it to read.
     """
-    named = [key for key in SCOPE_KEYS if key in scope]
+    named = [key for key in SCOPE_KEYS
+             if scope.get(key) is not None and scope.get(key) is not False]
     if not named:
         return {"identifier": ""}
     pair = set(named) == {"state", "bookmark"}
@@ -497,7 +498,10 @@ class EngineFiltersMixin:
             value for value, result in zip(wanted, counts)
             if result.get("number") is not None and int(result["number"]) == 0
         ]
-        if missing:
+        # Only for the operators that keep what they name. Excluding a value
+        # the field does not hold changes nothing and is not a mistake; the
+        # same goes for adding to a selection.
+        if missing and operator in ("values", "intersect"):
             return {
                 "error": (
                     f"Field {escape_qlik_field_name(field)} holds none of "
@@ -575,14 +579,30 @@ class EngineFiltersMixin:
                 scope={"ignore_selections": True} if base == "all" else None)
             if inner.get("error"):
                 return inner
-            of_field = wanted.get("of_field") or field
-            if "[" in str(of_field) or "]" in str(of_field):
+            of_field = bare_field_name(str(wanted.get("of_field") or field))
+            if "[" in of_field or "]" in of_field:
                 return {"error": (
-                    f"of_field {of_field!r} carries a bracket."),
+                    f"of_field [{of_field}] carries a bracket."),
                     "error_category": "invalid_filter"}
+            # Checked like the field it will restrict: an unknown name here
+            # would be scored as an expression and quietly select nothing.
+            if of_field != field:
+                try:
+                    described = self.send_request(
+                        "GetFieldDescription", [of_field], handle=app_handle)
+                    known = bool((described.get("qReturn") or {}).get("qName"))
+                except QlikEngineError:
+                    known = False
+                except Exception:
+                    known = True
+                if not known:
+                    return {"error": (
+                        f"of_field names a field this app does not have: "
+                        f"{escape_qlik_field_name(of_field)}"),
+                        "error_category": "field_not_found"}
             pieces.append(
                 f"{function}({inner['modifier']} "
-                f"{escape_qlik_field_name(str(of_field))})")
+                f"{escape_qlik_field_name(of_field)})")
 
         if not pieces:
             return {"error": "no element set stated",
@@ -802,7 +822,8 @@ class EngineFiltersMixin:
                 # name; `from` and `to` include it. "More than 400" and
                 # "from 400" are different questions, and the rows sitting
                 # exactly on the bound are the difference.
-                if "from" in entry and "greater_than" in entry:
+                if (entry.get("from") is not None
+                        and entry.get("greater_than") is not None):
                     return {
                         "error": (
                             f"Filter on {escape_qlik_field_name(field)} states "
@@ -812,7 +833,8 @@ class EngineFiltersMixin:
                         "hint": ("`from` includes the bound, `greater_than` "
                                  "excludes it. State one."),
                     }
-                if "to" in entry and "less_than" in entry:
+                if (entry.get("to") is not None
+                        and entry.get("less_than") is not None):
                     return {
                         "error": (
                             f"Filter on {escape_qlik_field_name(field)} states "
@@ -822,11 +844,16 @@ class EngineFiltersMixin:
                         "hint": ("`to` includes the bound, `less_than` "
                                  "excludes it. State one."),
                     }
-                low = entry.get("from", entry.get("greater_than", period))
-                high = entry.get("to", entry.get("less_than", period))
-                low_exclusive = ("greater_than" in entry
-                                 and "from" not in entry)
-                high_exclusive = ("less_than" in entry and "to" not in entry)
+                # The first of these that holds something. A key set to
+                # null states nothing, here as everywhere else.
+                low = next((entry[k] for k in ("from", "greater_than")
+                            if entry.get(k) is not None), period)
+                high = next((entry[k] for k in ("to", "less_than")
+                             if entry.get(k) is not None), period)
+                low_exclusive = (entry.get("greater_than") is not None
+                                 and entry.get("from") is None)
+                high_exclusive = (entry.get("less_than") is not None
+                                  and entry.get("to") is None)
                 # The same two keys mean days on a date field and values on
                 # any other. Asking Qlik which this is costs one cheap call
                 # and is the difference between "more than 400 off" and

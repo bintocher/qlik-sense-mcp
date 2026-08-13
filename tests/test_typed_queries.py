@@ -14,6 +14,16 @@ from qlik_sense_mcp_server.engine.queries import AGGREGATIONS
 from qlik_sense_mcp_server.engine_api import QlikEngineAPI
 
 
+# Names Qlik knows as functions rather than as fields. The double has to
+# know them for the same reason the real CheckExpression does: `Null()` in
+# a division guard is not a missing field.
+_QLIK_FUNCTIONS = {
+    "Sum", "Count", "Avg", "Min", "Max", "Text", "Num", "If", "DISTINCT",
+    "Median", "Stdev", "Aggr", "Fractile", "Null", "TOTAL", "Index",
+    "Upper", "Right", "Len", "P", "E", "Only", "Mode",
+}
+
+
 class _Engine(QlikEngineAPI):
     """A whole Engine, as far as a batch of queries can tell.
 
@@ -100,9 +110,7 @@ class _Engine(QlikEngineAPI):
         return [m.group(1) or m.group(2) for m in
                 re.finditer(r"\[([^\]]+)\]|\b([A-Z][A-Za-z]+)\b",
                             without_literals)
-                if (m.group(1) or m.group(2)) not in
-                ("Sum", "Count", "Avg", "Min", "Max", "Text", "Num", "If",
-                 "DISTINCT", "Median", "Stdev")]
+                if (m.group(1) or m.group(2)) not in _QLIK_FUNCTIONS]
 
     def get_field_description(self, app_handle, field_name):
         """Qlik's tags decide whether a bound is a day or a value."""
@@ -727,3 +735,59 @@ class TestEveryValueCountsTowardsTheBudget:
         result = engine.run_queries(1, "app", [_query(
             filters=[{"field": "Region", "values": ["North", "South"]}])])
         assert result["queries_failed"] == 0
+
+
+class TestTotalReachesEveryShape:
+    def test_a_nested_aggregation_can_ignore_the_grouping(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum", "per": "IssueId",
+                      "agg": "median", "total": True}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Median(TOTAL Aggr(Sum([Amount]), [IssueId]))")
+
+    def test_a_part_of_an_operation_can_ignore_it_too(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum", "total": True}]}]), 0)
+        assert "Sum(TOTAL [Amount])" in plan["measures"][0]["expression"]
+
+    @pytest.mark.parametrize("value", [1, True, {"field": "X"}])
+    def test_a_grouping_that_is_not_a_name_is_refused(self, value):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "inner_agg": "sum", "per": value,
+                      "agg": "median"}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+    @pytest.mark.parametrize("value", [1, {"field": "X"}])
+    def test_a_total_except_that_is_not_a_name_is_refused(self, value):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "total_except": value}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+
+
+class TestScopeWithoutFilters:
+    def test_a_metric_can_state_a_scope_alone(self):
+        """"Everything, ignoring selections" is a statement in itself."""
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "scope": {"ignore_selections": True}}]), 0)
+        assert plan["measures"][0]["expression"] == "Sum({1} [Amount])"
+
+    def test_the_query_scope_still_reaches_a_plain_metric(self):
+        plan = _Engine()._plan_query(1, "app", dict(
+            _query(), scope={"ignore_selections": True}), 0)
+        assert "{1}" in plan["measures"][0]["expression"]
+
+
+class TestControlValuesFollowThePartsToo:
+    def test_a_period_inside_a_part_is_checked(self):
+        engine = _Engine(period_bounds=(40544, 40908))
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum",
+                 "filters": [{"field": "OrderDate", "period": "2011"}]},
+                {"field": "Amount", "agg": "sum", "filters": []}]}])])
+        checks = result["results"][0].get("period_check") or []
+        assert [c["field"] for c in checks] == ["OrderDate"]

@@ -736,3 +736,111 @@ class TestBoundsBeyondTheCalendar:
 
     def test_an_ordinary_serial_number_still_reads(self):
         assert _parse_bound(45292, upper=False) is not None
+
+
+class TestAKeyHoldingNothingStatesNothing:
+    """The rule already applied to conditions; it applies to scope and to
+    bounds as well. A caller that fills every key of its template with
+    nulls should not be told it contradicted itself."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_null_beside_a_bound_is_not_a_conflict(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "greater_than": 400, "from": None}])
+        assert result["modifier"] == '{<[price]={">400"}>}'
+
+    def test_a_null_beside_the_upper_bound_is_not_a_conflict(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "less_than": 500, "to": None}])
+        assert result["modifier"] == '{<[price]={"<500"}>}'
+
+    def test_a_real_conflict_is_still_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "from": 400, "greater_than": 400}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_a_null_scope_key_is_not_a_second_scope(self):
+        result = self._engine().build_filters(
+            1, "app", [], scope={"bookmark": "BM01", "state": None,
+                                 "ignore_selections": False})
+        assert result["modifier"] == "{BM01}"
+
+    def test_a_state_with_its_bookmark_still_works(self):
+        result = self._engine().build_filters(
+            1, "app", [], scope={"state": "Compare", "bookmark": "BM01",
+                                 "ignore_selections": None})
+        assert result["modifier"] == "{Compare::BM01}"
+
+
+class TestExcludingWhatIsNotThere:
+    """Excluding a value the field does not hold changes nothing and is
+    not a mistake. Only the operators that keep what they name need the
+    value to exist."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        return engine
+
+    def test_excluding_an_absent_value_is_allowed(self):
+        result = self._engine().values_modifier(
+            1, "Region", ["Nowhere"], operator="exclude")
+        assert "error" not in result
+
+    def test_adding_an_absent_value_is_allowed(self):
+        result = self._engine().values_modifier(
+            1, "Region", ["Nowhere"], operator="add")
+        assert "error" not in result
+
+    def test_keeping_an_absent_value_is_still_refused(self):
+        result = self._engine().values_modifier(1, "Region", ["Nowhere"])
+        assert result["error_category"] == "value_not_found"
+
+    def test_intersecting_with_an_absent_value_is_refused(self):
+        result = self._engine().values_modifier(
+            1, "Region", ["Nowhere"], operator="intersect")
+        assert result["error_category"] == "value_not_found"
+
+
+class TestTheFieldAnElementSetReads:
+    """`of_field` restricts another field, so an unknown name there would
+    be scored as an expression and quietly select nothing."""
+
+    @staticmethod
+    def _engine(known=("Client", "Supplier", "Year")):
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.known = set(known)
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_an_unknown_of_field_is_refused(self):
+        from qlik_sense_mcp_server.exceptions import QlikEngineError
+
+        class _Checking(_Engine):
+            def send_request(self, method, params=None, handle=-1, timeout=None):
+                if method == "GetFieldDescription":
+                    name = (params or [""])[0]
+                    if name == "Nope":
+                        raise QlikEngineError("Invalid parameters")
+                    return {"qReturn": {"qName": name}}
+                return {}
+
+        engine = _Checking(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"of_field": "Nope",
+                          "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert result["error_category"] == "field_not_found"
+        assert "[Nope]" in result["error"]
