@@ -844,3 +844,75 @@ class TestTheFieldAnElementSetReads:
                           "filters": [{"field": "Year", "values": ["2023"]}]}}])
         assert result["error_category"] == "field_not_found"
         assert "[Nope]" in result["error"]
+
+
+class TestAProbeRunsWhereTheQueryRuns:
+    """A probe with no identifier is scored against the current selections,
+    so a value a bookmark holds but the selections hide read as "the field
+    has no such value" - a refusal of a query that would have answered."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.seen = []
+
+        def evaluate(handle, exprs):
+            engine.seen.extend(exprs)
+            return [{"text": None, "number": 4, "is_numeric": True,
+                     "error": None} for _ in exprs]
+
+        engine.evaluate_expressions = evaluate
+        return engine
+
+    def test_a_value_is_checked_inside_the_scope(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [{"field": "Region",
+                                         "values": ["North"]}],
+                             scope={"bookmark": "BM01"})
+        assert any("{BM01<" in probe for probe in engine.seen)
+
+    def test_without_a_scope_the_probe_is_unchanged(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [{"field": "Region",
+                                         "values": ["North"]}])
+        assert engine.seen and all("{<" in p for p in engine.seen)
+
+    def test_a_period_is_measured_inside_the_scope(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [{"field": "F", "period": "2011"}],
+                             scope={"ignore_selections": True})
+        assert any("{1<" in probe for probe in engine.seen)
+
+
+class TestAScopeKeyNobodyReads:
+    """Silence here means the query runs over the current selections while
+    the caller believes it runs over the history or over a bookmark."""
+
+    @pytest.mark.parametrize("key", ["steps_back", "ignore_selection",
+                                     "bookmark_id"])
+    def test_an_unknown_key_is_refused(self, key):
+        result = _Engine(date_fields=("F",)).build_filters(
+            1, "app", [], scope={key: 1})
+        assert result["error_category"] == "invalid_argument"
+        assert "selection_back" in result["hint"]
+
+    def test_the_keys_it_reads_still_work(self):
+        result = _Engine(date_fields=("F",)).build_filters(
+            1, "app", [], scope={"selection_back": 2})
+        assert result["modifier"] == "{$2}"
+
+
+class TestAnEmptyHalfOfAPair:
+    @pytest.mark.parametrize("scope", [
+        {"state": "", "bookmark": "BM01"},
+        {"state": "Compare", "bookmark": "  "},
+    ])
+    def test_an_empty_half_is_refused(self, scope):
+        result = _Engine(date_fields=("F",)).build_filters(1, "app", [],
+                                                           scope=scope)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_a_whole_pair_still_works(self):
+        result = _Engine(date_fields=("F",)).build_filters(
+            1, "app", [], scope={"state": "Compare", "bookmark": "BM01"})
+        assert result["modifier"] == "{Compare::BM01}"

@@ -142,7 +142,8 @@ narrows them:
 | `{"ignore_selections": true}` | the whole model, whatever is selected |
 | `{"bookmark": "BM01"}` | what that bookmark selects |
 | `{"state": "Compare"}` | what that alternate state selects |
-| `{"steps_back": 1}` | the selections as they were one step ago |
+| `{"selection_back": 1}` | the selections as they were one step ago |
+| `{"current_selection": true}` | what is selected right now, stated plainly |
 
 A scope stated on its own, with no filters beside it, applies as it
 reads. Stated on the query it reaches every measure; stated on a metric

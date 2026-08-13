@@ -849,3 +849,65 @@ class TestTheReplySaysWhichPartUsedWhichSlice:
                       "filters": [{"field": "Region", "values": ["North"]}]}])])
         listed = result["results"][0].get("measure_filters") or []
         assert [item["label"] for item in listed] == ["north"]
+
+
+class TestTheReplyNamesTheSetItCountedOver:
+    def test_the_query_scope_is_in_the_reply(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [dict(
+            _query(), scope={"ignore_selections": True})])
+        assert result["results"][0]["scope"] == "1"
+
+    def test_a_measure_counted_over_a_bookmark_says_so(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "bm", "field": "Amount", "agg": "sum",
+                      "scope": {"bookmark": "BM01"}}])])
+        listed = result["results"][0].get("measure_filters") or []
+        assert listed == [{"label": "bm", "filters_applied": [],
+                           "scope": "BM01"}]
+
+    def test_a_query_without_a_scope_says_nothing(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query()])
+        assert "scope" not in result["results"][0]
+
+
+class TestThePartIsNamedByItsOwnPosition:
+    """With a slice on the second part only, the reply used to call it
+    "[1]" and point at the first."""
+
+    def test_a_slice_on_the_second_part_is_named_second(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum",
+                 "filters": [{"field": "Region", "values": ["North"]}]}]}])])
+        listed = result["results"][0].get("measure_filters") or []
+        assert [item["label"] for item in listed] == ["share [2]"]
+
+    def test_a_nested_operation_keeps_its_own_parts(self):
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"op": "add", "of": [
+                    {"field": "Amount", "agg": "sum"},
+                    {"field": "Amount", "agg": "sum",
+                     "filters": [{"field": "Region", "values": ["North"]}]}]},
+                {"field": "Amount", "agg": "sum", "total": True}]}])])
+        listed = result["results"][0].get("measure_filters") or []
+        assert [item["label"] for item in listed] == ["share [1][2]"]
+        assert listed[0]["filters_applied"]
+
+    def test_a_period_inside_a_nested_part_is_still_checked(self):
+        engine = _Engine(period_bounds=(40544, 40908))
+        result = engine.run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"op": "add", "of": [
+                    {"field": "Amount", "agg": "sum"},
+                    {"field": "Amount", "agg": "sum",
+                     "filters": [{"field": "OrderDate", "period": "2011"}]}]},
+                {"field": "Amount", "agg": "sum"}]}])])
+        checks = result["results"][0].get("period_check") or []
+        assert [c["field"] for c in checks] == ["OrderDate"]

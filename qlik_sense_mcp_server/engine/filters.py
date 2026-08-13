@@ -161,6 +161,14 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     selections of every state at once, so naming the state says which part
     of it to read.
     """
+    unknown = [key for key in scope if key not in SCOPE_KEYS]
+    if unknown:
+        return {
+            "error": f"scope states {', '.join(sorted(unknown))}, which it "
+                     f"does not read.",
+            "error_category": "invalid_argument",
+            "hint": "It reads: " + ", ".join(SCOPE_KEYS) + ".",
+        }
     named = [key for key in SCOPE_KEYS
              if scope.get(key) is not None and scope.get(key) is not False]
     if not named:
@@ -174,7 +182,13 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
                      "bookmark belonging to a state."),
         }
     if pair:
-        return {"identifier": f"{scope['state']}::{scope['bookmark']}"}
+        blank = [key for key in ("state", "bookmark")
+                 if not str(scope.get(key) or "").strip()]
+        if blank:
+            return {"error": f"scope names an empty {blank[0]}.",
+                    "error_category": "invalid_argument"}
+        return {"identifier": f"{str(scope['state']).strip()}::"
+                              f"{str(scope['bookmark']).strip()}"}
     key = named[0]
     value = scope[key]
     if key == "ignore_selections":
@@ -258,7 +272,8 @@ class EngineFiltersMixin:
 
     def range_modifier(self, app_handle: int, app_id: str, field: str,
                        low: Any, high: Any, low_exclusive: bool = False,
-                       high_exclusive: bool = False) -> Dict[str, Any]:
+                       high_exclusive: bool = False,
+                       base: str = "") -> Dict[str, Any]:
         """A set modifier selecting a range of a field that is not a date.
 
         The bounds are the values themselves, and by default both ends are
@@ -291,7 +306,7 @@ class EngineFiltersMixin:
                     "error_category": "invalid_filter"}
         modifier = f'{name}={{"{"".join(parts)}"}}'
         counted = self.evaluate_expressions(
-            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
+            app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
         matched = counted[0].get("number") if counted else None
         if matched is not None and int(matched) == 0:
             return {
@@ -314,7 +329,8 @@ class EngineFiltersMixin:
         }
 
     def period_modifier(self, app_handle: int, app_id: str, field: str,
-                        start: Any, end: Any) -> Dict[str, Any]:
+                        start: Any, end: Any,
+                        base: str = "") -> Dict[str, Any]:
         """A set modifier selecting one period of a date field.
 
         Returns {"modifier", "form", "from", "to", "days", "error", ...}.
@@ -352,7 +368,7 @@ class EngineFiltersMixin:
         serial_to = _to_serial(high) + 1
 
         form = self._resolve_period_form(
-            app_handle, app_id, field, serial_from, serial_to)
+            app_handle, app_id, field, serial_from, serial_to, base=base)
         if form.get("error"):
             return form
 
@@ -378,7 +394,8 @@ class EngineFiltersMixin:
         ]
 
     def _resolve_period_form(self, app_handle: int, app_id: str, field: str,
-                             serial_from: int, serial_to: int) -> Dict[str, Any]:
+                             serial_from: int, serial_to: int,
+                             base: str = "") -> Dict[str, Any]:
         """Pick the working form by measuring, not by inspecting the field.
 
         The reference is `Count(DISTINCT If(...))`, which compares numbers
@@ -397,7 +414,8 @@ class EngineFiltersMixin:
             if chosen:
                 label, modifier = chosen[0]
                 counted = self.evaluate_expressions(
-                    app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
+                    app_handle,
+                    [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
                 matched = counted[0].get("number") if counted else None
                 if matched is not None and int(matched) > 0:
                     return {"modifier": modifier, "form": label,
@@ -406,10 +424,12 @@ class EngineFiltersMixin:
                 # than answer a zero built on a remembered choice.
 
         reference_expr = (
+            f"=Count({{{base}}} DISTINCT If({name}>={serial_from} and "
+            f"{name}<{serial_to}, {name}))" if base else
             f"=Count(DISTINCT If({name}>={serial_from} and {name}<{serial_to}, "
             f"{name}))")
         probes = [reference_expr] + [
-            f"=Count({{<{modifier}>}} DISTINCT {name})"
+            f"=Count({{{base}<{modifier}>}} DISTINCT {name})"
             for _, modifier in candidates
         ]
         values = self.evaluate_expressions(app_handle, probes)
@@ -453,8 +473,8 @@ class EngineFiltersMixin:
         return {"modifier": modifier, "form": label, "matched": reference}
 
     def values_modifier(self, app_handle: int, field: str,
-                        values: List[Any], operator: str = "values"
-                        ) -> Dict[str, Any]:
+                        values: List[Any], operator: str = "values",
+                        base: str = "") -> Dict[str, Any]:
         """A set modifier over named values of a field.
 
         `operator` says what the values do to the set: keep exactly these,
@@ -490,7 +510,7 @@ class EngineFiltersMixin:
             }
         name = escape_qlik_field_name(field)
         probes = [
-            f"=Count({{<{name}={{{quote_value(v)}}}>}} DISTINCT {name})"
+            f"=Count({{{base}<{name}={{{quote_value(v)}}}>}} DISTINCT {name})"
             for v in wanted
         ]
         counts = self.evaluate_expressions(app_handle, probes)
@@ -652,6 +672,16 @@ class EngineFiltersMixin:
         Every filter narrows the result further — they combine with AND,
         which is what "revenue in 2024 for the North region" means.
         """
+        identifier = ""
+        if scope:
+            if not isinstance(scope, dict):
+                return {"error": f"scope must be an object, got {scope!r}.",
+                        "error_category": "invalid_argument"}
+            resolved = _set_identifier(scope)
+            if resolved.get("error"):
+                return resolved
+            identifier = resolved["identifier"]
+
         parts: List[str] = []
         applied: List[Dict[str, Any]] = []
         for entry in filters or []:
@@ -860,19 +890,19 @@ class EngineFiltersMixin:
                 # "some time in 1901".
                 if self._is_temporal_field(app_handle, field):
                     outcome = self.period_modifier(
-                        app_handle, app_id, field, low, high)
+                        app_handle, app_id, field, low, high, base=identifier)
                 else:
                     outcome = self.range_modifier(
                         app_handle, app_id, field,
                         low if low is not None else None,
                         high if high is not None else None,
                         low_exclusive=low_exclusive,
-                        high_exclusive=high_exclusive)
+                        high_exclusive=high_exclusive, base=identifier)
             elif values is not None:
                 outcome = self.values_modifier(
                     app_handle, field,
                     values if isinstance(values, list) else [values],
-                    operator=operator)
+                    operator=operator, base=identifier)
             else:
                 return {
                     "error": (
@@ -885,16 +915,6 @@ class EngineFiltersMixin:
                 return outcome
             parts.append(outcome["modifier"])
             applied.append({k: v for k, v in outcome.items() if k != "modifier"})
-
-        identifier = ""
-        if scope:
-            if not isinstance(scope, dict):
-                return {"error": f"scope must be an object, got {scope!r}.",
-                        "error_category": "invalid_argument"}
-            resolved = _set_identifier(scope)
-            if resolved.get("error"):
-                return resolved
-            identifier = resolved["identifier"]
 
         if not parts:
             # An identifier with nothing to modify is still a set: "all the

@@ -45,7 +45,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   (`match_expression`).
 - `scope` says what a query counts over before any filter narrows it: the
   whole model whatever is selected, a bookmark, an alternate state, or
-  the selections as they were a few steps back. Stated on the query it
+  the selections as they were a few steps back (`selection_back`) or
+  forward again (`selection_forward`). Stated on the query it
   reaches every measure; stated on one metric, or on one part of an
   arithmetic metric, only that one.
 - `total` and `total_except` count across the grouping instead of within
