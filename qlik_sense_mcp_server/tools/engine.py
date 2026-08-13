@@ -683,10 +683,17 @@ def get_app_field(
                 if matched.get(key) is not None:
                     out[key] = matched[key]
         else:
+            # One more than asked for, to tell "this is the whole field"
+            # from "this is where the page ended". Without it a caller that
+            # asked for 100 and got 100 could not tell the two apart.
             field_data = context.engine_api.get_field_values(
-                app_handle, field_name, lim, include_frequency=False, offset=off)
+                app_handle, field_name, lim + 1, include_frequency=False,
+                offset=off)
             values = [v.get("value", "") for v in field_data.get("values", [])]
-            out = {"field_values": values}
+            out: Dict[str, Any] = {"field_values": values[:lim]}
+            if len(values) > lim:
+                out["has_more"] = True
+                out["next_offset"] = off + lim
         # COMMENT FIELD text of this very field, when the script sets one —
         # already fetched above by the existence check, no second call.
         comment = description.get("comment")

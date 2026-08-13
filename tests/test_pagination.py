@@ -216,3 +216,56 @@ class TestPublishedTriState:
         fn = getattr(srv.get_apps, "fn", srv.get_apps)
         json.loads(fn(published="both"))
         assert captured["published"] is None
+
+
+class TestFieldValuesSayWhereTheyEnd:
+    """A page that filled up looked exactly like a field that ran out."""
+
+    @staticmethod
+    def _tool(values, limit):
+        import json
+        from qlik_sense_mcp_server.tools import context, engine as engine_tools
+
+        class _Engine:
+            ws_operation_timeout = 30.0
+
+            def transaction(self):
+                import contextlib
+                return contextlib.nullcontext()
+
+            def ensure_app(self, app_id, no_data=False):
+                return 1
+
+            def get_field_description(self, handle, name):
+                return {"name": name, "comment": ""}
+
+            def get_field_values(self, handle, name, count,
+                                 include_frequency=False, offset=0):
+                page = values[offset:offset + count]
+                return {"values": [{"value": v} for v in page]}
+
+        saved_engine, saved_repo = context.engine_api, context.repo_api
+        context.engine_api = _Engine()
+        context.repo_api = object()
+        try:
+            fn = getattr(engine_tools.get_app_field, "fn",
+                         engine_tools.get_app_field)
+            return json.loads(fn(app_id="a", field_name="Region", limit=limit))
+        finally:
+            context.engine_api, context.repo_api = saved_engine, saved_repo
+
+    def test_a_full_page_says_there_is_more(self):
+        reply = self._tool([f"v{i}" for i in range(20)], limit=5)
+        assert reply["field_values"] == ["v0", "v1", "v2", "v3", "v4"]
+        assert reply["has_more"] is True
+        assert reply["next_offset"] == 5
+
+    def test_a_short_field_says_nothing_of_the_sort(self):
+        reply = self._tool(["v0", "v1"], limit=5)
+        assert reply["field_values"] == ["v0", "v1"]
+        assert "has_more" not in reply
+
+    def test_exactly_a_page_is_not_reported_as_more(self):
+        reply = self._tool(["v0", "v1", "v2"], limit=3)
+        assert reply["field_values"] == ["v0", "v1", "v2"]
+        assert "has_more" not in reply
