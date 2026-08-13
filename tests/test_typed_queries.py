@@ -66,6 +66,9 @@ class _Engine(QlikEngineAPI):
         if method == "EvaluateEx":
             return {"qValue": self._evaluate(params[0])}
         if method == "CreateSessionObject":
+            fetch = ((params[0] or {}).get("qHyperCubeDef") or {}).get(
+                "qInitialDataFetch") or [{}]
+            self.page = (fetch[0].get("qTop", 0), fetch[0].get("qHeight"))
             return {"qReturn": {"qHandle": 100 + len(self.batches)}}
         if method == "GetLayout":
             return {"qLayout": {"qHyperCube": self._cube()}}
@@ -87,6 +90,8 @@ class _Engine(QlikEngineAPI):
 
     def _cube(self):
         width = len(self.rows[0]) if self.rows else 1
+        top, height = getattr(self, "page", (0, None))
+        shown = self.rows[top:top + height] if height else self.rows[top:]
         return {
             "qSize": {"qcy": len(self.rows), "qcx": width},
             "qDimensionInfo": [{"qNumFormat": {"qType": "A"}}],
@@ -94,7 +99,7 @@ class _Engine(QlikEngineAPI):
             "qGrandTotalRow": [{"qNum": 99.0, "qText": "99"}],
             "qDataPages": [{"qMatrix": [
                 [{"qText": str(v), "qNum": v if isinstance(v, (int, float)) else "NaN"}
-                 for v in row] for row in self.rows]}],
+                 for v in row] for row in shown]}],
         }
 
     @staticmethod
@@ -1172,16 +1177,25 @@ class TestCountingTheCostIsBounded:
         assert same == plain
 
 
-class TestZeroSaysNothing:
-    """`ignore_selections: 0` names no set, and a step count of zero is no
-    step - reading them as statements cancelled the query's filters."""
+class TestYesOrNoIsYesOrNo:
+    """A key that means yes or no takes yes or no. A zero, or the word
+    spelled out, used to switch on the very thing it named - every
+    non-empty string is true."""
 
     @pytest.mark.parametrize("scope", [{"ignore_selections": 0},
-                                       {"current_selection": 0}])
-    def test_a_zero_keeps_the_query_filters(self, scope):
+                                       {"ignore_selections": "false"},
+                                       {"current_selection": "no"},
+                                       {"ignore_selections": 1}])
+    def test_anything_but_a_boolean_is_refused(self, scope):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_a_plain_no_keeps_the_query_filters(self):
         plan = _Engine()._plan_query(1, "app", _query(
             filters=[{"field": "Region", "values": ["North"]}],
-            metrics=[{"field": "Amount", "agg": "sum", "scope": scope}]), 0)
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "scope": {"ignore_selections": False}}]), 0)
         assert plan["measures"][0]["expression"] == (
             "Sum({<[Region]={'North'}>} [Amount])")
 
@@ -1300,7 +1314,19 @@ class TestThePageEndsWhereTheRowsEnd:
     def test_the_last_page_is_not_called_incomplete(self):
         engine = _Engine(rows=[["North", 1], ["South", 2], ["East", 3]])
         result = engine.run_queries(1, "app", [_query(offset=2, limit=2)])
-        assert "has_more" not in result["results"][0]
+        reply = result["results"][0]
+        # One row of three, taken from the third: the page ends where the
+        # rows end, and the old formula compared the total against the size
+        # of this page alone.
+        assert reply["returned_rows"] == 1 and reply["total_rows"] == 3
+        assert "has_more" not in reply
+
+    def test_a_page_in_the_middle_says_there_is_more(self):
+        engine = _Engine(rows=[["North", 1], ["South", 2], ["East", 3]])
+        result = engine.run_queries(1, "app", [_query(offset=1, limit=1)])
+        reply = result["results"][0]
+        assert reply["returned_rows"] == 1
+        assert reply["has_more"] is True and reply["next_offset"] == 2
 
     def test_an_offset_past_the_end_is_not_called_incomplete(self):
         engine = _Engine(rows=[["North", 1]])
@@ -1317,3 +1343,18 @@ class TestAnEmptyNameIsAMistake:
         result = _Engine().run_queries(1, "app", [_query(
             metrics=[{"field": "Amount", "agg": "sum", "scope": scope}])])
         assert result["results"][0]["error_category"] == "invalid_argument"
+
+
+class TestEveryExpressionHasASize:
+    def test_a_measure_written_by_hand_is_measured_too(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSION_CHARS
+
+        long_one = "Sum([Amount]) + " * (MAX_EXPRESSION_CHARS // 10)
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[], measures=[long_one + "Sum([Amount])"])])
+        assert result["results"][0]["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_measure_still_runs(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[], measures=["Sum([Amount])"])])
+        assert result["queries_failed"] == 0
