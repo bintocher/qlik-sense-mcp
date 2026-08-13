@@ -33,8 +33,10 @@ MAX_PAGE_READS = 5
 # twice, so nesting them doubles the text at every level.
 MAX_EXPRESSION_CHARS = 20000
 
-# A reference count plus the candidate forms of a date field.
-RANGE_PROBE_COST = 3
+# What one range really costs: the tags of the field, a reference count
+# with the candidate forms of a date, and the four control values the reply
+# carries.
+RANGE_PROBE_COST = 8
 
 
 def _yes_or_no(value: Any, key: str, query_id: str
@@ -1533,6 +1535,11 @@ class EngineQueriesMixin:
                                           measure.get("modifier", "")):
                 if applied.get("note"):
                     warnings.append(applied["note"])
+            for part in measure.get("part_filters") or []:
+                for _, applied in _narrowings(part.get("filters_applied"),
+                                              part.get("modifier", "")):
+                    if applied.get("note"):
+                        warnings.append(applied["note"])
         # What the checks said before the query ran — which fields a set
         # modifier really filters on, for instance — belongs in the same
         # place as what the result said afterwards.

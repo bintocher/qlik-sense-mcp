@@ -112,6 +112,16 @@ class EngineHypercubeMixin:
             str(dim.get("field") or "").strip()
             for dim in dimensions if str(dim.get("field") or "").strip()
         ]
+        for position, measure in enumerate(measures):
+            if not isinstance(measure, dict):
+                return {
+                    "error": (f"measures[{position}] is not a measure: "
+                              f"{measure!r}"),
+                    "error_category": "invalid_argument",
+                    "failed_step": "plan",
+                    "hint": ('An expression, or {"expression": "Sum(...)", '
+                             '"label": "..."}.'),
+                }
         measure_texts = [
             str(measure.get("expression") or "").strip()
             for measure in measures if str(measure.get("expression") or "").strip()
@@ -635,11 +645,22 @@ class EngineHypercubeMixin:
                 converted_dimensions.append(dim)
 
             converted_measures = []
-            for measure in measures:
+            for position, measure in enumerate(measures):
                 if isinstance(measure, str):
                     measure = {"expression": measure}
-                else:
+                elif isinstance(measure, dict):
                     measure = dict(measure)
+                else:
+                    # A number is neither an expression nor a measure, and
+                    # saying so beats an interpreter error.
+                    return {
+                        "error": (f"measures[{position}] is not a measure: "
+                                  f"{measure!r}"),
+                        "error_category": "invalid_argument",
+                        "failed_step": "plan",
+                        "hint": ('An expression, or {"expression": '
+                                 '"Sum(...)", "label": "..."}.'),
+                    }
                 # Default: numeric descending. Only takes effect once this
                 # measure is the leading column of qInterColumnSortOrder.
                 measure.setdefault("sort_by", {"qSortByNumeric": -1})

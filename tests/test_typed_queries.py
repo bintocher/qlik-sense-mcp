@@ -1674,3 +1674,30 @@ class TestEveryProbeCountsTowardsTheCeiling:
         from qlik_sense_mcp_server.engine.queries import _filter_cost
 
         assert _filter_cost({"filters": [filter_shape]}) == each
+
+
+class TestANoteFromInsideAPart:
+    def test_it_reaches_the_warnings(self):
+        class _Silent(_Engine):
+            def _reply(self, request):
+                if request["method"] == "EvaluateEx":
+                    return {"qValue": {"qText": None, "qNumber": "NaN"}}
+                return super()._reply(request)
+
+        result = _Silent().run_queries(1, "app", [_query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum", "filters": [
+                    {"field": "Region", "values": ["North"]}]},
+                {"field": "Amount", "agg": "sum"}]}])])
+        reply = result["results"][0]
+        assert any("could not be checked" in w for w in reply["warnings"])
+
+
+class TestAMeasureThatIsNotAMeasure:
+    @pytest.mark.parametrize("stated", [5, None, ["Sum([Amount])"]])
+    def test_the_hypercube_refuses_it(self, stated):
+        from tests.test_hypercube import _FakeEngine
+
+        result = _FakeEngine().create_hypercube(
+            1, [{"field": "Region"}], [stated], 10)
+        assert result["error_category"] == "invalid_argument"
