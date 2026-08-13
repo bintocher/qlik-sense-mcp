@@ -4,6 +4,58 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [2.0.1] - 2026-08-13
+
+### Fixed
+
+- A field name with a space made the check refuse a query Qlik runs
+  happily. `CheckExpression` reads a bare `Тип ставки` as two tokens and
+  answers "Garbage after expression: 'ставки'", so every model with
+  non-English field names was locked out of `engine_query` entirely.
+  Names are now written in brackets — once, where the query is planned,
+  because the text of an expression is the key by which Engine's verdict
+  finds its way back to the query. A name that arrives already bracketed
+  is left as it is.
+- A filter on a field the app does not have blamed the bounds: a missing
+  field has no tags, so it read as "not a date" and perfectly good dates
+  went into a numeric parse that complained about them. The field is now
+  checked before its bounds are read, and the refusal names the field.
+- The warning about set analysis fired on almost every measure. It was
+  built on `GetFieldsFromExpression` returning the fields a modifier
+  filters on; measured, it returns every field of the expression, so
+  `Sum([Amount])` came back as "set analysis filters on 'Amount'". The
+  warning and the call behind it are gone — nothing distinguishes a
+  filter field from an aggregated one, and a claim that cannot be checked
+  is worse than none.
+- A limit above the ceiling, and a cube too wide for one page, are
+  refused with the value that fits instead of being quietly reduced. A
+  reduced limit returns fewer rows than were asked for, and nothing in
+  the reply told the two apart. The hand-written path already refused;
+  the typed one now matches it.
+- An offset that is not a row number is refused rather than clamped to
+  zero.
+- Bounds given in the wrong order are refused instead of silently
+  swapped, and stating both an inclusive and an exclusive bound for the
+  same end is refused instead of one of them being ignored.
+- An empty value inside a filter list is named by its position rather
+  than dropped.
+
+### Changed
+
+- The group with no dimension value is kept by default. Dropping it is a
+  statement about the data — facts with no value for the grouping field
+  are still facts — so it is now the caller's to make:
+  `exclude_null_dimensions` is available in `engine_query` as well, and
+  defaults to keeping the group in both tools. A ranking may now start
+  with Qlik's `"-"` row where it did not before.
+- Suggestions of near-miss field names and values are gone. The model
+  reads the field list and the values itself; a shortlist picked by
+  string similarity is a guess about spelling, not a fact about the app.
+  The value search behind the old suggestion also cost about 2.5 seconds
+  per refusal.
+- Messages name a field in brackets — `[Дата ставки]` — so the boundary
+  between the name and the sentence around it is visible.
+
 ## [2.0.0] - 2026-08-12
 
 ### Added
