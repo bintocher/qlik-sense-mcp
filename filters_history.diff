@@ -1,0 +1,2096 @@
+commit 18163850fbb5133bf6455a4fcbe7592761f12c0a
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 02:08:28 2026 +0300
+
+    Части выражения и множества соединения перестали считаться одинаково
+    
+    Ключ, называющий составные части, служит двум разным вещам: множествам
+    соединения и частям арифметического выражения. Счёт на предел принимал
+    вторые за первые и удваивал их стоимость - обычный запрос "доля от целого",
+    повторённый несколько десятков раз, получал отказ, не дойдя до Qlik.
+    Проверено: сорок долей в одном вызове считаются, глубокое соединение
+    по-прежнему отвечает отказом.
+    
+    Ключ рядом с соединением отвечает отказом независимо от того, что в нём
+    записано: пустое имя закладки - такая же названная и не выполненная
+    просьба, как и непустое.
+    
+    Без опорной величины запись периода не выбирается: прежде несостоявшийся
+    опорный вызов позволял взять запись без всякого основания.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 7e62345..d369960 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -514,8 +514,10 @@ class EngineFiltersMixin:
+         # A complaint is a refusal: Qlik answering the reference with the
+         # text of an error says the bounds cannot be read at all, and
+         # picking a form over that answer hides it.
+-        complaint = _probe_complaint(values[0]) if values else ""
++        complaint = _probe_unusable(values[0]) if values else ""
+         if complaint:
++            # The reference is what every candidate form is measured
++            # against; without it a form would be chosen on nothing.
+             return {"error": (
+                 f"Qlik cannot read the period on "
+                 f"{escape_qlik_field_name(field)}: {complaint}"),
+@@ -854,7 +856,8 @@ class EngineFiltersMixin:
+         # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
+         # bookmark silently and answered over a different set.
+         beside = [key for key in scope
+-                  if key not in ("combine", "of") and bool(scope.get(key))]
++                  if key not in ("combine", "of")
++                  and scope.get(key) is not None]
+         if beside:
+             return {
+                 "error": ("scope states a combination and "
+
+commit 993898bb4aecb0c007b4800548f62db26c84722e
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 01:52:48 2026 +0300
+
+    Множества соединения считаются в пределе, и ключ рядом с ним не теряется
+    
+    Предел на один вызов не видел множеств внутри соединения. Соединения
+    вкладываются друг в друга, и каждый уровень удваивает их число: небольшой
+    допустимый запрос строил сотни тысяч множеств на соединении, общем для
+    всех запросов. Теперь множества считаются наравне с условиями. Проверено:
+    восемь уровней вложения отвечают отказом, обычное соединение работает.
+    
+    Ключ, названный рядом с соединением, больше не теряется молча: прежде
+    запрос с закладкой и соединением сразу отбрасывал закладку и отвечал по
+    другому множеству.
+    
+    Несостоявшийся вызов проверки отличён от жалобы Qlik и там, где выбирается
+    рабочая запись периода: отвергнутая запись не может быть выбрана
+    по молчанию, при этом сбой связи по-прежнему не отменяет фильтр в местах,
+    где проверка лишь подтверждающая.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 2f39263..7e62345 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -175,6 +175,20 @@ def _probe_complaint(result: Dict[str, Any]) -> str:
+     return ""
+ 
+ 
++def _probe_unusable(result: Dict[str, Any]) -> str:
++    """Whether a probe says nothing that can be built on.
++
++    Wider than a complaint: a call that failed outright reports through
++    `error` rather than through the text of a value, and a form of a filter
++    must not be chosen on the strength of an answer that never came.
++    """
++    complaint = _probe_complaint(result)
++    if complaint:
++        return complaint
++    stated = result.get("error")
++    return str(stated) if stated else ""
++
++
+ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+     """The identifier that goes before the modifier, from a description.
+ 
+@@ -531,7 +545,7 @@ class EngineFiltersMixin:
+ 
+         complaints = []
+         for (label, modifier), value in zip(candidates, values[1:]):
+-            complaint = _probe_complaint(value)
++            complaint = _probe_unusable(value)
+             if complaint:
+                 complaints.append(complaint)
+                 continue
+@@ -555,7 +569,7 @@ class EngineFiltersMixin:
+         # disagreed.
+         usable = [(label, modifier)
+                   for (label, modifier), value in zip(candidates, values[1:])
+-                  if not _probe_complaint(value)]
++                  if not _probe_unusable(value)]
+         if not usable:
+             return {"error": (
+                 f"Qlik cannot read any form of a period filter on "
+@@ -836,6 +850,20 @@ class EngineFiltersMixin:
+         `union`, 40 under `intersect` where one contains the other, and 0
+         under `exclude` and `symmetric_difference` in the same case.
+         """
++        # A key stated beside the combination is still a key: accepting
++        # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
++        # bookmark silently and answered over a different set.
++        beside = [key for key in scope
++                  if key not in ("combine", "of") and bool(scope.get(key))]
++        if beside:
++            return {
++                "error": ("scope states a combination and "
++                          + ", ".join(sorted(beside)) + " at once."),
++                "error_category": "invalid_argument",
++                "hint": ("Put the key inside the entry of `of` it belongs "
++                         "to - each set of a combination states its own."),
++            }
++
+         operation = scope.get("combine")
+         parts = scope.get("of")
+         if operation is None or parts is None:
+
+commit 9082d5f031012e112a17464760401d866aff28b3
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 01:35:07 2026 +0300
+
+    Перечень условий запроса проверяется, а молчание Qlik не сходит за ответ
+    
+    Перечень условий самого запроса, переданный не перечнем, читался как
+    "условий нет": запрос выполнялся без сужения и отвечал полным итогом, как
+    будто всё в порядке. Это самый частый вход инструмента, и то же правило
+    уже действовало во всех соседних местах.
+    
+    Вопрос "хранит ли поле даты" задаётся так, чтобы различить два ответа:
+    обёртка отвечает пустотой и на "такого поля нет", и на несостоявшийся
+    запрос, поэтому при пустом ответе вопрос повторяется напрямую. Прежняя
+    правка проходила мимо этой обёртки и потому не работала.
+    
+    Что Qlik ответил о контрольной величине, доходит до разбора: текст ошибки
+    терялся по дороге, и сбой связи объяснялся как "условия вместе ничего не
+    выбирают" - числа выдавались за проверенные.
+    
+    Запись периода, которую Qlik отверг, не берётся запасной и при частичном
+    несогласии проверок.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 2acfe81..2f39263 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -291,19 +291,33 @@ class EngineFiltersMixin:
+         the truth was 1,898,591 — a plausible number, and wrong.
+         """
+         try:
+-            description = self.get_field_description(app_handle, field)
+-        except QlikEngineError as exc:
+-            # Qlik answered, and the answer is that it has no such field.
+-            logger.debug("No description for %r: %s", field, exc)
+-            return False
+-        except Exception as exc:
+-            # The question never arrived. Reading that as "not a date"
+-            # turns a period into a numeric range and answers a plausible
+-            # wrong number - the very failure this check exists to stop.
+-            raise QlikProbeUnavailable(
+-                f"Qlik could not be asked whether "
+-                f"{escape_qlik_field_name(field)} holds dates: {exc}"
+-            ) from exc
++            description = self.get_field_description(app_handle, field) or {}
++        except Exception:
++            # The wrapper is documented not to raise; a subclass that does
++            # is telling us the same thing an empty answer does - ask
++            # again, directly.
++            description = {}
++        if not description:
++            # The wrapper answers `{}` to both "Qlik says there is no such
++            # field" and "the question never arrived", and here the
++            # difference decides whether a period stays a period. Asked
++            # again, directly, so the two can be told apart.
++            try:
++                reply = self.send_request("GetFieldDescription", [field],
++                                          handle=app_handle)
++                description = {"tags": ((reply or {}).get("qReturn")
++                                        or {}).get("qTags", [])}
++            except QlikEngineError as exc:
++                logger.debug("No description for %r: %s", field, exc)
++                return False
++            except Exception as exc:
++                # Reading silence as "not a date" turns a period into a
++                # numeric range and answers a plausible wrong number - the
++                # very failure this check exists to stop.
++                raise QlikProbeUnavailable(
++                    f"Qlik could not be asked whether "
++                    f"{escape_qlik_field_name(field)} holds dates: {exc}"
++                ) from exc
+         tags = description.get("tags") or []
+         return any(str(tag).lstrip("$") in ("date", "timestamp")
+                    for tag in tags)
+@@ -535,10 +549,19 @@ class EngineFiltersMixin:
+                 f"{escape_qlik_field_name(field)}: {complaints[0]}"),
+                 "error_category": "invalid_period"}
+ 
+-        # Every candidate disagreed with the reference. The expression form
+-        # is the one built from the same comparison the reference uses, so
+-        # it is what goes out, with the disagreement recorded.
+-        label, modifier = candidates[-1]
++        # Every candidate disagreed with the reference. The one that goes
++        # out is built from the same comparison the reference uses - but
++        # never one Qlik has already refused, even when another form only
++        # disagreed.
++        usable = [(label, modifier)
++                  for (label, modifier), value in zip(candidates, values[1:])
++                  if not _probe_complaint(value)]
++        if not usable:
++            return {"error": (
++                f"Qlik cannot read any form of a period filter on "
++                f"{escape_qlik_field_name(field)}: {complaints[0]}"),
++                "error_category": "invalid_period"}
++        label, modifier = usable[-1]
+         logger.warning(
+             "No filter form matched the reference count on %r (reference=%d)",
+             field, reference)
+
+commit 0eaca30f8b26ae18527366933c78e5018b8e6641
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 01:20:09 2026 +0300
+
+    Соединение множеств проверено так же строго, как всё остальное
+    
+    Перечень условий множества, переданный не перечнем, отвечает отказом:
+    пустой объект читался как "условий нет" и расширял множество до всего,
+    а ответ приходил больше настоящего.
+    
+    Имя закладки со скобкой сохраняется целиком: снимается ровно одна пара
+    внешних скобок, а не все подряд.
+    
+    Принадлежность ровно одному соединяет ровно два множества. Qlik применяет
+    эту операцию попарно, поэтому три множества ответили бы на другой вопрос -
+    "в нечётном числе из них".
+    
+    Вопрос "хранит ли поле даты", не дошедший до Qlik, больше не читается как
+    "не хранит": молчание превращало период в числовой промежуток и давало
+    правдоподобное неверное число. Ответ Qlik "такого поля нет" по-прежнему
+    считается ответом.
+    
+    Если Qlik отверг все записи периода, запрос отвечает отказом, а не берёт
+    одну из отвергнутых.
+    
+    Проверка результата различает жалобу Qlik и пустое пересечение условий:
+    прежде то и другое объяснялось одинаково, и числа выдавались за
+    проверенные.
+    
+    Контрольные величины периода строятся и для условий внутри соединённых
+    множеств.
+    
+    Справка инструмента описывает соединение множеств - прежде о нём можно
+    было узнать только из отдельного документа.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 5b7b0c9..2acfe81 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -27,7 +27,7 @@ import re
+ import time
+ from typing import Any, Dict, List, Optional, Tuple
+ 
+-from ..exceptions import QlikEngineError
++from ..exceptions import QlikEngineError, QlikProbeUnavailable
+ from ..utils import bare_field_name, escape_qlik_field_name
+ 
+ logger = logging.getLogger(__name__)
+@@ -292,9 +292,18 @@ class EngineFiltersMixin:
+         """
+         try:
+             description = self.get_field_description(app_handle, field)
+-        except Exception as exc:
+-            logger.debug("Could not describe %r: %s", field, exc)
++        except QlikEngineError as exc:
++            # Qlik answered, and the answer is that it has no such field.
++            logger.debug("No description for %r: %s", field, exc)
+             return False
++        except Exception as exc:
++            # The question never arrived. Reading that as "not a date"
++            # turns a period into a numeric range and answers a plausible
++            # wrong number - the very failure this check exists to stop.
++            raise QlikProbeUnavailable(
++                f"Qlik could not be asked whether "
++                f"{escape_qlik_field_name(field)} holds dates: {exc}"
++            ) from exc
+         tags = description.get("tags") or []
+         return any(str(tag).lstrip("$") in ("date", "timestamp")
+                    for tag in tags)
+@@ -506,13 +515,26 @@ class EngineFiltersMixin:
+                 ],
+             }
+ 
++        complaints = []
+         for (label, modifier), value in zip(candidates, values[1:]):
++            complaint = _probe_complaint(value)
++            if complaint:
++                complaints.append(complaint)
++                continue
+             number = value.get("number")
+             if number is not None and int(number) == reference:
+                 self._remember_form(app_id, field, label)
+                 return {"modifier": modifier, "form": label,
+                         "matched": reference}
+ 
++        if len(complaints) == len(candidates):
++            # Qlik refused every form there is. Falling back to one of them
++            # would send out a filter Qlik has already called unreadable.
++            return {"error": (
++                f"Qlik cannot read any form of a period filter on "
++                f"{escape_qlik_field_name(field)}: {complaints[0]}"),
++                "error_category": "invalid_period"}
++
+         # Every candidate disagreed with the reference. The expression form
+         # is the one built from the same comparison the reference uses, so
+         # it is what goes out, with the disagreement recorded.
+@@ -809,6 +831,15 @@ class EngineFiltersMixin:
+             return {"error": "`of` holds fewer than two sets.",
+                     "error_category": "invalid_argument",
+                     "hint": "An operation between sets needs two of them."}
++        if operation == "symmetric_difference" and len(parts) > 2:
++            # Qlik applies it pairwise, so three sets answer "in an odd
++            # number of them" rather than "in exactly one of them". Saying
++            # that plainly beats answering a different question.
++            return {"error": ("symmetric_difference joins exactly two sets, "
++                              f"and `of` holds {len(parts)}."),
++                    "error_category": "invalid_argument",
++                    "hint": ("Qlik applies it in pairs, so three sets would "
++                             "answer \"in an odd number of them\" instead.")}
+         if filters:
+             # Measured: Qlik refuses a modifier written outside the
+             # combination - `{((A) + (B))<Field={'x'}>}` comes back as
+@@ -826,14 +857,25 @@ class EngineFiltersMixin:
+             if not isinstance(part, dict):
+                 return {"error": f"of[{position}] is not an object: {part!r}",
+                         "error_category": "invalid_argument"}
+-            own_filters = part.get("filters") or []
++            own_filters = part.get("filters")
++            if own_filters is not None and not isinstance(own_filters,
++                                                          (list, tuple)):
++                return {"error": (
++                    f"of[{position}].filters={own_filters!r} is not a list."),
++                    "error_category": "invalid_filter",
++                    "hint": "A list of filter objects, or nothing at all."}
++            own_filters = list(own_filters or [])
+             own_scope = {k: v for k, v in part.items() if k != "filters"}
+             built = self.build_filters(app_handle, app_id, own_filters,
+                                        scope=own_scope or None)
+             if built.get("error"):
+                 return built
+             modifier = built.get("modifier") or "{$}"
+-            written.append("(" + modifier.strip("{}") + ")")
++            # The outermost braces, not every brace: a bookmark named with
++            # one would lose part of its name to `strip`.
++            inner = modifier[1:-1] if (modifier.startswith("{")
++                                       and modifier.endswith("}")) else modifier
++            written.append("(" + inner + ")")
+             applied.append({"set": position, "modifier": modifier,
+                             "filters_applied": built.get("applied", [])})
+ 
+@@ -1136,7 +1178,15 @@ class EngineFiltersMixin:
+                 # any other. Asking Qlik which this is costs one cheap call
+                 # and is the difference between "more than 400 off" and
+                 # "some time in 1901".
+-                if self._is_temporal_field(app_handle, field):
++                try:
++                    temporal = self._is_temporal_field(app_handle, field)
++                except QlikProbeUnavailable as exc:
++                    return {"error": str(exc),
++                            "error_category": "engine_api_error",
++                            "hint": ("Ask again; without this answer a "
++                                     "period and a numeric range cannot be "
++                                     "told apart.")}
++                if temporal:
+                     outcome = self.period_modifier(
+                         app_handle, app_id, field, low, high, base=identifier)
+                 else:
+
+commit ae532aafa33500523a15a16266ef9755bfaf3380
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 00:56:23 2026 +0300
+
+    Проверки идут в области запроса, а причина недостачи принадлежит запросу
+    
+    Условие вида "значения этого поля по условию на другом" доказывалось в
+    текущих выборках, тогда как запрос считается в названном множестве.
+    Так отклонялся верный запрос и проходил пустой. Причиной был параметр,
+    имя которого совпало с уже существующим внутри метода, - множество
+    подставлялось не то. Проверено на сервере с областью "весь массив".
+    
+    Жалоба Qlik на проверку стала отказом и на двух оставшихся путях -
+    числовой границе и периоде. Это самые частые виды условий, и на них отказ
+    Qlik до сих пор читался как успех. Запомненная рабочая запись даты тоже не
+    перекрывает жалобу.
+    
+    Причина недостачи строк принадлежит запросу, а не пакету: один запрос мог
+    исчерпать строки, пока второй ещё обслуживался, и оба получали одно
+    объяснение. Пометка ставилась на копию перечня, поэтому до ответа не
+    доходила.
+    
+    Оценка размера выражения совпадает с тем, что пишется: проверено на двух,
+    трёх, пятидесяти и четырёхстах частях - расхождение ноль. Прежде она
+    завышала и отвергала разрешённые выражения.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index c05f0db..5b7b0c9 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -336,6 +336,12 @@ class EngineFiltersMixin:
+         modifier = f'{name}={{"{"".join(parts)}"}}'
+         counted = self.evaluate_expressions(
+             app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
++        complaint = _probe_complaint(counted[0]) if counted else ""
++        if complaint:
++            return {"error": (
++                f"Qlik cannot read the bounds on "
++                f"{escape_qlik_field_name(field)}: {complaint}"),
++                "error_category": "invalid_filter"}
+         matched = counted[0].get("number") if counted else None
+         if matched is not None and int(matched) == 0:
+             return {
+@@ -445,6 +451,12 @@ class EngineFiltersMixin:
+                 counted = self.evaluate_expressions(
+                     app_handle,
+                     [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
++                complaint = _probe_complaint(counted[0]) if counted else ""
++                if complaint:
++                    return {"error": (
++                        f"Qlik cannot read the period on "
++                        f"{escape_qlik_field_name(field)}: {complaint}"),
++                        "error_category": "invalid_period"}
+                 matched = counted[0].get("number") if counted else None
+                 if matched is not None and int(matched) > 0:
+                     return {"modifier": modifier, "form": label,
+@@ -462,6 +474,15 @@ class EngineFiltersMixin:
+             for _, modifier in candidates
+         ]
+         values = self.evaluate_expressions(app_handle, probes)
++        # A complaint is a refusal: Qlik answering the reference with the
++        # text of an error says the bounds cannot be read at all, and
++        # picking a form over that answer hides it.
++        complaint = _probe_complaint(values[0]) if values else ""
++        if complaint:
++            return {"error": (
++                f"Qlik cannot read the period on "
++                f"{escape_qlik_field_name(field)}: {complaint}"),
++                "error_category": "invalid_period"}
+         if not values or values[0].get("number") is None:
+             # The probe itself did not run. Use the form that holds
+             # everywhere rather than refusing a query over a failed check.
+@@ -581,7 +602,8 @@ class EngineFiltersMixin:
+         return outcome
+ 
+     def _element_set(self, app_handle: int, app_id: str, field: str,
+-                     entry: Dict[str, Any]) -> Dict[str, Any]:
++                     entry: Dict[str, Any],
++                     outer_set: str = "") -> Dict[str, Any]:
+         """Values of a field that satisfy a condition on another field.
+ 
+         This is what P() and E() are for, and nothing else expresses it: a
+@@ -676,7 +698,8 @@ class EngineFiltersMixin:
+         # field to nothing, and an empty answer reads as "no such data"
+         # rather than as "no such client".
+         counted = self.evaluate_expressions(
+-            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
++            app_handle,
++            [f"=Count({{{outer_set}<{modifier}>}} DISTINCT {name})"])
+         complaint = _probe_complaint(counted[0]) if counted else ""
+         if complaint:
+             return {"error": (
+@@ -957,7 +980,8 @@ class EngineFiltersMixin:
+             has_period = bool(kinds["a range"])
+             if entry.get("matching") is not None or entry.get(
+                     "not_matching") is not None:
+-                outcome = self._element_set(app_handle, app_id, field, entry)
++                outcome = self._element_set(app_handle, app_id, field, entry,
++                                            outer_set=identifier)
+                 if outcome.get("error"):
+                     return outcome
+                 parts.append(outcome["modifier"])
+
+commit 65e5f0f3a23e8f841cb41bb73b002ba54dba378e
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 00:43:33 2026 +0300
+
+    Множества соединяются друг с другом
+    
+    Условие на одном поле не выражает вопрос "покупал в 2023 или живёт на
+    юге": это объединение двух множеств. Теперь описание области принимает
+    операцию и перечень множеств - объединение, пересечение, вычитание и
+    принадлежность ровно одному из них. Каждое множество описывается как
+    обычно и несёт собственные условия.
+    
+    Проверено на сервере числами: два множества по 40 и 60 дают 100 при
+    объединении, 0 при пересечении (они не пересекаются), 40 при вычитании и
+    100 при принадлежности одному.
+    
+    Условие, записанное снаружи соединения, отвечает отказом: проверено, что
+    Qlik не читает изменение, написанное вокруг соединения, и отвечает
+    ожиданием закрывающей скобки.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 95185de..c05f0db 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -149,8 +149,15 @@ SET_OPERATORS = {
+ # Which set the filters narrow. Without one, Qlik reads the modifier
+ # against the current selection, which is what a question about "the data"
+ # normally means.
++SET_COMBINERS = {
++    "union": " + ",
++    "intersect": " * ",
++    "exclude": " - ",
++    "symmetric_difference": " / ",
++}
++
+ SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
+-              "selection_back", "selection_forward")
++              "selection_back", "selection_forward", "combine", "of")
+ 
+ 
+ def _probe_complaint(result: Dict[str, Any]) -> str:
+@@ -176,6 +183,10 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+     selections of every state at once, so naming the state says which part
+     of it to read.
+     """
++    # A combination is read elsewhere, by the code that builds the sets it
++    # joins; here it is neither an identifier nor two of them at once.
++    if scope.get("combine") is not None or scope.get("of") is not None:
++        return {"identifier": ""}
+     unknown = [key for key in scope if key not in SCOPE_KEYS]
+     if unknown:
+         return {
+@@ -742,6 +753,71 @@ class EngineFiltersMixin:
+             outcome["matched"] = int(matched)
+         return outcome
+ 
++    def _combined_sets(self, app_handle: int, app_id: str,
++                       filters: List[Dict[str, Any]],
++                       scope: Dict[str, Any]) -> Dict[str, Any]:
++        """Two or more sets, joined by one operation between them.
++
++        Each set is described the way any set is - an identifier and
++        filters of its own - and the operation says what to do with them:
++        everything in either (`union`), only what is in both (`intersect`),
++        the first without the second (`exclude`), or what belongs to
++        exactly one of them (`symmetric_difference`).
++
++        Measured on the server: two sets holding 40 and 60 answer 100 under
++        `union`, 40 under `intersect` where one contains the other, and 0
++        under `exclude` and `symmetric_difference` in the same case.
++        """
++        operation = scope.get("combine")
++        parts = scope.get("of")
++        if operation is None or parts is None:
++            return {"error": ("scope names one of `combine` and `of` without "
++                              "the other."),
++                    "error_category": "invalid_argument",
++                    "hint": ('{"combine": "union", "of": [{...}, {...}]} - '
++                             "the operation and the sets it joins.")}
++        operation = str(operation).strip().lower()
++        if operation not in SET_COMBINERS:
++            return {"error": f"combine={operation!r} is not an operation "
++                             f"between sets.",
++                    "error_category": "invalid_argument",
++                    "allowed_values": sorted(SET_COMBINERS)}
++        if not isinstance(parts, (list, tuple)) or len(parts) < 2:
++            return {"error": "`of` holds fewer than two sets.",
++                    "error_category": "invalid_argument",
++                    "hint": "An operation between sets needs two of them."}
++        if filters:
++            # Measured: Qlik refuses a modifier written outside the
++            # combination - `{((A) + (B))<Field={'x'}>}` comes back as
++            # "'}' expected". Narrowing each set separately is the same
++            # question and Qlik reads it.
++            return {"error": ("Filters cannot narrow a combination of sets "
++                              "from the outside."),
++                    "error_category": "invalid_filter",
++                    "hint": ("State them inside each set of `of` - Qlik "
++                             "reads no modifier written around a "
++                             "combination.")}
++
++        written, applied = [], []
++        for position, part in enumerate(parts):
++            if not isinstance(part, dict):
++                return {"error": f"of[{position}] is not an object: {part!r}",
++                        "error_category": "invalid_argument"}
++            own_filters = part.get("filters") or []
++            own_scope = {k: v for k, v in part.items() if k != "filters"}
++            built = self.build_filters(app_handle, app_id, own_filters,
++                                       scope=own_scope or None)
++            if built.get("error"):
++                return built
++            modifier = built.get("modifier") or "{$}"
++            written.append("(" + modifier.strip("{}") + ")")
++            applied.append({"set": position, "modifier": modifier,
++                            "filters_applied": built.get("applied", [])})
++
++        combined = "{" + SET_COMBINERS[operation].join(written) + "}"
++        return {"modifier": combined, "applied": applied,
++                "scope": f"{operation} of {len(written)} sets"}
++
+     def build_filters(self, app_handle: int, app_id: str,
+                       filters: List[Dict[str, Any]],
+                       scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+@@ -750,6 +826,13 @@ class EngineFiltersMixin:
+         Every filter narrows the result further — they combine with AND,
+         which is what "revenue in 2024 for the North region" means.
+         """
++        # Sets combine with each other: "bought in 2023 or lives in the
++        # South" is the union of two sets, and no modifier on one field
++        # says it.
++        if isinstance(scope, dict) and (scope.get("combine") is not None
++                                        or scope.get("of") is not None):
++            return self._combined_sets(app_handle, app_id, filters, scope)
++
+         identifier = ""
+         # `is not None`, not truthiness: 0, "" and False are not objects,
+         # and passing them silently as "no scope" hides a mistake in the
+
+commit f7773f82061b042d6cb59a266fb4dd26b3d5c38c
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 00:37:04 2026 +0300
+
+    Жалоба Qlik на проверку - это отказ, и последний вид условия доказывает выбор
+    
+    Проба, вернувшаяся без числа, имеет две разные причины, и они больше не
+    смешиваются. Qlik, ответивший текстом ошибки, отказывает - и этот текст
+    передаётся вызывающей стороне. Проба, которая не выполнилась вовсе, о
+    запросе ничего не говорит и отказом не считается. Проверено: двойная
+    кавычка внутри условия ломает построенное множество, само условие при этом
+    безупречно, и увидеть это можно только по ответу на пробу.
+    
+    Условие вида "значения этого поля, удовлетворяющие условию на другом"
+    доказывает, что выбирает хотя бы одно значение. Проверено: "покупал в
+    2023 и не покупал в 2023" отвечает отказом, "покупал в 2023 и не покупал в
+    2024" отвечает единственным подходящим клиентом.
+    
+    Условие, записанное выражением, проверяется тем же кодом, что и величины:
+    переменная раскрывается перед проверкой, потому что до Qlik доходит
+    раскрытая запись, и читаются обе половины ответа. Прежняя самодельная
+    выборка имён теряла текст ошибки разбора при неудаче.
+    
+    Ответ о недостаче строк называет настоящую причину: перестал присылать
+    Engine или дочитывание дошло до своего предела.
+    
+    Оценка размера выражения до сборки учитывает все знаменатели, а не один.
+    
+    Число совпадений условия видно в ответе - как и у текстового поиска.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 9e1d9c6..95185de 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -153,6 +153,21 @@ SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
+               "selection_back", "selection_forward")
+ 
+ 
++def _probe_complaint(result: Dict[str, Any]) -> str:
++    """What Qlik said about a probe, when what it said was a complaint.
++
++    A probe that comes back with no number has two very different causes.
++    Qlik answers a broken expression with the text of the error, and that
++    is a refusal to pass on. A probe that never ran at all - a dropped
++    frame, a timeout - says nothing about the query and must not be read
++    as one.
++    """
++    text = str(result.get("text") or "")
++    if text.startswith("Error"):
++        return text.split("Error:", 1)[-1].strip() or text
++    return ""
++
++
+ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+     """The identifier that goes before the modifier, from a description.
+ 
+@@ -517,6 +532,13 @@ class EngineFiltersMixin:
+             for v in wanted
+         ]
+         counts = self.evaluate_expressions(app_handle, probes)
++        for result in counts:
++            complaint = _probe_complaint(result)
++            if complaint:
++                return {"error": (
++                    f"Qlik cannot read the filter on "
++                    f"{escape_qlik_field_name(field)}: {complaint}"),
++                    "error_category": "invalid_filter"}
+         missing = [
+             value for value, result in zip(wanted, counts)
+             if result.get("number") is not None and int(result["number"]) == 0
+@@ -636,8 +658,34 @@ class EngineFiltersMixin:
+         # No braces around it: an element set is assigned to the field
+         # directly, `Customer = P({...} Customer)`, the way Qlik's own
+         # examples are written. Wrapped in braces it does not parse.
+-        return {"modifier": f"{escape_qlik_field_name(field)}={joined}",
+-                "field": field, "element_set": joined}
++        name = escape_qlik_field_name(field)
++        modifier = f"{name}={joined}"
++        # Proven to select something, like every other kind of condition.
++        # "The clients who bought in a year nobody bought in" narrows the
++        # field to nothing, and an empty answer reads as "no such data"
++        # rather than as "no such client".
++        counted = self.evaluate_expressions(
++            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
++        complaint = _probe_complaint(counted[0]) if counted else ""
++        if complaint:
++            return {"error": (
++                f"Qlik cannot read the condition on {name}: {complaint}"),
++                "error_category": "invalid_filter"}
++        matched = counted[0].get("number") if counted else None
++        if matched is not None and int(matched) == 0:
++            return {"error": (
++                f"No value of {name} satisfies the condition stated for "
++                f"it."),
++                "error_category": "value_not_found",
++                "next_actions": [
++                    f"read the values with get_app_field on {name}",
++                    "check the filters inside `matching` select something",
++                ]}
++        outcome = {"modifier": modifier, "field": field,
++                   "element_set": joined}
++        if matched is not None:
++            outcome["matched"] = int(matched)
++        return outcome
+ 
+     def pattern_modifier(self, app_handle: int, field: str, kind: str,
+                          value: Any, base: str = "") -> Dict[str, Any]:
+@@ -671,6 +719,12 @@ class EngineFiltersMixin:
+         # "there is no such data" instead of "there is no such spelling".
+         counted = self.evaluate_expressions(
+             app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
++        complaint = _probe_complaint(counted[0]) if counted else ""
++        if complaint:
++            return {"error": (
++                f"Qlik cannot read the {kind} filter on "
++                f"{escape_qlik_field_name(field)}: {complaint}"),
++                "error_category": "invalid_filter"}
+         matched = counted[0].get("number") if counted else None
+         if matched is not None and int(matched) == 0:
+             return {
+@@ -858,36 +912,31 @@ class EngineFiltersMixin:
+                 # a set modifier Qlik reads a broken condition as text and
+                 # answers zero, so the condition is checked on its own,
+                 # where Qlik does say what is wrong with it.
+-                try:
+-                    verdict = self.send_request(
+-                        "CheckExpression", [condition], handle=app_handle)
+-                    complaint = str(verdict.get("qErrorMsg") or "").strip()
+-                    # Qlik answers with two things, and a name it does not
+-                    # know is the second: a misspelled field is read as a
+-                    # value of itself, so the condition scores false
+-                    # everywhere and the answer is empty rather than wrong.
+-                    unknown = [
+-                        condition[bad["qFrom"]:bad["qFrom"] + bad["qCount"]]
+-                        for bad in verdict.get("qBadFieldNames") or []
+-                    ]
+-                except Exception:
+-                    complaint, unknown = "", []
+-                if complaint:
++                # The same two questions the measures go through, asked
++                # by the same code: a variable is expanded first, because
++                # the name that reaches Qlik is the expanded one, and both
++                # halves of the verdict are read - the parse error and the
++                # names the model does not have.
++                expanded = self.expand_expressions(
++                    app_handle, [condition]).get(condition, condition)
++                fault = self.check_expressions(
++                    app_handle, [expanded]).get(expanded) or {}
++                if fault.get("error"):
+                     return {"error": (
+                         f"match_expression on "
+                         f"{escape_qlik_field_name(field)} is not an "
+-                        f"expression Qlik reads: {complaint}"),
++                        f"expression Qlik reads: {fault['error']}"),
+                         "error_category": "invalid_expression",
+                         "hint": ("It is scored for each value of the field, "
+                                  "so it reads like a measure: "
+                                  "Sum([Amount]) > 1000.")}
+-                if unknown:
++                if fault.get("bad_fields"):
+                     return {"error": (
+                         f"match_expression on "
+                         f"{escape_qlik_field_name(field)} names a field this "
+                         f"app does not have: "
+                         + ", ".join(escape_qlik_field_name(name)
+-                                    for name in unknown)),
++                                    for name in fault["bad_fields"])),
+                         "error_category": "field_not_found",
+                         "next_actions": [
+                             "call get_app_details(app_id) and read "
+@@ -900,6 +949,17 @@ class EngineFiltersMixin:
+                 counted = self.evaluate_expressions(
+                     app_handle,
+                     [f"=Count({{{identifier}<{modifier}>}} DISTINCT {name})"])
++                complaint = _probe_complaint(counted[0]) if counted else ""
++                if complaint:
++                    # A double quote inside the condition closes the search
++                    # early: measured, Qlik answers the whole modifier with
++                    # "Error in set modifier ad hoc element list". The
++                    # condition alone reads fine, so only the built
++                    # modifier shows it.
++                    return {"error": (
++                        f"Qlik cannot read match_expression on {name}: "
++                        f"{complaint}"),
++                        "error_category": "invalid_expression"}
+                 matched = counted[0].get("number") if counted else None
+                 if matched is not None and int(matched) == 0:
+                     return {"error": (
+@@ -910,8 +970,10 @@ class EngineFiltersMixin:
+                             f"read the values with get_app_field on {name}",
+                         ]}
+                 parts.append(modifier)
+-                applied.append({"field": field,
+-                                "match_expression": condition})
++                record = {"field": field, "match_expression": condition}
++                if matched is not None:
++                    record["matched"] = int(matched)
++                applied.append(record)
+                 continue
+ 
+             operator = kinds["values"][0] if kinds["values"] else "values"
+
+commit 8f94145dc2eac324dc206d1b78cb244c04909795
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 00:18:32 2026 +0300
+
+    Условие проверяется до конца, а короткая страница дочитывается до конца
+    
+    Проверка условия читала у Qlik только жалобу на разбор и пропускала
+    второе, что он отвечает, - имена, которых в модели нет. Опечатка в имени
+    поля внутри условия читается Qlik как значение самого себя: условие
+    оказывается ложным везде, и ответ приходит пустым, а не ошибочным.
+    Проверено на сервере: опечатка теперь названа именем.
+    
+    Условие доказывает, что выбирает хотя бы одно значение, - последний вид
+    условия, который выполнялся без такой проверки, хотя круг назад это было
+    сделано для текстового поиска.
+    
+    Дочитывание короткой страницы повторяется, пока страница не соберётся или
+    Engine не перестанет присылать строки. Прежде оно делало ровно одну
+    попытку и молчало о неудаче, отвечая меньшим числом строк на тот же
+    вопрос. Недостача теперь названа вместе со смещением, с которого просить
+    остаток.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index b7722ba..9e1d9c6 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -862,8 +862,16 @@ class EngineFiltersMixin:
+                     verdict = self.send_request(
+                         "CheckExpression", [condition], handle=app_handle)
+                     complaint = str(verdict.get("qErrorMsg") or "").strip()
++                    # Qlik answers with two things, and a name it does not
++                    # know is the second: a misspelled field is read as a
++                    # value of itself, so the condition scores false
++                    # everywhere and the answer is empty rather than wrong.
++                    unknown = [
++                        condition[bad["qFrom"]:bad["qFrom"] + bad["qCount"]]
++                        for bad in verdict.get("qBadFieldNames") or []
++                    ]
+                 except Exception:
+-                    complaint = ""
++                    complaint, unknown = "", []
+                 if complaint:
+                     return {"error": (
+                         f"match_expression on "
+@@ -873,8 +881,35 @@ class EngineFiltersMixin:
+                         "hint": ("It is scored for each value of the field, "
+                                  "so it reads like a measure: "
+                                  "Sum([Amount]) > 1000.")}
++                if unknown:
++                    return {"error": (
++                        f"match_expression on "
++                        f"{escape_qlik_field_name(field)} names a field this "
++                        f"app does not have: "
++                        + ", ".join(escape_qlik_field_name(name)
++                                    for name in unknown)),
++                        "error_category": "field_not_found",
++                        "next_actions": [
++                            "call get_app_details(app_id) and read "
++                            "`fields[].name`",
++                            "field names are case-sensitive; copy them "
++                            "exactly",
++                        ]}
+                 name = escape_qlik_field_name(field)
+-                parts.append(f'{name}={{"={condition}"}}')
++                modifier = f'{name}={{"={condition}"}}'
++                counted = self.evaluate_expressions(
++                    app_handle,
++                    [f"=Count({{{identifier}<{modifier}>}} DISTINCT {name})"])
++                matched = counted[0].get("number") if counted else None
++                if matched is not None and int(matched) == 0:
++                    return {"error": (
++                        f"No value of {name} satisfies "
++                        f"{condition!r}."),
++                        "error_category": "value_not_found",
++                        "next_actions": [
++                            f"read the values with get_app_field on {name}",
++                        ]}
++                parts.append(modifier)
+                 applied.append({"field": field,
+                                 "match_expression": condition})
+                 continue
+
+commit 8f164ed189c7753755e9a1c18d04062f098351bf
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Fri Aug 14 00:04:00 2026 +0300
+
+    Ключи доступны обычным вызовом, а условие проверяет Qlik
+    
+    Три ключа, обещанные прошлым кругом, нельзя было передать обычным
+    вызовом - только внутри перечня запросов. Теперь у инструмента есть и они,
+    и смещение страницы, и всё это описано в справке. Ответ отдаёт нетронутый
+    ответ Qlik под тем же именем, что и второй инструмент.
+    
+    Условие, записанное выражением, проверяет Qlik, а не счёт скобок и кавычек
+    внутри сервера: фигурная скобка внутри строки - это текст, и счёт отвергал
+    условия, которые Qlik читает без замечаний. Проверено на сервере: внутри
+    множества Qlik принимает сломанное условие и отвечает нулём, а на самом
+    условии называет ошибку словами - поэтому условие проверяется отдельно.
+    
+    Текстовый поиск доказывает, что выбирает хотя бы одно значение, наравне с
+    остальными видами условий: прежде поиск, не совпавший ни с чем, выполнялся
+    молча, и пустой ответ читался как "таких данных нет" вместо "такого
+    написания нет".
+    
+    Короткая страница дочитывается. Engine иногда отдаёт меньше строк, чем
+    попросили; второй инструмент дочитывал остаток, а этот отвечал меньшим
+    числом строк на тот же вопрос.
+    
+    Пустой ответ при включённом отбрасывании нулей назван обеими причинами
+    сразу, а не одной.
+    
+    Документ архитектуры приведён к действующему умолчанию.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index fc3364f..b7722ba 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -640,7 +640,7 @@ class EngineFiltersMixin:
+                 "field": field, "element_set": joined}
+ 
+     def pattern_modifier(self, app_handle: int, field: str, kind: str,
+-                         value: Any) -> Dict[str, Any]:
++                         value: Any, base: str = "") -> Dict[str, Any]:
+         """A modifier matching values by their text.
+ 
+         Not written as a Qlik wildcard search. There is no escape for `*`,
+@@ -664,8 +664,29 @@ class EngineFiltersMixin:
+             condition = f"Index({upper_field}, {upper_value})=1"
+         else:
+             condition = (f"Upper(Right({name}, Len({literal})))={upper_value}")
+-        return {"modifier": f'{name}={{"={condition}"}}', "field": field,
+-                kind: text}
++        modifier = f'{name}={{"={condition}"}}'
++        # Proven to select something, the way every other filter is: a
++        # search matching no value is answered by Qlik with an empty table
++        # rather than with a word about it, and an empty table reads as
++        # "there is no such data" instead of "there is no such spelling".
++        counted = self.evaluate_expressions(
++            app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
++        matched = counted[0].get("number") if counted else None
++        if matched is not None and int(matched) == 0:
++            return {
++                "error": (
++                    f"No value of {escape_qlik_field_name(field)} "
++                    f"{kind.replace('_', ' ')} {text!r}."),
++                "error_category": "value_not_found",
++                "next_actions": [
++                    f"read the values with get_app_field on "
++                    f"{escape_qlik_field_name(field)}",
++                ],
++            }
++        outcome = {"modifier": modifier, "field": field, kind: text}
++        if matched is not None:
++            outcome["matched"] = int(matched)
++        return outcome
+ 
+     def build_filters(self, app_handle: int, app_id: str,
+                       filters: List[Dict[str, Any]],
+@@ -811,7 +832,8 @@ class EngineFiltersMixin:
+             pattern = kinds["text"]
+             if pattern:
+                 outcome = self.pattern_modifier(
+-                    app_handle, field, pattern[0], entry[pattern[0]])
++                    app_handle, field, pattern[0], entry[pattern[0]],
++                    base=identifier)
+                 if outcome.get("error"):
+                     return outcome
+                 parts.append(outcome["modifier"])
+@@ -829,12 +851,28 @@ class EngineFiltersMixin:
+                         f"match_expression on "
+                         f"{escape_qlik_field_name(field)} is empty."),
+                         "error_category": "invalid_filter"}
+-                if condition.count('"') % 2 or condition.count(
+-                        "{") != condition.count("}"):
++                # Whether the condition is well formed is Qlik's verdict,
++                # not a count of characters here: a quote or a brace inside
++                # a string literal is text, and counting them refused
++                # conditions Qlik reads without complaint. Measured: inside
++                # a set modifier Qlik reads a broken condition as text and
++                # answers zero, so the condition is checked on its own,
++                # where Qlik does say what is wrong with it.
++                try:
++                    verdict = self.send_request(
++                        "CheckExpression", [condition], handle=app_handle)
++                    complaint = str(verdict.get("qErrorMsg") or "").strip()
++                except Exception:
++                    complaint = ""
++                if complaint:
+                     return {"error": (
+-                        f"match_expression {condition!r} does not close "
+-                        f"its quotes or braces."),
+-                        "error_category": "invalid_filter"}
++                        f"match_expression on "
++                        f"{escape_qlik_field_name(field)} is not an "
++                        f"expression Qlik reads: {complaint}"),
++                        "error_category": "invalid_expression",
++                        "hint": ("It is scored for each value of the field, "
++                                 "so it reads like a measure: "
++                                 "Sum([Amount]) > 1000.")}
+                 name = escape_qlik_field_name(field)
+                 parts.append(f'{name}={{"={condition}"}}')
+                 applied.append({"field": field,
+
+commit 1c5076acec024c27afb15bdea172c92b31264051
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 23:05:08 2026 +0300
+
+    Да и нет пишутся словом "да" и "нет", а размер имеет любое выражение
+    
+    Ключ, означающий да или нет, принимает только да или нет. Слово "false",
+    записанное строкой, включало ровно то, что вызывающая сторона пыталась
+    выключить: непустая строка истинна. Ноль и единица тоже отвечают отказом -
+    догадываться, что имелось в виду, сервер не должен.
+    
+    Предел размера действует на каждое выражение, а не только на
+    арифметическое: мера, написанная выражением, обходила его целиком.
+    
+    Заглушка Engine в проверках отдаёт ту страницу, которую запросили. Прежде
+    она возвращала все строки независимо от смещения, поэтому проверки
+    признака продолжения проходили и на неверной записи тоже. Теперь неверная
+    запись роняет две проверки из трёх.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index ea1e18e..fc3364f 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -191,10 +191,13 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+                               f"{str(scope['bookmark']).strip()}"}
+     key = named[0]
+     value = scope[key]
+-    if key == "ignore_selections":
+-        return {"identifier": "1"} if value else {"identifier": ""}
+-    if key == "current_selection":
+-        return {"identifier": "$"} if value else {"identifier": ""}
++    if key in ("ignore_selections", "current_selection"):
++        if not isinstance(value, bool):
++            return {"error": f"scope {key}={value!r} is not yes or no.",
++                    "error_category": "invalid_argument",
++                    "hint": "true or false, not the word for it."}
++        marker = "1" if key == "ignore_selections" else "$"
++        return {"identifier": marker} if value else {"identifier": ""}
+     if key in ("bookmark", "state"):
+         name = str(value or "").strip()
+         if not name:
+
+commit 89465911789e9bfd3e163d71222e6b3853e317ba
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 21:45:32 2026 +0300
+
+    Область наследуется частями, а вложенное выражение считается как написано
+    
+    Область, названная у величины, не доходила до части, которая добавляла
+    собственный фильтр: часть возвращалась к множеству запроса, и числитель с
+    знаменателем одной доли считались по разным множествам. Проверено: доля
+    0,4 при фильтре запроса на другой год - числитель и знаменатель по одному
+    множеству.
+    
+    Выражение внутри выражения теряло свои границы: части соединялись без
+    скобок, и "сумма двух, делённая на третье" читалась по правилам
+    приоритета как "первое плюс частное". Проверено: 0,6 там, где прежде
+    вышло бы 30,3.
+    
+    Описание множества без содержания - пустой набор ключей или все ключи со
+    значением "нет" - больше не считается названным множеством и не отменяет
+    фильтры запроса. Прежде такая запись давала правдоподобное число по всем
+    строкам.
+    
+    Значение фильтра, названное без списка, считается одним значением, а не
+    набором символов. Прежде подсчёт предела падал до разделения запросов и
+    уносил с собой исправных соседей по пакету.
+    
+    Описание множества, переданное не объектом, отвечает отказом и в тех
+    случаях, когда оно ложно по значению: ноль, пустая строка, "нет".
+    
+    Проверено на живом сервере: порядок слов "по всем строкам", множество и
+    "без повторов" внутри агрегации Qlik принимает любой и считает одинаково,
+    поэтому порядок, который сервер пишет, остаётся прежним.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index cf30c8f..ea1e18e 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -673,7 +673,10 @@ class EngineFiltersMixin:
+         which is what "revenue in 2024 for the North region" means.
+         """
+         identifier = ""
+-        if scope:
++        # `is not None`, not truthiness: 0, "" and False are not objects,
++        # and passing them silently as "no scope" hides a mistake in the
++        # request behind a number counted over the current selections.
++        if scope is not None:
+             if not isinstance(scope, dict):
+                 return {"error": f"scope must be an object, got {scope!r}.",
+                         "error_category": "invalid_argument"}
+
+commit c926afe3d6e23ab07312d76f59a979801798e3ff
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 21:27:29 2026 +0300
+
+    Проверка идёт там же, где пойдёт запрос, и ответ называет счётное множество
+    
+    Проба значения строилась без идентификатора множества, то есть считалась
+    по текущим выборкам, тогда как сам запрос считается по названному
+    множеству. Значение, которое закладка содержит, а текущие выборки
+    скрывают, читалось как "поле не содержит такого значения" - отказ запросу,
+    который дал бы ответ. Идентификатор теперь известен до разбора условий и
+    входит во все контрольные пробы: значений, границ и подбора формы записи
+    даты.
+    
+    Ключ, которого описание множества не читает, отвечает отказом с перечнем
+    читаемых. Молчание здесь означало, что запрос идёт по текущим выборкам,
+    пока вызывающая сторона считает, что он идёт по истории или по закладке.
+    
+    Пустая половина пары "состояние и закладка" проверяется так же, как
+    одиночное имя.
+    
+    Ответ называет множество, по которому считали, - у запроса, у величины и
+    у части выражения. Без этого две части, посчитанные по разным множествам,
+    в ответе выглядели одинаково, а величина, суженная только областью, - как
+    несуженная.
+    
+    Часть выражения называется своим номером, а не порядком среди тех частей,
+    что несут срез: при срезе только на второй части ответ называл её первой.
+    
+    Выражение внутри выражения передаёт срезы своих частей наверх - вместе с
+    ними возвращаются и контрольные величины периода, названного внутри.
+    
+    Ключ шага по истории выборок в описании назывался неверно.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 0fd1fff..cf30c8f 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -161,6 +161,14 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+     selections of every state at once, so naming the state says which part
+     of it to read.
+     """
++    unknown = [key for key in scope if key not in SCOPE_KEYS]
++    if unknown:
++        return {
++            "error": f"scope states {', '.join(sorted(unknown))}, which it "
++                     f"does not read.",
++            "error_category": "invalid_argument",
++            "hint": "It reads: " + ", ".join(SCOPE_KEYS) + ".",
++        }
+     named = [key for key in SCOPE_KEYS
+              if scope.get(key) is not None and scope.get(key) is not False]
+     if not named:
+@@ -174,7 +182,13 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+                      "bookmark belonging to a state."),
+         }
+     if pair:
+-        return {"identifier": f"{scope['state']}::{scope['bookmark']}"}
++        blank = [key for key in ("state", "bookmark")
++                 if not str(scope.get(key) or "").strip()]
++        if blank:
++            return {"error": f"scope names an empty {blank[0]}.",
++                    "error_category": "invalid_argument"}
++        return {"identifier": f"{str(scope['state']).strip()}::"
++                              f"{str(scope['bookmark']).strip()}"}
+     key = named[0]
+     value = scope[key]
+     if key == "ignore_selections":
+@@ -258,7 +272,8 @@ class EngineFiltersMixin:
+ 
+     def range_modifier(self, app_handle: int, app_id: str, field: str,
+                        low: Any, high: Any, low_exclusive: bool = False,
+-                       high_exclusive: bool = False) -> Dict[str, Any]:
++                       high_exclusive: bool = False,
++                       base: str = "") -> Dict[str, Any]:
+         """A set modifier selecting a range of a field that is not a date.
+ 
+         The bounds are the values themselves, and by default both ends are
+@@ -291,7 +306,7 @@ class EngineFiltersMixin:
+                     "error_category": "invalid_filter"}
+         modifier = f'{name}={{"{"".join(parts)}"}}'
+         counted = self.evaluate_expressions(
+-            app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
++            app_handle, [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+         matched = counted[0].get("number") if counted else None
+         if matched is not None and int(matched) == 0:
+             return {
+@@ -314,7 +329,8 @@ class EngineFiltersMixin:
+         }
+ 
+     def period_modifier(self, app_handle: int, app_id: str, field: str,
+-                        start: Any, end: Any) -> Dict[str, Any]:
++                        start: Any, end: Any,
++                        base: str = "") -> Dict[str, Any]:
+         """A set modifier selecting one period of a date field.
+ 
+         Returns {"modifier", "form", "from", "to", "days", "error", ...}.
+@@ -352,7 +368,7 @@ class EngineFiltersMixin:
+         serial_to = _to_serial(high) + 1
+ 
+         form = self._resolve_period_form(
+-            app_handle, app_id, field, serial_from, serial_to)
++            app_handle, app_id, field, serial_from, serial_to, base=base)
+         if form.get("error"):
+             return form
+ 
+@@ -378,7 +394,8 @@ class EngineFiltersMixin:
+         ]
+ 
+     def _resolve_period_form(self, app_handle: int, app_id: str, field: str,
+-                             serial_from: int, serial_to: int) -> Dict[str, Any]:
++                             serial_from: int, serial_to: int,
++                             base: str = "") -> Dict[str, Any]:
+         """Pick the working form by measuring, not by inspecting the field.
+ 
+         The reference is `Count(DISTINCT If(...))`, which compares numbers
+@@ -397,7 +414,8 @@ class EngineFiltersMixin:
+             if chosen:
+                 label, modifier = chosen[0]
+                 counted = self.evaluate_expressions(
+-                    app_handle, [f"=Count({{<{modifier}>}} DISTINCT {name})"])
++                    app_handle,
++                    [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+                 matched = counted[0].get("number") if counted else None
+                 if matched is not None and int(matched) > 0:
+                     return {"modifier": modifier, "form": label,
+@@ -406,10 +424,12 @@ class EngineFiltersMixin:
+                 # than answer a zero built on a remembered choice.
+ 
+         reference_expr = (
++            f"=Count({{{base}}} DISTINCT If({name}>={serial_from} and "
++            f"{name}<{serial_to}, {name}))" if base else
+             f"=Count(DISTINCT If({name}>={serial_from} and {name}<{serial_to}, "
+             f"{name}))")
+         probes = [reference_expr] + [
+-            f"=Count({{<{modifier}>}} DISTINCT {name})"
++            f"=Count({{{base}<{modifier}>}} DISTINCT {name})"
+             for _, modifier in candidates
+         ]
+         values = self.evaluate_expressions(app_handle, probes)
+@@ -453,8 +473,8 @@ class EngineFiltersMixin:
+         return {"modifier": modifier, "form": label, "matched": reference}
+ 
+     def values_modifier(self, app_handle: int, field: str,
+-                        values: List[Any], operator: str = "values"
+-                        ) -> Dict[str, Any]:
++                        values: List[Any], operator: str = "values",
++                        base: str = "") -> Dict[str, Any]:
+         """A set modifier over named values of a field.
+ 
+         `operator` says what the values do to the set: keep exactly these,
+@@ -490,7 +510,7 @@ class EngineFiltersMixin:
+             }
+         name = escape_qlik_field_name(field)
+         probes = [
+-            f"=Count({{<{name}={{{quote_value(v)}}}>}} DISTINCT {name})"
++            f"=Count({{{base}<{name}={{{quote_value(v)}}}>}} DISTINCT {name})"
+             for v in wanted
+         ]
+         counts = self.evaluate_expressions(app_handle, probes)
+@@ -652,6 +672,16 @@ class EngineFiltersMixin:
+         Every filter narrows the result further — they combine with AND,
+         which is what "revenue in 2024 for the North region" means.
+         """
++        identifier = ""
++        if scope:
++            if not isinstance(scope, dict):
++                return {"error": f"scope must be an object, got {scope!r}.",
++                        "error_category": "invalid_argument"}
++            resolved = _set_identifier(scope)
++            if resolved.get("error"):
++                return resolved
++            identifier = resolved["identifier"]
++
+         parts: List[str] = []
+         applied: List[Dict[str, Any]] = []
+         for entry in filters or []:
+@@ -860,19 +890,19 @@ class EngineFiltersMixin:
+                 # "some time in 1901".
+                 if self._is_temporal_field(app_handle, field):
+                     outcome = self.period_modifier(
+-                        app_handle, app_id, field, low, high)
++                        app_handle, app_id, field, low, high, base=identifier)
+                 else:
+                     outcome = self.range_modifier(
+                         app_handle, app_id, field,
+                         low if low is not None else None,
+                         high if high is not None else None,
+                         low_exclusive=low_exclusive,
+-                        high_exclusive=high_exclusive)
++                        high_exclusive=high_exclusive, base=identifier)
+             elif values is not None:
+                 outcome = self.values_modifier(
+                     app_handle, field,
+                     values if isinstance(values, list) else [values],
+-                    operator=operator)
++                    operator=operator, base=identifier)
+             else:
+                 return {
+                     "error": (
+@@ -886,16 +916,6 @@ class EngineFiltersMixin:
+             parts.append(outcome["modifier"])
+             applied.append({k: v for k, v in outcome.items() if k != "modifier"})
+ 
+-        identifier = ""
+-        if scope:
+-            if not isinstance(scope, dict):
+-                return {"error": f"scope must be an object, got {scope!r}.",
+-                        "error_category": "invalid_argument"}
+-            resolved = _set_identifier(scope)
+-            if resolved.get("error"):
+-                return resolved
+-            identifier = resolved["identifier"]
+-
+         if not parts:
+             # An identifier with nothing to modify is still a set: "all the
+             # records" or "what this bookmark holds".
+
+commit 5b25347418480236dfef9fac050d27bc1672f3a4
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 20:50:22 2026 +0300
+
+    Правки по четвёртому кругу ревью
+    
+    Ключ, содержащий null, не заявляет условия - правило, уже принятое для
+    видов фильтра, распространено на границы диапазона и на область
+    множества. Прежде вызывающая сторона, заполнившая шаблон пустыми
+    значениями, получала отказ "названо два условия сразу" там, где названо
+    одно.
+    
+    Поле, из которого элементное множество берёт значения, проверяется так же,
+    как поле, которое оно ограничивает: неизвестное имя Qlik оценил бы как
+    выражение и молча ничего не выбрал.
+    
+    Исключение значения, которого в поле нет, больше не отказ: оно ничего не
+    меняет и ошибкой не является. Проверка существования осталась там, где
+    значение определяет результат.
+    
+    Доля от итога работает и для вложенного расчёта, и для части
+    арифметического выражения - раньше указание молча пропадало.
+    
+    Группировка вложенного расчёта и перечень полей для доли, заданные не
+    именем, отвечают отказом вместо внутренней ошибки.
+    
+    Область множества, названная у метрики без собственных фильтров,
+    применяется: "всё, не считая выборок" - самостоятельное утверждение.
+    
+    Контрольные величины периода строятся и для фильтров внутри частей
+    арифметического выражения.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index e42001e..0fd1fff 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -161,7 +161,8 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
+     selections of every state at once, so naming the state says which part
+     of it to read.
+     """
+-    named = [key for key in SCOPE_KEYS if key in scope]
++    named = [key for key in SCOPE_KEYS
++             if scope.get(key) is not None and scope.get(key) is not False]
+     if not named:
+         return {"identifier": ""}
+     pair = set(named) == {"state", "bookmark"}
+@@ -497,7 +498,10 @@ class EngineFiltersMixin:
+             value for value, result in zip(wanted, counts)
+             if result.get("number") is not None and int(result["number"]) == 0
+         ]
+-        if missing:
++        # Only for the operators that keep what they name. Excluding a value
++        # the field does not hold changes nothing and is not a mistake; the
++        # same goes for adding to a selection.
++        if missing and operator in ("values", "intersect"):
+             return {
+                 "error": (
+                     f"Field {escape_qlik_field_name(field)} holds none of "
+@@ -575,14 +579,30 @@ class EngineFiltersMixin:
+                 scope={"ignore_selections": True} if base == "all" else None)
+             if inner.get("error"):
+                 return inner
+-            of_field = wanted.get("of_field") or field
+-            if "[" in str(of_field) or "]" in str(of_field):
++            of_field = bare_field_name(str(wanted.get("of_field") or field))
++            if "[" in of_field or "]" in of_field:
+                 return {"error": (
+-                    f"of_field {of_field!r} carries a bracket."),
++                    f"of_field [{of_field}] carries a bracket."),
+                     "error_category": "invalid_filter"}
++            # Checked like the field it will restrict: an unknown name here
++            # would be scored as an expression and quietly select nothing.
++            if of_field != field:
++                try:
++                    described = self.send_request(
++                        "GetFieldDescription", [of_field], handle=app_handle)
++                    known = bool((described.get("qReturn") or {}).get("qName"))
++                except QlikEngineError:
++                    known = False
++                except Exception:
++                    known = True
++                if not known:
++                    return {"error": (
++                        f"of_field names a field this app does not have: "
++                        f"{escape_qlik_field_name(of_field)}"),
++                        "error_category": "field_not_found"}
+             pieces.append(
+                 f"{function}({inner['modifier']} "
+-                f"{escape_qlik_field_name(str(of_field))})")
++                f"{escape_qlik_field_name(of_field)})")
+ 
+         if not pieces:
+             return {"error": "no element set stated",
+@@ -802,7 +822,8 @@ class EngineFiltersMixin:
+                 # name; `from` and `to` include it. "More than 400" and
+                 # "from 400" are different questions, and the rows sitting
+                 # exactly on the bound are the difference.
+-                if "from" in entry and "greater_than" in entry:
++                if (entry.get("from") is not None
++                        and entry.get("greater_than") is not None):
+                     return {
+                         "error": (
+                             f"Filter on {escape_qlik_field_name(field)} states "
+@@ -812,7 +833,8 @@ class EngineFiltersMixin:
+                         "hint": ("`from` includes the bound, `greater_than` "
+                                  "excludes it. State one."),
+                     }
+-                if "to" in entry and "less_than" in entry:
++                if (entry.get("to") is not None
++                        and entry.get("less_than") is not None):
+                     return {
+                         "error": (
+                             f"Filter on {escape_qlik_field_name(field)} states "
+@@ -822,11 +844,16 @@ class EngineFiltersMixin:
+                         "hint": ("`to` includes the bound, `less_than` "
+                                  "excludes it. State one."),
+                     }
+-                low = entry.get("from", entry.get("greater_than", period))
+-                high = entry.get("to", entry.get("less_than", period))
+-                low_exclusive = ("greater_than" in entry
+-                                 and "from" not in entry)
+-                high_exclusive = ("less_than" in entry and "to" not in entry)
++                # The first of these that holds something. A key set to
++                # null states nothing, here as everywhere else.
++                low = next((entry[k] for k in ("from", "greater_than")
++                            if entry.get(k) is not None), period)
++                high = next((entry[k] for k in ("to", "less_than")
++                             if entry.get(k) is not None), period)
++                low_exclusive = (entry.get("greater_than") is not None
++                                 and entry.get("from") is None)
++                high_exclusive = (entry.get("less_than") is not None
++                                  and entry.get("to") is None)
+                 # The same two keys mean days on a date field and values on
+                 # any other. Asking Qlik which this is costs one cheap call
+                 # and is the difference between "more than 400 off" and
+
+commit d0e816ecdb2cb0c5c4735cbfc28684e4d0c41382
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 20:31:53 2026 +0300
+
+    Правки по ревью набора множеств
+    
+    Один фильтр называет одно условие. Раньше при нескольких видах сразу
+    брался первый по порядку разбора, а остальные исчезали без следа: фильтр
+    с текстом и списком значений применял только текст и отвечал
+    правдоподобным числом. Теперь отказ с перечнем того, что названо.
+    
+    Ключ без значения не является условием: contains со значением null искал
+    текст "None".
+    
+    Числовая граница вне календаря отклоняется как неподходящая граница, а не
+    падает переполнением: дата, записанная числом 20240101, соответствует
+    пятьдесят седьмому тысячелетию.
+    
+    Предел вызовов считает каждое значение, где бы оно ни было названо -
+    внутри фильтра метрики, внутри элементного множества, - и сам фильтр,
+    который стоит одного обращения к Engine за поле. Прежний счёт видел
+    только значения верхнего уровня, и триста значений внутри метрики
+    проходили мимо потолка в двести.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index 7df6f38..e42001e 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -68,7 +68,13 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
+     if isinstance(value, bool):
+         return None
+     if isinstance(value, (int, float)):
+-        return _EPOCH + datetime.timedelta(days=int(value))
++        # A date written as 20240101 lands somewhere around the year 57000,
++        # which is past what a date can hold. That is a bound this server
++        # cannot read, and it belongs with the rest of them.
++        try:
++            return _EPOCH + datetime.timedelta(days=int(value))
++        except (OverflowError, ValueError, OSError):
++            return None
+     text = str(value or "").strip()
+     if not text:
+         return None
+@@ -692,13 +698,49 @@ class EngineFiltersMixin:
+                         "field names are case-sensitive; copy them exactly",
+                     ],
+                 }
+-            has_period = any(k in entry for k in
+-                             ("from", "to", "period", "greater_than",
+-                              "less_than"))
+             # Which of the set operators this filter uses, if any. More
+             # than one at a time is a contradiction, not a combination.
+-            # Values of this field that satisfy a condition on another —
+-            # what P() and E() answer, and nothing else does.
++            # One filter, one kind of condition. Stating several is a
++            # contradiction rather than a combination, and answering the
++            # first one silently drops the rest — with a plausible number
++            # to show for it.
++            kinds = {
++                "an element set": [k for k in ("matching", "not_matching")
++                                   if entry.get(k) is not None],
++                "text": [k for k in ("contains", "starts_with", "ends_with")
++                         if entry.get(k) is not None],
++                "an expression": (["match_expression"]
++                                  if entry.get("match_expression") is not None
++                                  else []),
++                "values": [k for k in SET_OPERATORS if entry.get(k) is not None],
++                "a range": [k for k in ("from", "to", "period", "greater_than",
++                                        "less_than")
++                            if entry.get(k) is not None],
++            }
++            stated = [name for name, keys in kinds.items() if keys]
++            if len(stated) > 1:
++                named = sorted(key for keys in kinds.values() for key in keys)
++                return {
++                    "error": (
++                        f"Filter on {escape_qlik_field_name(field)} states "
++                        f"{' and '.join(stated)} at once: "
++                        + ", ".join(named)
++                    ),
++                    "error_category": "invalid_filter",
++                    "hint": ("One condition per filter. Use several filters "
++                             "on the same field to combine them."),
++                }
++            if len(kinds["text"]) > 1 or len(kinds["values"]) > 1:
++                named = sorted(kinds["text"] + kinds["values"])
++                return {
++                    "error": (
++                        f"Filter on {escape_qlik_field_name(field)} states "
++                        + " and ".join(named) + " at once."
++                    ),
++                    "error_category": "invalid_filter",
++                }
++
++            has_period = bool(kinds["a range"])
+             if entry.get("matching") is not None or entry.get(
+                     "not_matching") is not None:
+                 outcome = self._element_set(app_handle, app_id, field, entry)
+@@ -710,16 +752,7 @@ class EngineFiltersMixin:
+                 continue
+ 
+             # Matching by text rather than by exact value.
+-            pattern = [key for key in ("contains", "starts_with", "ends_with")
+-                       if key in entry]
+-            if len(pattern) > 1:
+-                return {
+-                    "error": (
+-                        f"Filter on {escape_qlik_field_name(field)} states "
+-                        f"{' and '.join(pattern)} at once."
+-                    ),
+-                    "error_category": "invalid_filter",
+-                }
++            pattern = kinds["text"]
+             if pattern:
+                 outcome = self.pattern_modifier(
+                     app_handle, field, pattern[0], entry[pattern[0]])
+@@ -752,18 +785,7 @@ class EngineFiltersMixin:
+                                 "match_expression": condition})
+                 continue
+ 
+-            named = [key for key in SET_OPERATORS if key in entry]
+-            if len(named) > 1:
+-                return {
+-                    "error": (
+-                        f"Filter on {escape_qlik_field_name(field)} states "
+-                        f"{' and '.join(named)} at once."
+-                    ),
+-                    "error_category": "invalid_filter",
+-                    "hint": ("One operator per filter. Use two filters on "
+-                             "the same field to combine them."),
+-                }
+-            operator = named[0] if named else "values"
++            operator = kinds["values"][0] if kinds["values"] else "values"
+             values = entry.get(operator)
+             if has_period and values is not None:
+                 return {
+
+commit 03e728d1873bb6fe9fbadd9087c52ef4583cdd05
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 20:18:05 2026 +0300
+
+    Анализ множеств Qlik целиком, без единой строчки его синтаксиса
+    
+    Изучены разделы документации Qlik про set analysis, каждая конструкция
+    проверена на живом сервере с числами, которые считаются в уме.
+    
+    Идентификатор множества: игнорировать выборки, закладка, состояние,
+    закладка состояния, шаги по истории выборок. Проверено: сумма по всем
+    данным 100, она же с фильтром года 40.
+    
+    Элементные множества. Значения поля, отвечающие условию на другом поле, -
+    то, ради чего в Qlik есть P и E, и чего не выразить списком значений.
+    Покупали в 2023 - их продажи за все годы 60; не покупали - 40; покупали в
+    2023 и не покупали в 2024 - 30. Два условия вместе вычитают одно
+    возможное множество из другого, а не возможное из исключённого: второе
+    совпадает с первым лишь на некоторых данных.
+    
+    Совпадение по тексту: содержит, начинается, заканчивается. Записано
+    сравнением строк, а не поиском Qlik по образцу: экранирования для
+    звёздочки и вопросительного знака внутри поиска не существует, и значение
+    с ними стало бы другим поиском.
+    
+    Условие выражением - выход для того, чего словарь не выражает. Сервер
+    оборачивает его и отдаёт на суд Qlik, но не читает.
+    
+    Доля от итога. TOTAL заставляет меру не замечать группировку целиком или
+    всю, кроме названных полей. Проверено: при итоге 100 доли вышли 0.6 и
+    0.4, а внутри региона каждая строка получила итог своего региона.
+    
+    Арифметика над агрегатами задаётся операцией и частями, а не текстом
+    формулы: у каждой части свои фильтры и своя вложенность, деление на ноль
+    отвечает отсутствием значения вместо прочерка Qlik.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index b32734c..7df6f38 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -129,6 +129,68 @@ def quote_value(value: Any) -> str:
+     return "'" + str(value).replace("'", "''") + "'"
+ 
+ 
++# What a filter does to the set of values, and the Qlik operator for it.
++# Measured on four rows worth 110 in total: `=` on one value gave 20,
++# `-=` on one value gave 60, and two conditions together gave 30.
++SET_OPERATORS = {
++    "values": "=",       # exactly these
++    "exclude": "-=",     # everything except these
++    "add": "+=",         # these as well as what is selected
++    "intersect": "*=",   # only those of these that are selected
++}
++
++
++# Which set the filters narrow. Without one, Qlik reads the modifier
++# against the current selection, which is what a question about "the data"
++# normally means.
++SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
++              "selection_back", "selection_forward")
++
++
++def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
++    """The identifier that goes before the modifier, from a description.
++
++    Returns {"identifier": str} or an error. One key at a time, except a
++    bookmark belonging to a state, which needs both — a bookmark holds the
++    selections of every state at once, so naming the state says which part
++    of it to read.
++    """
++    named = [key for key in SCOPE_KEYS if key in scope]
++    if not named:
++        return {"identifier": ""}
++    pair = set(named) == {"state", "bookmark"}
++    if len(named) > 1 and not pair:
++        return {
++            "error": f"scope states {' and '.join(named)} at once.",
++            "error_category": "invalid_argument",
++            "hint": ("One of them, or `state` together with `bookmark` for a "
++                     "bookmark belonging to a state."),
++        }
++    if pair:
++        return {"identifier": f"{scope['state']}::{scope['bookmark']}"}
++    key = named[0]
++    value = scope[key]
++    if key == "ignore_selections":
++        return {"identifier": "1"} if value else {"identifier": ""}
++    if key == "current_selection":
++        return {"identifier": "$"} if value else {"identifier": ""}
++    if key in ("bookmark", "state"):
++        name = str(value or "").strip()
++        if not name:
++            return {"error": f"scope names an empty {key}.",
++                    "error_category": "invalid_argument"}
++        return {"identifier": name}
++    # Steps through the selection history: `$1` back, `$_1` forward. Two
++    # keys rather than one signed number, because Qlik spells them with
++    # different characters rather than different signs.
++    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
++        return {"error": f"scope {key}={value!r} is not a number of steps.",
++                "error_category": "invalid_argument",
++                "hint": "1 is one step, 2 is two, and so on."}
++    return {"identifier": f"${value}" if key == "selection_back"
++            else f"$_{value}"}
++
++
+ class EngineFiltersMixin:
+     """Build set modifiers from plain descriptions, and prove they filter."""
+ 
+@@ -384,14 +446,18 @@ class EngineFiltersMixin:
+         return {"modifier": modifier, "form": label, "matched": reference}
+ 
+     def values_modifier(self, app_handle: int, field: str,
+-                        values: List[Any]) -> Dict[str, Any]:
+-        """A set modifier selecting named values of a field.
++                        values: List[Any], operator: str = "values"
++                        ) -> Dict[str, Any]:
++        """A set modifier over named values of a field.
++
++        `operator` says what the values do to the set: keep exactly these,
++        drop these, add these, or intersect with these.
+ 
+         Each value is checked against the field before the query runs. Qlik
+         answers a filter on a value that does not exist with zeros, so
+         `Moscow` against a field holding `Moskva` produces a clean, wrong
+         table; here it produces a refusal naming the values that are
+-        missing and what the field holds instead.
++        missing.
+         """
+         wanted = list(values or [])
+         if not wanted:
+@@ -441,11 +507,120 @@ class EngineFiltersMixin:
+                 ],
+             }
+         listed = ",".join(quote_value(v) for v in wanted)
+-        return {"modifier": f"{name}={{{listed}}}", "field": field,
+-                "values": wanted}
++        sign = SET_OPERATORS[operator]
++        outcome = {"modifier": f"{name}{sign}{{{listed}}}", "field": field,
++                   "values": wanted}
++        if operator != "values":
++            outcome["operator"] = operator
++        return outcome
++
++    def _element_set(self, app_handle: int, app_id: str, field: str,
++                     entry: Dict[str, Any]) -> Dict[str, Any]:
++        """Values of a field that satisfy a condition on another field.
++
++        This is what P() and E() are for, and nothing else expresses it: a
++        set modifier takes literal values, and "the customers who bought in
++        2023" is not a literal — it is the answer to another question.
++
++        `matching` keeps the values a condition makes possible, `not_matching`
++        drops the ones it makes possible. Both together read as "these and
++        not those", which is one condition on one field rather than two
++        filters that would have to be combined by guesswork.
++
++        `of_field` carries the answer from one field to another: the
++        suppliers of a product, applied to customers. `base` says whether
++        the condition is asked of the whole model or of what is selected;
++        the whole model by default, since a question asked through this
++        server has no user sitting in front of a selection.
++        """
++        # With both stated, the second is subtracted from the first as
++        # another P: "possible under a, minus possible under b". Written as
++        # P(a) - E(b) it would read "possible under a, minus excluded under
++        # b", which is a different set and only coincides on some data.
++        both = (entry.get("matching") is not None
++                and entry.get("not_matching") is not None)
++        pieces = []
++        for key, function in (("matching", "P"),
++                              ("not_matching", "P" if both else "E")):
++            wanted = entry.get(key)
++            if wanted is None:
++                continue
++            if not isinstance(wanted, dict):
++                return {"error": (
++                    f"{key} on {escape_qlik_field_name(field)} must be an "
++                    f"object holding `filters`."),
++                    "error_category": "invalid_filter"}
++            inner_filters = wanted.get("filters")
++            if not isinstance(inner_filters, list) or not inner_filters:
++                return {"error": (
++                    f"{key} on {escape_qlik_field_name(field)} states no "
++                    f"filters."),
++                    "error_category": "invalid_filter",
++                    "hint": ('{"matching": {"filters": [{"field": "Year", '
++                             '"values": [2023]}]}}')}
++            base = str(wanted.get("base") or "all").strip().lower()
++            if base not in ("all", "current"):
++                return {"error": (
++                    f"base={wanted.get('base')!r} is neither 'all' nor "
++                    f"'current'."),
++                    "error_category": "invalid_filter"}
++            inner = self.build_filters(
++                app_handle, app_id, inner_filters,
++                scope={"ignore_selections": True} if base == "all" else None)
++            if inner.get("error"):
++                return inner
++            of_field = wanted.get("of_field") or field
++            if "[" in str(of_field) or "]" in str(of_field):
++                return {"error": (
++                    f"of_field {of_field!r} carries a bracket."),
++                    "error_category": "invalid_filter"}
++            pieces.append(
++                f"{function}({inner['modifier']} "
++                f"{escape_qlik_field_name(str(of_field))})")
++
++        if not pieces:
++            return {"error": "no element set stated",
++                    "error_category": "invalid_filter"}
++        # P(a) - P(b) rather than P(a) * E(b): the two are equivalent, and
++        # the difference is the one Qlik's own examples are written with.
++        joined = " - ".join(pieces) if len(pieces) > 1 else pieces[0]
++        # No braces around it: an element set is assigned to the field
++        # directly, `Customer = P({...} Customer)`, the way Qlik's own
++        # examples are written. Wrapped in braces it does not parse.
++        return {"modifier": f"{escape_qlik_field_name(field)}={joined}",
++                "field": field, "element_set": joined}
++
++    def pattern_modifier(self, app_handle: int, field: str, kind: str,
++                         value: Any) -> Dict[str, Any]:
++        """A modifier matching values by their text.
++
++        Not written as a Qlik wildcard search. There is no escape for `*`,
++        `?` or a quote inside one, so a value that happens to contain them
++        would silently become a different search. Written instead as a
++        comparison of strings, where the value is a quoted literal and the
++        same doubling that protects an exact value protects this one.
++        """
++        text = str(value)
++        if not text:
++            return {"error": (
++                f"{kind} on {escape_qlik_field_name(field)} states no text."),
++                "error_category": "invalid_filter"}
++        name = escape_qlik_field_name(field)
++        literal = quote_value(text)
++        upper_field = f"Upper({name})"
++        upper_value = f"Upper({literal})"
++        if kind == "contains":
++            condition = f"Index({upper_field}, {upper_value})>0"
++        elif kind == "starts_with":
++            condition = f"Index({upper_field}, {upper_value})=1"
++        else:
++            condition = (f"Upper(Right({name}, Len({literal})))={upper_value}")
++        return {"modifier": f'{name}={{"={condition}"}}', "field": field,
++                kind: text}
+ 
+     def build_filters(self, app_handle: int, app_id: str,
+-                      filters: List[Dict[str, Any]]) -> Dict[str, Any]:
++                      filters: List[Dict[str, Any]],
++                      scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+         """Turn a list of filter descriptions into one set modifier.
+ 
+         Every filter narrows the result further — they combine with AND,
+@@ -520,8 +695,77 @@ class EngineFiltersMixin:
+             has_period = any(k in entry for k in
+                              ("from", "to", "period", "greater_than",
+                               "less_than"))
+-            values = entry.get("values")
+-            if has_period and values:
++            # Which of the set operators this filter uses, if any. More
++            # than one at a time is a contradiction, not a combination.
++            # Values of this field that satisfy a condition on another —
++            # what P() and E() answer, and nothing else does.
++            if entry.get("matching") is not None or entry.get(
++                    "not_matching") is not None:
++                outcome = self._element_set(app_handle, app_id, field, entry)
++                if outcome.get("error"):
++                    return outcome
++                parts.append(outcome["modifier"])
++                applied.append({k: v for k, v in outcome.items()
++                                if k != "modifier"})
++                continue
++
++            # Matching by text rather than by exact value.
++            pattern = [key for key in ("contains", "starts_with", "ends_with")
++                       if key in entry]
++            if len(pattern) > 1:
++                return {
++                    "error": (
++                        f"Filter on {escape_qlik_field_name(field)} states "
++                        f"{' and '.join(pattern)} at once."
++                    ),
++                    "error_category": "invalid_filter",
++                }
++            if pattern:
++                outcome = self.pattern_modifier(
++                    app_handle, field, pattern[0], entry[pattern[0]])
++                if outcome.get("error"):
++                    return outcome
++                parts.append(outcome["modifier"])
++                applied.append({k: v for k, v in outcome.items()
++                                if k != "modifier"})
++                continue
++
++            # A condition the vocabulary cannot state, written by the
++            # caller. The server wraps it and asks Qlik whether it holds;
++            # it does not read it.
++            if entry.get("match_expression") is not None:
++                condition = str(entry["match_expression"]).strip()
++                if not condition:
++                    return {"error": (
++                        f"match_expression on "
++                        f"{escape_qlik_field_name(field)} is empty."),
++                        "error_category": "invalid_filter"}
++                if condition.count('"') % 2 or condition.count(
++                        "{") != condition.count("}"):
++                    return {"error": (
++                        f"match_expression {condition!r} does not close "
++                        f"its quotes or braces."),
++                        "error_category": "invalid_filter"}
++                name = escape_qlik_field_name(field)
++                parts.append(f'{name}={{"={condition}"}}')
++                applied.append({"field": field,
++                                "match_expression": condition})
++                continue
++
++            named = [key for key in SET_OPERATORS if key in entry]
++            if len(named) > 1:
++                return {
++                    "error": (
++                        f"Filter on {escape_qlik_field_name(field)} states "
++                        f"{' and '.join(named)} at once."
++                    ),
++                    "error_category": "invalid_filter",
++                    "hint": ("One operator per filter. Use two filters on "
++                             "the same field to combine them."),
++                }
++            operator = named[0] if named else "values"
++            values = entry.get(operator)
++            if has_period and values is not None:
+                 return {
+                     "error": (
+                         f"Filter on {field!r} asks for a period and a value "
+@@ -578,7 +822,8 @@ class EngineFiltersMixin:
+             elif values is not None:
+                 outcome = self.values_modifier(
+                     app_handle, field,
+-                    values if isinstance(values, list) else [values])
++                    values if isinstance(values, list) else [values],
++                    operator=operator)
+             else:
+                 return {
+                     "error": (
+@@ -592,6 +837,25 @@ class EngineFiltersMixin:
+             parts.append(outcome["modifier"])
+             applied.append({k: v for k, v in outcome.items() if k != "modifier"})
+ 
++        identifier = ""
++        if scope:
++            if not isinstance(scope, dict):
++                return {"error": f"scope must be an object, got {scope!r}.",
++                        "error_category": "invalid_argument"}
++            resolved = _set_identifier(scope)
++            if resolved.get("error"):
++                return resolved
++            identifier = resolved["identifier"]
++
+         if not parts:
++            # An identifier with nothing to modify is still a set: "all the
++            # records" or "what this bookmark holds".
++            if identifier:
++                return {"modifier": "{" + identifier + "}", "applied": [],
++                        "scope": identifier}
+             return {"modifier": "", "applied": []}
+-        return {"modifier": "{<" + ",".join(parts) + ">}", "applied": applied}
++        modifier = "{" + identifier + "<" + ",".join(parts) + ">}"
++        outcome = {"modifier": modifier, "applied": applied}
++        if identifier:
++            outcome["scope"] = identifier
++        return outcome
+
+commit ac4d8217a264f65859aac58ad372e41b0b20f490
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 19:58:05 2026 +0300
+
+    Ответ Engine отличается от несостоявшегося вопроса, контроль следует за фильтром
+    
+    Проверка существования поля фильтра была мертва. Engine на неизвестное
+    поле отвечает ошибкой вызова, транспорт превращал её в общее исключение,
+    а прошлая правка ловила любое исключение и считала поле существующим -
+    то есть отказ не срабатывал ни разу. Ошибка вызова теперь имеет
+    собственный тип: она означает ответ, а не потерю связи.
+    
+    Контрольные величины периода строились только по фильтрам запроса и не
+    видели фильтр, названный внутри метрики - при том что именно такой
+    фильтр появился в этой версии. Теперь проверяется каждый заявленный
+    период, по модификатору той меры, к которой он относится, и один и тот
+    же период не проверяется дважды.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index e4bafe9..b32734c 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -27,6 +27,7 @@ import re
+ import time
+ from typing import Any, Dict, List, Optional, Tuple
+ 
++from ..exceptions import QlikEngineError
+ from ..utils import bare_field_name, escape_qlik_field_name
+ 
+ logger = logging.getLogger(__name__)
+@@ -493,10 +494,15 @@ class EngineFiltersMixin:
+                 described = self.send_request(
+                     "GetFieldDescription", [field], handle=app_handle)
+                 exists = bool((described.get("qReturn") or {}).get("qName"))
++            except QlikEngineError:
++                # Engine considered the call and refused it: for a field it
++                # does not have, it answers "Invalid parameters". That is
++                # an answer.
++                exists = False
+             except Exception as exc:
+-                # Could not ask. The filter goes through unchecked rather
+-                # than being refused on the strength of a failed question;
+-                # a wrong name still fails later, and loudly.
++                # The question never got through. The filter goes on
++                # unchecked rather than being refused on the strength of a
++                # failed question; a wrong name still fails later, loudly.
+                 logger.debug("Could not describe %r: %s", field, exc)
+                 exists = True
+             if not exists:
+
+commit 0e7b556ef257b83744a07d77764a2944a2b1a914
+Author: Stanislav Chernov <bintocher@yandex.ru>
+Date:   Thu Aug 13 19:44:01 2026 +0300
+
+    Правки по ревью: фильтр меры не протекает в соседнюю
+    
+    Оба ревьюера нашли одно: разрешённый модификатор записывался обратно в
+    общую переменную, поэтому первая мера со своим фильтром становилась
+    основанием для следующей. Мера, не назвавшая фильтр, получала фильтр
+    соседа вместо фильтра запроса - молча и с правдоподобным числом. Проверено
+    на живых данных: было бы 1 и 1, стало 1 и 3.
+    
+    Доля для квантиля проверяется на диапазон: замер показал, что Qlik
+    отвечает на долю вне нуля и единицы прочерком, а не ошибкой, и прочерк
+    читается как значение.
+    
+    Пустое описание поля означало и отсутствие поля, и несостоявшийся вопрос:
+    оборванный кадр объявлял бы существующее поле несуществующим. Теперь
+    вопрос задаётся напрямую, и сбой связи не выдаётся за отсутствие поля.
+    
+    Мера, явно сказавшая "без фильтра", больше не отклоняется из-за маркера в
+    выражении - маркеру нечего держать, и он убирается.
+    
+    engine_query принимает measures и в одиночном запросе, а не только внутри
+    пакета.
+
+diff --git a/qlik_sense_mcp_server/engine/filters.py b/qlik_sense_mcp_server/engine/filters.py
+index d97925a..e4bafe9 100644
+--- a/qlik_sense_mcp_server/engine/filters.py
++++ b/qlik_sense_mcp_server/engine/filters.py
+@@ -485,7 +485,21 @@ class EngineFiltersMixin:
+             # a date", and sends perfectly good dates into a numeric parse
+             # that then blames the bounds: "2026-08-01 is neither a date
+             # nor a number" for a filter whose only fault is the name.
+-            if not self.get_field_description(app_handle, field):
++            # An empty description means Engine does not know the field —
++            # but `get_field_description` also answers empty when the call
++            # itself failed, and a dropped frame must not be reported as a
++            # missing field. Asked directly here so the two are told apart.
++            try:
++                described = self.send_request(
++                    "GetFieldDescription", [field], handle=app_handle)
++                exists = bool((described.get("qReturn") or {}).get("qName"))
++            except Exception as exc:
++                # Could not ask. The filter goes through unchecked rather
++                # than being refused on the strength of a failed question;
++                # a wrong name still fails later, and loudly.
++                logger.debug("Could not describe %r: %s", field, exc)
++                exists = True
++            if not exists:
+                 return {
+                     "error": (
+                         f"Filter names a field this app does not have: "

@@ -523,10 +523,15 @@ class EngineFiltersMixin:
                 f"{escape_qlik_field_name(field)}: {complaint}"),
                 "error_category": "invalid_period"}
         if not values or values[0].get("number") is None:
-            # The probe itself did not run. Use the form that holds
-            # everywhere rather than refusing a query over a failed check.
-            label, modifier = candidates[-1]
-            return {"modifier": modifier, "form": label, "matched": None}
+            # Qlik answered, but not with a count. Every candidate form is
+            # measured against this number, so without it there is nothing
+            # to choose on.
+            return {"error": (
+                f"The period on {escape_qlik_field_name(field)} could not "
+                f"be measured: Qlik returned no count for it."),
+                "error_category": "invalid_period",
+                "hint": ("Ask again; a filter form chosen without this "
+                         "number would go out unproven.")}
 
         reference = int(values[0]["number"])
         if reference == 0:
@@ -632,6 +637,8 @@ class EngineFiltersMixin:
                     f"Qlik cannot read the filter on "
                     f"{escape_qlik_field_name(field)}: {complaint}"),
                     "error_category": "invalid_filter"}
+        unproven = [value for value, result in zip(wanted, counts)
+                    if result.get("number") is None]
         missing = [
             value for value, result in zip(wanted, counts)
             if result.get("number") is not None and int(result["number"]) == 0
@@ -660,6 +667,16 @@ class EngineFiltersMixin:
                    "values": wanted}
         if operator != "values":
             outcome["operator"] = operator
+        if unproven:
+            # The filter still goes out - a dropped frame is not the
+            # caller's mistake - but calling it checked would be a
+            # statement about data nobody looked at.
+            outcome["unverified_values"] = unproven
+            outcome["note"] = (
+                f"Whether {escape_qlik_field_name(field)} holds "
+                + ", ".join(repr(v) for v in unproven)
+                + " could not be checked: Qlik did not answer the probe."
+            )
         return outcome
 
     def _element_set(self, app_handle: int, app_id: str, field: str,
@@ -855,12 +872,12 @@ class EngineFiltersMixin:
         # A key stated beside the combination is still a key: accepting
         # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
         # bookmark silently and answered over a different set.
-        beside = [key for key in scope
-                  if key not in ("combine", "of")
-                  and scope.get(key) is not None]
+        beside = [key for key in scope if key not in ("combine", "of")]
         if beside:
+            named = ("a combination" if scope.get("combine") is not None
+                     else "a list of sets")
             return {
-                "error": ("scope states a combination and "
+                "error": (f"scope states {named} and "
                           + ", ".join(sorted(beside)) + " at once."),
                 "error_category": "invalid_argument",
                 "hint": ("Put the key inside the entry of `of` it belongs "

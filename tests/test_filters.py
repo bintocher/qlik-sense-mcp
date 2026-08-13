@@ -1417,3 +1417,34 @@ class TestNoReferenceNoForm:
         result = engine.build_filters(1, "app", [{"field": "F",
                                                   "period": "2011"}])
         assert result["error_category"] == "invalid_period"
+
+
+class TestAReferenceThatIsNotANumber:
+    def test_a_period_without_a_count_is_refused(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": "something", "number": None, "is_numeric": False,
+             "error": None} for _ in exprs]
+        result = engine.build_filters(1, "app", [{"field": "F",
+                                                  "period": "2011"}])
+        assert result["error_category"] == "invalid_period"
+
+
+class TestAKeyWrittenDownBesideACombination:
+    @pytest.mark.parametrize("extra", [{"bookmark": None},
+                                       {"selection_back": None}])
+    def test_even_a_null_is_read(self, extra):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        scope = dict({"combine": "union", "of": [
+            {"ignore_selections": True}, {"current_selection": True}]}, **extra)
+        result = engine.build_filters(1, "app", [], scope=scope)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_a_list_of_sets_without_an_operation_is_named_as_such(self):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        result = engine.build_filters(1, "app", [], scope={
+            "of": [{"ignore_selections": True}], "bookmark": "BM"})
+        assert "a list of sets" in result["error"]

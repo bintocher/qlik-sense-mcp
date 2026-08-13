@@ -1627,3 +1627,50 @@ class TestOfMeansTwoDifferentThings:
             scope = {"combine": "union", "of": [dict(scope), dict(scope)]}
         result = _Engine().run_queries(1, "app", [dict(_query(), scope=scope)])
         assert result["error_category"] == "limit_exceeded"
+
+
+class TestACheckThatNeverRanIsNotACheck:
+    """The filter still goes out - a dropped frame is not the caller's
+    mistake - but calling it checked would be a statement about data nobody
+    looked at."""
+
+    def test_the_reply_says_the_values_were_not_checked(self):
+        class _Silent(_Engine):
+            def _reply(self, request):
+                if request["method"] == "EvaluateEx":
+                    return {"qValue": {"qText": None, "qNumber": "NaN"}}
+                return super()._reply(request)
+
+        result = _Silent().run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North"]}])])
+        reply = result["results"][0]
+        assert any("could not be checked" in w for w in reply["warnings"])
+
+    def test_a_checked_filter_says_nothing_of_the_kind(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North"]}])])
+        assert not any("could not be checked" in w
+                       for w in result["results"][0].get("warnings") or [])
+
+
+class TestAMeasureIsAnExpressionOrAnObject:
+    @pytest.mark.parametrize("stated", [5, ["Sum([Amount])"], None])
+    def test_anything_else_is_refused(self, stated):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[], measures=[stated])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+
+class TestEveryProbeCountsTowardsTheCeiling:
+    """A text search, a condition written as an expression and an element
+    set each prove themselves with a probe of their own."""
+
+    @pytest.mark.parametrize("filter_shape, each", [
+        ({"field": "Region", "contains": "no"}, 2),
+        ({"field": "Region", "match_expression": "Sum([Amount]) > 1"}, 4),
+        ({"field": "Region", "matching": {"filters": []}}, 2),
+    ])
+    def test_the_cost_counts_them(self, filter_shape, each):
+        from qlik_sense_mcp_server.engine.queries import _filter_cost
+
+        assert _filter_cost({"filters": [filter_shape]}) == each
