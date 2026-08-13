@@ -247,9 +247,36 @@ def engine_query(
         metrics: what to aggregate, as
             {"field": "Amount", "agg": "sum", "label": "Revenue"}.
             `agg` is one of sum, count, count_distinct, avg, min, max,
-            median, stdev. `label` is optional and defaults to
-            `<agg>_<field>`; it names the column and is what `sort_by`
-            takes.
+            median, stdev, fractile. `fractile` also takes `p` — the
+            fraction, so 0.85 is the 85th percentile. `label` is optional
+            and defaults to `<agg>_<field>`; it names the column and is
+            what `sort_by` takes.
+
+            A metric may aggregate over groups rather than over rows. Add
+            `per` — the field each inner value is computed for — and
+            `inner_agg` — how it is computed:
+
+                {"field": "tis_days", "inner_agg": "sum",
+                 "per": "IssueId", "agg": "fractile", "p": 0.85}
+
+            becomes `Fractile(Aggr(Sum([tis_days]), [IssueId]), 0.85)`:
+            days summed per issue first, then the 85th percentile across
+            issues. This is a different question from `median` over rows,
+            and the answers differ — measured on one small set, 10 against
+            6. `per` takes one field or a list of them.
+
+            A metric may also narrow itself, overriding the query's
+            `filters`, so a KPI holds its numerator and denominator at
+            once:
+
+                "metrics": [
+                  {"field": "IssueId", "agg": "count_distinct"},
+                  {"field": "IssueId", "agg": "count_distinct",
+                   "label": "all", "filters": []}]
+
+            No `filters` key means the query's filters; `[]` means none at
+            all. The reply says which measure used which slice in
+            `measure_filters`.
         filters: what to narrow to. Two shapes:
             {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
             {"field": "Region", "values": ["North", "South"]}
