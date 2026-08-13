@@ -217,6 +217,10 @@ class EngineQueriesMixin:
             "measures": measures,
             "modifier": modifier,
             "filters_applied": built.get("applied", []),
+            # What the query counted over, when it is not the current
+            # selections. Without it the reply cannot be told apart from
+            # the same query with no scope at all.
+            "scope": built.get("scope"),
             "limit": query.get("limit", DEFAULT_QUERY_LIMIT),
             "exclude_null_dimensions": query.get("exclude_null_dimensions", False),
             "offset": query.get("offset", 0),
@@ -328,7 +332,7 @@ class EngineQueriesMixin:
 
         written = []
         part_filters = []
-        for part in parts:
+        for position, part in enumerate(parts):
             if not isinstance(part, dict):
                 return {}, {"id": query_id, "error": (
                     f"A part of {operation!r} must be an object, got "
@@ -336,6 +340,7 @@ class EngineQueriesMixin:
                     "error_category": "invalid_argument"}
             own = modifier
             own_applied = None
+            own_scope = None
             if part.get("scope") is not None and part.get("filters") is None:
                 built = slice_for([], part.get("scope"))
                 if built.get("error"):
@@ -344,6 +349,7 @@ class EngineQueriesMixin:
                     return {}, failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in part and part["filters"] is not None:
                 if slice_for is None or not isinstance(part["filters"], list):
                     return {}, {"id": query_id, "error": (
@@ -357,13 +363,27 @@ class EngineQueriesMixin:
                     return {}, failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             one, failure = EngineQueriesMixin._write_metric(
                 part, own, query_id, slice_for)
             if failure:
                 return {}, failure
             written.append(one["expression"])
-            if own_applied is not None:
-                part_filters.append((own, own_applied))
+            if own_applied is not None or own_scope is not None:
+                part_filters.append({
+                    "position": position,
+                    "modifier": own,
+                    "filters_applied": own_applied or [],
+                    "scope": own_scope,
+                })
+            # An operation inside an operation carries slices of its own,
+            # and losing them here would take the control probes of a
+            # nested period with them.
+            for nested in one.get("part_filters") or []:
+                part_filters.append(dict(
+                    nested, position=position,
+                    label_path=[position] + (nested.get("label_path") or
+                                             [nested.get("position")])))
 
         joined = OPERATIONS[operation].join(written)
         if operation == "divide":
@@ -546,6 +566,7 @@ class EngineQueriesMixin:
             # all, and the two are different statements.
             own = modifier
             own_applied = None
+            own_scope = None
             # A scope of its own applies even with no filters beside it:
             # "everything, ignoring selections" is a statement in itself.
             if metric.get("scope") is not None and metric.get(
@@ -557,6 +578,7 @@ class EngineQueriesMixin:
                     return [], failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in metric and metric["filters"] is not None:
                 if not isinstance(metric["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -576,6 +598,7 @@ class EngineQueriesMixin:
                     return [], failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             written, failure = EngineQueriesMixin._write_metric(
                 metric, own, query_id, slice_for)
             if failure:
@@ -583,6 +606,8 @@ class EngineQueriesMixin:
             if own_applied is not None:
                 written["filters_applied"] = own_applied
                 written["modifier"] = own
+            if own_scope:
+                written["scope"] = own_scope
             measures.append(written)
 
         # A caller that needs something this vocabulary cannot say writes
@@ -601,6 +626,7 @@ class EngineQueriesMixin:
                     "error_category": "invalid_argument"}
             own = modifier
             own_applied = None
+            own_scope = None
             if (measure.get("scope") is not None
                     and measure.get("filters") is None):
                 built = slice_for([], measure.get("scope"))
@@ -610,6 +636,7 @@ class EngineQueriesMixin:
                     return [], failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             if "filters" in measure and measure["filters"] is not None:
                 if slice_for is None or not isinstance(measure["filters"], list):
                     return [], {"id": query_id, "error": (
@@ -623,6 +650,7 @@ class EngineQueriesMixin:
                     return [], failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
+                own_scope = built.get("scope")
             # `own`, never `modifier`: writing back into the parameter made
             # the first measure with its own filter the base for the next
             # one, so a measure that stated no filter inherited its
@@ -665,6 +693,8 @@ class EngineQueriesMixin:
             if own_applied is not None:
                 written["filters_applied"] = own_applied
                 written["modifier"] = own
+            if own_scope:
+                written["scope"] = own_scope
             measures.append(written)
         return measures, None
 
@@ -687,9 +717,9 @@ class EngineQueriesMixin:
                 stated.append((measure.get("modifier", ""), applied))
             # A part of an arithmetic metric carries its own filters, and a
             # period stated there can fail to apply like any other.
-            for part_modifier, part_applied in measure.get("part_filters") or []:
-                for applied in part_applied:
-                    stated.append((part_modifier, applied))
+            for part in measure.get("part_filters") or []:
+                for applied in part.get("filters_applied") or []:
+                    stated.append((part.get("modifier", ""), applied))
 
         probes = []
         seen = set()
@@ -1151,22 +1181,32 @@ class EngineQueriesMixin:
         }
         if plan.get("filters_applied"):
             reply["filters_applied"] = plan["filters_applied"]
+        if plan.get("scope"):
+            reply["scope"] = plan["scope"]
         # Where measures were narrowed differently from each other, say so
         # per measure: the number alone does not show which slice it came
         # from, and a KPI holding both is the point of the feature.
         per_measure = []
         for measure in plan.get("measures", []):
-            if "filters_applied" in measure:
-                per_measure.append({"label": measure.get("label"),
-                                    "filters_applied": measure["filters_applied"]})
+            if "filters_applied" in measure or measure.get("scope"):
+                entry = {"label": measure.get("label"),
+                         "filters_applied": measure.get("filters_applied") or []}
+                # The set a measure is counted over is as much a part of
+                # its slice as the filters are: counted over a bookmark
+                # with no filters, it would otherwise read "no slice".
+                if measure.get("scope"):
+                    entry["scope"] = measure["scope"]
+                per_measure.append(entry)
             # A measure made of parts narrows each of them on its own, and
             # the number alone does not show which part used which slice.
-            for position, (_, part_applied) in enumerate(
-                    measure.get("part_filters") or []):
-                per_measure.append({
-                    "label": f"{measure.get('label')} [{position + 1}]",
-                    "filters_applied": part_applied,
-                })
+            for part in measure.get("part_filters") or []:
+                path = part.get("label_path") or [part.get("position", 0)]
+                where = "".join(f"[{step + 1}]" for step in path)
+                entry = {"label": f"{measure.get('label')} {where}",
+                         "filters_applied": part.get("filters_applied") or []}
+                if part.get("scope"):
+                    entry["scope"] = part["scope"]
+                per_measure.append(entry)
         if per_measure:
             reply["measure_filters"] = per_measure
         if plan.get("period_check"):
