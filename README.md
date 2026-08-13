@@ -42,6 +42,25 @@ date actually in the result — so a filter that failed to apply is
 visible instead of hiding behind a plausible number. Independent
 questions go in one call as `queries` and share three round-trips.
 
+Harder questions stay in the same form. A share of the whole, with the
+numerator narrowed and the denominator not:
+
+```jsonc
+{
+  "group_by": ["region_name"],
+  "metrics": [{"label": "Share", "op": "divide", "of": [
+    {"field": "amount", "agg": "sum",
+     "filters": [{"field": "category", "values": ["Alpha"]}]},
+    {"field": "amount", "agg": "sum", "total": true}]}]
+}
+```
+
+The same form states an aggregation over an aggregation
+(`"inner_agg": "sum", "per": "order_id", "agg": "median"`), the clients
+who bought in one year and not the next (`matching` / `not_matching`),
+counting over a bookmark or ignoring selections (`scope`), and values
+kept, dropped, added or intersected on any field.
+
 `engine_create_hypercube` takes the same shape with the expressions
 written by hand, for calculations the typed form cannot state.
 
