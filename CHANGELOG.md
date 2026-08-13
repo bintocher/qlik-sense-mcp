@@ -4,6 +4,82 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [2.0.2] - 2026-08-13
+
+### Added
+
+- A metric can aggregate over groups rather than over rows: `per` names
+  what each inner value is computed for, `inner_agg` how it is computed.
+  `{"field": "tis_days", "inner_agg": "sum", "per": "IssueId",
+  "agg": "fractile", "p": 0.85}` becomes
+  `Fractile(Aggr(Sum([tis_days]), [IssueId]), 0.85)` — days summed per
+  issue, then the 85th percentile across issues. This is a different
+  question from the same aggregation over rows, and the answers differ:
+  measured on four rows, the median over rows was 6 and the median over
+  issues 10. Without this the second question could only be asked by
+  writing the expression by hand, and asking the first instead returned a
+  number that looked entirely reasonable.
+- `fractile` as an ordinary aggregation, with `p` for the fraction. A
+  fraction outside 0..1 is refused: measured, Qlik answers such a call
+  with a dash rather than an error, and a dash reads as a value.
+- A metric or a hand-written measure can carry its own `filters`,
+  overriding the query's, so a KPI holds its numerator and denominator in
+  one answer. No key means the query's filters; `[]` means none at all.
+  Identical filter sets are built once, not once per measure, and the
+  reply says in `measure_filters` which measure used which slice.
+- `engine_query` accepts `measures` in a single query, not only inside
+  `queries`.
+
+### Fixed
+
+- A field name with a space made the check refuse a query Qlik runs
+  happily: `CheckExpression` reads a bare `Тип ставки` as two tokens and
+  answers "Garbage after expression: 'ставки'". Every model with
+  non-English field names was locked out of `engine_query`. Names are now
+  written in brackets — once, where the query is planned, because the
+  text of an expression is the key by which Engine's verdict finds its
+  way back to the query. A name that arrives already bracketed is left as
+  it is.
+- A filter on a field the app does not have blamed the bounds: a missing
+  field has no tags, so it read as "not a date" and perfectly good dates
+  went into a numeric parse that complained about them. The field is
+  checked before its bounds are read. A failed question is told apart
+  from a missing field, so a dropped frame is not reported as "no such
+  field".
+- The warning about set analysis fired on almost every measure. It was
+  built on `GetFieldsFromExpression` returning the fields a modifier
+  filters on; measured, it returns every field of the expression, so
+  `Sum([Amount])` came back as "set analysis filters on 'Amount'". The
+  warning and the call behind it are gone.
+- A limit above the ceiling, and a cube too wide for one page, are
+  refused with the value that fits instead of being quietly reduced. An
+  offset that is not a row number is refused rather than clamped. Bounds
+  given in the wrong order are refused instead of silently swapped.
+  Stating both an inclusive and an exclusive bound for the same end is
+  refused instead of one being ignored. An empty value inside a filter
+  list is named by its position rather than dropped.
+- A page of field values that filled up looked exactly like a field that
+  ran out. The reply now says whether there is more.
+- An unrecognised `published` value answered like the correct one:
+  anything unknown meant "no filter", which is what `"both"` means. It is
+  refused with the values it takes.
+
+### Changed
+
+- The group with no dimension value is kept by default. Dropping it is a
+  statement about the data — facts with no value for the grouping field
+  are still facts — so it is the caller's to make: `exclude_null_dimensions`
+  is available in `engine_query` as well, and defaults to keeping the
+  group in both tools. A ranking may now start with Qlik's `"-"` row
+  where it did not before.
+- Suggestions of near-miss field names and values are gone. The model
+  reads the field list and the values itself; a shortlist picked by
+  string similarity is a guess about spelling, not a fact about the app.
+  The value search behind the old suggestion also cost about 2.5 seconds
+  per refusal.
+- Messages name a field in brackets — `[Дата ставки]` — so the boundary
+  between the name and the sentence around it is visible.
+
 ## [2.0.1] - 2026-08-13
 
 ### Fixed
