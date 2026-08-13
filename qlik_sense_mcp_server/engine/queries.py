@@ -365,6 +365,8 @@ class EngineQueriesMixin:
             "limit": query.get("limit", DEFAULT_QUERY_LIMIT),
             "exclude_null_dimensions": query.get(
                 "exclude_null_dimensions", False),
+            "suppress_zero": query.get("suppress_zero", False),
+            "include_raw_layout": query.get("include_raw_layout", False),
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
@@ -1312,7 +1314,7 @@ class EngineQueriesMixin:
                           "qType": "HyperCube"},
                 "qHyperCubeDef": self._hypercube_def(
                     dimensions, measures, offset, limit, order,
-                    suppress_zero=False,
+                    suppress_zero=bool(plan.get("suppress_zero")),
                     exclude_null_dimensions=bool(
                         plan.get("exclude_null_dimensions"))),
             },
@@ -1387,6 +1389,10 @@ class EngineQueriesMixin:
             reply["filters_applied"] = plan["filters_applied"]
         if plan.get("scope"):
             reply["scope"] = plan["scope"]
+        # Asked for, so answered: the untouched Qlik layout, exactly as
+        # engine_create_hypercube hands it over.
+        if plan.get("include_raw_layout") and cube is not None:
+            reply["raw_layout"] = cube
         # Where measures were narrowed differently from each other, say so
         # per measure: the number alone does not show which slice it came
         # from, and a KPI holding both is the point of the feature.

@@ -157,11 +157,11 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
   measure silently did nothing — `qInterColumnSortOrder` was hard-coded
   to the dimensions, so the server returned the alphabetically first
   rows instead of the largest ones.
-- **NULL groups stay out of rankings.** Facts with no value for the
+- **NULL groups are visible, not hidden.** Facts with no value for the
   grouping field collapse into Qlik's `"-"` row, which often holds a
-  large total and would otherwise take first place in a top-N. It is
-  dropped by default; pass `exclude_null_dimensions=false` to measure
-  how much data is unattributed.
+  large total and can take first place in a top-N. It is kept by
+  default — a fact with no grouping value is still a fact — and
+  `exclude_null_dimensions=true` leaves it out.
 - **Compact, LLM-friendly results.** The hypercube response is
   `columns` + `rows` with real numbers, plus `grand_total` and
   per-step `timings`. Pass `include_raw_layout=true` for the full Qlik
