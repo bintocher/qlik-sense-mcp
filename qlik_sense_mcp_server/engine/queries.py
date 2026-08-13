@@ -556,12 +556,15 @@ class EngineQueriesMixin:
         # at each level. Checking the finished string means the megabytes
         # have already been allocated - and one call may hold several of
         # these.
-        planned = sum(len(one) for one in written) + 6 * len(written)
+        # `a / b`, and for division `If((b) = 0, Null(), a / b)`: the
+        # separators between the parts, then every denominator a second
+        # time inside the guard.
+        planned = (sum(len(one) for one in written)
+                   + len(OPERATIONS[operation]) * (len(written) - 1))
         if operation == "divide":
-            # `If((d1) = 0 or (d2) = 0, Null(), ...)`: every denominator
-            # again, plus the words holding them apart.
-            planned += (sum(len(one) for one in written[1:])
-                        + 10 * len(written[1:]) + 20)
+            planned += (sum(len(one) + len("() = 0") for one in written[1:])
+                        + len(" or ") * max(0, len(written) - 2)
+                        + len("If(, Null(), )"))
         if planned > MAX_EXPRESSION_CHARS:
             return {}, {"id": query_id, "error": (
                 f"This measure would be about {planned} characters long, "
@@ -1239,13 +1242,14 @@ class EngineQueriesMixin:
             total = (cube.get("qSize") or {}).get("qcy", 0)
             wanted = min(shaped["limit"], max(0, total - shaped["offset"]))
             if got < wanted:
-                short.append((plan, cube, shaped, got, wanted))
+                # A list, and the same object the loop below marks: the
+                # reason one query came up short is that query's own.
+                short.append([plan, cube, shaped, got, wanted])
         # One reply may itself be short, so the reading-on repeats until
         # the page is whole or Engine stops adding rows. Whatever is still
         # missing is said out loud rather than answered as a smaller
         # result.
-        pending = [[plan, cube, shaped, got, wanted]
-                   for plan, cube, shaped, got, wanted in short]
+        pending = list(short)
         for _ in range(MAX_PAGE_READS):
             pending = [item for item in pending if item[3] < item[4]]
             if not pending:
@@ -1263,7 +1267,7 @@ class EngineQueriesMixin:
                                                      raise_on_error=False)
             except Exception:
                 extra = [None] * len(requests)
-            progressed = False
+            progressed = []
             for item, reply in zip(pending, extra):
                 if isinstance(reply, Exception) or not reply:
                     continue
@@ -1273,23 +1277,28 @@ class EngineQueriesMixin:
                     continue
                 item[1]["qDataPages"] = (item[1].get("qDataPages") or []) + pages
                 item[3] += added
-                progressed = True
-            if not progressed:
-                stopped = True
+                progressed.append(id(item))
+            # Per query, not per batch: one may have run out of rows while
+            # another is still being served.
+            for item in pending:
+                if id(item) not in progressed:
+                    item.append("stopped")
+            pending = [item for item in pending if len(item) == 5]
+            if not pending:
                 break
-        else:
-            stopped = False
-        for plan, cube, shaped, got, wanted in pending:
-            if got < wanted:
-                plan.setdefault("warnings", []).append(
-                    f"{got} of the {wanted} rows this page asked for came "
-                    f"back; "
-                    + ("Engine stopped sending."
-                       if stopped else
-                       f"reading on stopped after {MAX_PAGE_READS} rounds.")
-                    + f" Ask again for the rest with "
-                      f"offset={shaped['offset'] + got}."
-                )
+        for item in short:
+            plan, cube, shaped, got, wanted = item[:5]
+            if got >= wanted:
+                continue
+            plan.setdefault("warnings", []).append(
+                f"{got} of the {wanted} rows this page asked for came "
+                f"back; "
+                + ("Engine stopped sending."
+                   if len(item) > 5 else
+                   f"reading on stopped after {MAX_PAGE_READS} rounds.")
+                + f" Ask again for the rest with "
+                  f"offset={shaped['offset'] + got}."
+            )
 
         results = [
             self._query_reply(plan, plan.get("cube"), plan.get("shaped"))

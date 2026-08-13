@@ -1182,3 +1182,56 @@ class TestSetsCombineWithEachOther:
                  "filters": [{"field": "Region", "values": ["Nowhere"]}]},
                 {"current_selection": True}]})
         assert result["error_category"] == "value_not_found"
+
+
+class TestAProbeRunsInTheScopeEverywhere:
+    """Proving a condition against the current selections both refuses good
+    queries and lets empty ones through - the query runs somewhere else."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.seen = []
+
+        def evaluate(handle, exprs):
+            engine.seen.extend(exprs)
+            return [{"text": None, "number": 3, "is_numeric": True,
+                     "error": None} for _ in exprs]
+
+        engine.evaluate_expressions = evaluate
+        return engine
+
+    def test_an_element_set_is_proven_inside_the_scope(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}],
+            scope={"bookmark": "BM01"})
+        assert any(probe.startswith("=Count({BM01<[Client]=")
+                   for probe in engine.seen)
+
+
+class TestAComplaintIsARefusalOnEveryPath:
+    """The rule reached four paths and skipped the two most common kinds of
+    condition."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": "Error: Error in expression: ')' expected",
+             "number": None, "is_numeric": False, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_range_says_what_qlik_said(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "price", "greater_than": 400}])
+        assert result["error_category"] == "invalid_filter"
+        assert "expected" in result["error"]
+
+    def test_a_period_says_what_qlik_said(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "F", "period": "2011"}])
+        assert result["error_category"] == "invalid_period"
+        assert "expected" in result["error"]
