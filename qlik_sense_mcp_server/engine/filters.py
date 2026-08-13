@@ -465,6 +465,7 @@ class EngineFiltersMixin:
             return form
 
         return {
+            **({"note": form["note"]} if form.get("note") else {}),
             "modifier": form["modifier"],
             "form": form["form"],
             "field": field,
@@ -603,10 +604,16 @@ class EngineFiltersMixin:
                 f"{escape_qlik_field_name(field)}: {complaints[0]}"),
                 "error_category": "invalid_period"}
         label, modifier = usable[-1]
+        unproven_note = (
+            f"Which form of a period filter on "
+            f"{escape_qlik_field_name(field)} Qlik reads could not be "
+            f"measured: no candidate agreed with the reference count."
+        )
         logger.warning(
             "No filter form matched the reference count on %r (reference=%d)",
             field, reference)
-        return {"modifier": modifier, "form": label, "matched": reference}
+        return {"modifier": modifier, "form": label, "matched": reference,
+                "note": unproven_note}
 
     def values_modifier(self, app_handle: int, field: str,
                         values: List[Any], operator: str = "values",

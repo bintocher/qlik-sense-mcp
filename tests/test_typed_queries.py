@@ -1269,13 +1269,20 @@ class TestTheCostOfAName:
                 "filters": [{"field": "Year", "values": ["2023"]}]}}]})
         assert bracketed == plain
 
-    def test_a_range_costs_what_it_measures(self):
+    def test_a_period_costs_what_it_measures(self):
         from qlik_sense_mcp_server.engine.queries import (
-            _filter_cost, RANGE_PROBE_COST)
+            _filter_cost, PERIOD_PROBE_COST, RANGE_PROBE_COST)
 
-        ranged = _filter_cost({"filters": [
+        # A period is measured: the tags of the field, the candidate forms
+        # against a reference, and four control values. A numeric bound
+        # asks one question and gets one answer.
+        periodic = _filter_cost({"filters": [
             {"field": "OrderDate", "period": "2024"}]})
-        assert ranged == 1 + RANGE_PROBE_COST
+        numeric = _filter_cost({"filters": [
+            {"field": "price", "greater_than": 400}]})
+        assert periodic == 1 + PERIOD_PROBE_COST
+        assert numeric == 1 + RANGE_PROBE_COST
+        assert numeric < periodic
 
 
 class TestAScopeWrittenDownIsAScopeChecked:
@@ -1701,3 +1708,15 @@ class TestAMeasureThatIsNotAMeasure:
         result = _FakeEngine().create_hypercube(
             1, [{"field": "Region"}], [stated], 10)
         assert result["error_category"] == "invalid_argument"
+
+
+class TestAMeasureObjectWithoutAnExpression:
+    @pytest.mark.parametrize("stated", [{}, {"label": "Revenue"},
+                                        {"expression": "   "}])
+    def test_the_hypercube_refuses_it(self, stated):
+        from tests.test_hypercube import _FakeEngine
+
+        result = _FakeEngine().create_hypercube(
+            1, [{"field": "Region"}], [stated], 10)
+        assert result["error_category"] == "invalid_argument"
+        assert "expression" in result["error"]
