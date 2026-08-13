@@ -34,6 +34,25 @@ MAX_EXPRESSION_CHARS = 20000
 RANGE_PROBE_COST = 3
 
 
+def _too_long(expression: str, query_id: str) -> Optional[Dict[str, Any]]:
+    """The refusal an oversized expression earns, or nothing.
+
+    One expression has a size, whichever shape built it. A division writes
+    its denominator twice - the second time to guard against zero - so
+    divisions inside divisions double the text at every level; a measure
+    written by hand is as long as it was written.
+    """
+    if len(expression) <= MAX_EXPRESSION_CHARS:
+        return None
+    return {"id": query_id, "error": (
+        f"This measure is {len(expression)} characters long, over the "
+        f"{MAX_EXPRESSION_CHARS} this server sends."),
+        "error_category": "limit_exceeded",
+        "hint": ("A division writes its denominator twice, so divisions "
+                 "inside divisions double the text at every level. State "
+                 "the inner ones as separate metrics.")}
+
+
 def _scope_is_readable(scope: Any, query_id: str) -> Optional[Dict[str, Any]]:
     """The refusal a scope description earns, or nothing.
 
@@ -515,16 +534,6 @@ class EngineQueriesMixin:
             expression = f"If({guard}, Null(), {joined})"
         else:
             expression = joined
-        if len(expression) > MAX_EXPRESSION_CHARS:
-            return {}, {"id": query_id, "error": (
-                f"The expression this metric builds is "
-                f"{len(expression)} characters long, over the "
-                f"{MAX_EXPRESSION_CHARS} this server sends."),
-                "error_category": "limit_exceeded",
-                "hint": ("A division writes its denominator twice — once "
-                         "for the guard against zero — so divisions inside "
-                         "divisions double the text at every level. State "
-                         "the inner ones as separate metrics.")}
         written_metric = {"expression": expression,
                           "label": str(metric.get("label") or operation)}
         if part_filters:
@@ -756,6 +765,9 @@ class EngineQueriesMixin:
                 written["modifier"] = own
             if own_scope:
                 written["scope"] = own_scope
+            oversized = _too_long(written["expression"], query_id)
+            if oversized:
+                return [], oversized
             measures.append(written)
 
         # A caller that needs something this vocabulary cannot say writes
@@ -846,6 +858,9 @@ class EngineQueriesMixin:
                 written["modifier"] = own
             if own_scope:
                 written["scope"] = own_scope
+            oversized = _too_long(written["expression"], query_id)
+            if oversized:
+                return [], oversized
             measures.append(written)
         return measures, None
 

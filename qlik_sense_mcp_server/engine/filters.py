@@ -191,10 +191,13 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
                               f"{str(scope['bookmark']).strip()}"}
     key = named[0]
     value = scope[key]
-    if key == "ignore_selections":
-        return {"identifier": "1"} if value else {"identifier": ""}
-    if key == "current_selection":
-        return {"identifier": "$"} if value else {"identifier": ""}
+    if key in ("ignore_selections", "current_selection"):
+        if not isinstance(value, bool):
+            return {"error": f"scope {key}={value!r} is not yes or no.",
+                    "error_category": "invalid_argument",
+                    "hint": "true or false, not the word for it."}
+        marker = "1" if key == "ignore_selections" else "$"
+        return {"identifier": marker} if value else {"identifier": ""}
     if key in ("bookmark", "state"):
         name = str(value or "").strip()
         if not name:
