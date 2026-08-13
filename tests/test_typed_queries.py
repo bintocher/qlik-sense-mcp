@@ -642,3 +642,55 @@ class TestControlValuesFollowTheFilter:
                      {"field": "Amount", "agg": "count", "filters": same}],
             filters=same)])
         assert len(result["results"][0]["period_check"]) == 1
+
+
+class TestShareOfTheTotal:
+    """The same sum, once per group and once across all of them, in one
+    row. Verified live on North 40 / South 60: the share came back 0.4 and
+    0.6, and with total_except by region, each client's row carried its
+    own region's 40 or 60."""
+
+    def test_total_ignores_the_grouping(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum", "total": True}]), 0)
+        assert plan["measures"][0]["expression"] == "Sum(TOTAL [Amount])"
+
+    def test_total_keeps_the_filter_inside(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum", "total": True}],
+            filters=[{"field": "Region", "values": ["North"]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert expression.startswith("Sum(TOTAL {<")
+        assert "[Region]" in expression
+
+    def test_total_except_names_what_it_still_respects(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "total_except": ["Region"]}]), 0)
+        assert plan["measures"][0]["expression"] == (
+            "Sum(TOTAL <[Region]> [Amount])")
+
+    def test_total_except_takes_several_fields(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum",
+                      "total_except": ["Region", "Category"]}]), 0)
+        assert "TOTAL <[Region], [Category]>" in plan["measures"][0]["expression"]
+
+    def test_an_empty_total_except_is_refused(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"field": "Amount", "agg": "sum", "total_except": []}]), 0)
+        assert plan["error_category"] == "invalid_argument"
+        assert "total" in plan["hint"]
+
+    def test_a_share_is_an_ordinary_division(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "share", "op": "divide", "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum", "total": True}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum(TOTAL [Amount])" in expression
+        assert expression.startswith("If(")
+
+    def test_without_it_nothing_changes(self):
+        plan = _Engine()._plan_query(1, "app", _query(), 0)
+        assert "TOTAL" not in plan["measures"][0]["expression"]

@@ -36,6 +36,10 @@ def _as_number(value: Any) -> Optional[float]:
 # `count` counts values of the field, `count_distinct` counts different
 # ones — the pair a caller reaches for as "how many orders" against "how
 # many customers".
+# `TOTAL` before the modifier makes an aggregation ignore the grouping of
+# the query — the whole of it, or all but the fields named after it. This
+# is what "share of the total" is made of: the same sum, once per group
+# and once across all of them, in one row.
 AGGREGATIONS = {
     "sum": "Sum({modifier} {field})",
     "count": "Count({modifier} {field})",
@@ -68,6 +72,17 @@ OUTER_AGGREGATIONS = {
 # the hypercube default: a typed query is normally a ranking or a total,
 # and a long tail of rows costs the reader more than it tells them.
 DEFAULT_QUERY_LIMIT = 100
+
+# Arithmetic between aggregations, as an operator over parts rather than
+# as text to be parsed. Division guards itself: Qlik answers division by
+# zero with a null, which reads as "no value" rather than as the mistake
+# it is.
+OPERATIONS = {
+    "divide": " / ",
+    "multiply": " * ",
+    "add": " + ",
+    "subtract": " - ",
+}
 
 # Where a described filter goes inside an expression the caller wrote. The
 # same marker `engine_create_hypercube` uses, so the two tools ask for the
@@ -137,12 +152,15 @@ class EngineQueriesMixin:
         # per measure would send the same values to Engine twice.
         slices = {}
 
-        def slice_for(wanted):
-            signature = json.dumps(wanted, sort_keys=True, ensure_ascii=False,
-                                   default=str)
+        scope = query.get("scope")
+
+        def slice_for(wanted, own_scope=None):
+            chosen = own_scope if own_scope is not None else scope
+            signature = json.dumps([wanted, chosen], sort_keys=True,
+                                   ensure_ascii=False, default=str)
             if signature not in slices:
                 slices[signature] = self.build_filters(
-                    app_handle, app_id, wanted)
+                    app_handle, app_id, wanted, scope=chosen)
             return slices[signature]
 
         built = slice_for(filters)
@@ -218,7 +236,102 @@ class EngineQueriesMixin:
         return None
 
     @staticmethod
-    def _write_metric(metric, modifier, query_id):
+    def _total_prefix(metric, query_id):
+        """`TOTAL`, and the fields it should still respect.
+
+        `total: true` ignores the grouping entirely — the denominator of a
+        share. `total_except: ["Region"]` ignores all of it but those
+        fields, which is a share within a group.
+        """
+        total = metric.get("total")
+        except_fields = metric.get("total_except")
+        if except_fields is not None:
+            names = ([except_fields] if isinstance(except_fields, str)
+                     else list(except_fields or []))
+            if not names:
+                return "", {"id": query_id, "error": (
+                    "total_except names no field."),
+                    "error_category": "invalid_argument",
+                    "hint": 'Use "total": true to ignore the grouping wholly.'}
+            written = []
+            for name in names:
+                one, failure = EngineQueriesMixin._field_for_expression(
+                    name, "total_except", query_id)
+                if failure:
+                    return "", failure
+                written.append(one)
+            return "TOTAL <" + ", ".join(written) + "> ", None
+        if total:
+            return "TOTAL ", None
+        return "", None
+
+    @staticmethod
+    def _write_operation(metric, modifier, query_id, slice_for=None):
+        """One arithmetic expression over two or more aggregations.
+
+        Stated as an operator and its parts, not as text: `Sum(A)/Count(B)`
+        written by hand would have to be parsed to know where a filter
+        goes, and parsing Qlik is what this server does not do. As
+        structure, each part keeps its own filter and its own nesting, and
+        the division guard wraps the whole thing.
+        """
+        operation = str(metric.get("op") or "").strip().lower()
+        if operation not in OPERATIONS:
+            return {}, {"id": query_id, "error": (
+                f"op={metric.get('op')!r} is not an operation this server "
+                f"writes."),
+                "error_category": "invalid_argument",
+                "allowed_values": sorted(OPERATIONS)}
+        parts = metric.get("of")
+        if not isinstance(parts, list) or len(parts) < 2:
+            return {}, {"id": query_id, "error": (
+                f"op={operation!r} needs at least two parts in `of`."),
+                "error_category": "invalid_argument",
+                "hint": ('`of` holds metrics: [{"field": "Amount", "agg": '
+                         '"sum"}, {"field": "OrderId", "agg": '
+                         '"count_distinct"}].')}
+
+        written = []
+        for part in parts:
+            if not isinstance(part, dict):
+                return {}, {"id": query_id, "error": (
+                    f"A part of {operation!r} must be an object, got "
+                    f"{part!r}."),
+                    "error_category": "invalid_argument"}
+            own = modifier
+            if "filters" in part and part["filters"] is not None:
+                if slice_for is None or not isinstance(part["filters"], list):
+                    return {}, {"id": query_id, "error": (
+                        f"Part filters={part.get('filters')!r} is not a "
+                        f"list."),
+                        "error_category": "invalid_argument"}
+                built = slice_for(part["filters"], part.get("scope"))
+                if built.get("error"):
+                    failed = dict(built)
+                    failed["id"] = query_id
+                    return {}, failed
+                own = built.get("modifier", "")
+            one, failure = EngineQueriesMixin._write_metric(
+                part, own, query_id, slice_for)
+            if failure:
+                return {}, failure
+            written.append(one["expression"])
+
+        joined = OPERATIONS[operation].join(written)
+        if operation == "divide":
+            # Qlik answers division by zero with a null, which shows up as
+            # a dash and reads as "no value" rather than as a denominator
+            # that was zero. Said plainly instead.
+            denominators = written[1:]
+            guard = " or ".join(f"({one}) = 0" for one in denominators)
+            expression = f"If({guard}, Null(), {joined})"
+        else:
+            expression = joined
+        return {"expression": expression,
+                "label": str(metric.get("label") or operation)}, None
+
+    @staticmethod
+    def _write_metric(metric, modifier, query_id, slice_for=None):
         """Turn one metric into a Qlik expression.
 
         Two shapes. Flat is an aggregation over rows. Nested is an
@@ -235,6 +348,13 @@ class EngineQueriesMixin:
         function in the expression that reads rows of the table; `Aggr` and
         whatever wraps it work over numbers that already exist.
         """
+        # Arithmetic first: an operation is a metric made of metrics, and
+        # each part is built by the same rules — including its own filter,
+        # its own grouping, its own nesting.
+        if metric.get("op") is not None or metric.get("of") is not None:
+            return EngineQueriesMixin._write_operation(
+                metric, modifier, query_id, slice_for)
+
         prefix = (modifier + " ") if modifier else ""
         aggregation = str(metric.get("agg") or "sum").strip().lower()
         per = metric.get("per")
@@ -262,8 +382,11 @@ class EngineQueriesMixin:
                     fraction, query_id)
                 if refusal:
                     return {}, refusal
+            total, failure = EngineQueriesMixin._total_prefix(metric, query_id)
+            if failure:
+                return {}, failure
             expression = AGGREGATIONS[aggregation].format(
-                modifier=prefix.rstrip() if prefix else "",
+                modifier=(total + prefix).rstrip() if (total or prefix) else "",
                 field=field, p=fraction).replace("(  ", "(").replace("( ", "(")
             return {"expression": expression,
                     "label": str(metric.get("label")
@@ -373,7 +496,7 @@ class EngineQueriesMixin:
                     return [], {"id": query_id, "error": (
                         "Per-metric filters are not available here."),
                         "error_category": "invalid_argument"}
-                built = slice_for(metric["filters"])
+                built = slice_for(metric["filters"], metric.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
@@ -381,7 +504,7 @@ class EngineQueriesMixin:
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
             written, failure = EngineQueriesMixin._write_metric(
-                metric, own, query_id)
+                metric, own, query_id, slice_for)
             if failure:
                 return [], failure
             if own_applied is not None:
@@ -411,7 +534,7 @@ class EngineQueriesMixin:
                         f"Measure filters={measure.get('filters')!r} is not a "
                         f"list."),
                         "error_category": "invalid_argument"}
-                built = slice_for(measure["filters"])
+                built = slice_for(measure["filters"], measure.get("scope"))
                 if built.get("error"):
                     failed = dict(built)
                     failed["id"] = query_id
