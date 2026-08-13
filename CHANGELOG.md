@@ -54,6 +54,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   share of. Measured on 40 and 60 against a total of 100: the shares came
   back 0.4 and 0.6, and with `total_except` by region each client's row
   carried its own region's total.
+- Sets combine with each other, not only with values of a field:
+  `{"combine": "union", "of": [{...}, {...}]}` answers "bought in 2023 or
+  lives in the South", and `intersect`, `exclude` and
+  `symmetric_difference` answer the other three questions of the same
+  shape. Each set carries filters of its own. Measured on two sets holding
+  40 and 60: 100, 0, 40 and 100 respectively. A filter written outside the
+  combination is refused, because Qlik reads no modifier around one.
 - `op` and `of` state arithmetic over aggregations — a ratio, a
   difference, a product — with each part free to carry its own filters
   and its own scope. Division answers with no value rather than an error

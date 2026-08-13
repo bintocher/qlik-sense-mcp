@@ -1105,3 +1105,80 @@ class TestAProbeThatQlikRefuses:
         result = self._engine(None).build_filters(
             1, "app", [{"field": "Region", "contains": "no"}])
         assert "error" not in result
+
+
+class TestSetsCombineWithEachOther:
+    """"Bought in 2023 or lives in the South" is the union of two sets, and
+    no modifier on one field says it. Measured on the server: two sets
+    holding 40 and 60 answer 100 under union, 0 under intersect where they
+    do not overlap, 40 under exclude and 100 under symmetric difference."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South", "2023"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("operation, sign", [
+        ("union", " + "), ("intersect", " * "),
+        ("exclude", " - "), ("symmetric_difference", " / ")])
+    def test_each_operation_is_written(self, operation, sign):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": operation, "of": [
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["South"]}]}]})
+        assert result["modifier"] == (
+            "{(1<[Region]={'North'}>)" + sign + "(1<[Region]={'South'}>)}")
+
+    def test_the_reply_names_what_each_set_narrowed(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"current_selection": True}]})
+        assert [item["set"] for item in result["applied"]] == [0, 1]
+
+    def test_filters_outside_the_combination_are_refused(self):
+        """Measured: Qlik answers a modifier written around a combination
+        with "'}' expected"."""
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"combine": "union", "of": [
+                {"ignore_selections": True}, {"current_selection": True}]})
+        assert result["error_category"] == "invalid_filter"
+
+    def test_one_set_is_not_a_combination(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [{"ignore_selections": True}]})
+        assert result["error_category"] == "invalid_argument"
+
+    @pytest.mark.parametrize("scope", [
+        {"combine": "union"}, {"of": [{"ignore_selections": True}]}])
+    def test_one_half_without_the_other_is_refused(self, scope):
+        result = self._engine().build_filters(1, "app", [], scope=scope)
+        assert result["error_category"] == "invalid_argument"
+
+    def test_an_unknown_operation_is_refused(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "nearly", "of": [{"ignore_selections": True},
+                                        {"current_selection": True}]})
+        assert result["error_category"] == "invalid_argument"
+        assert "union" in result["allowed_values"]
+
+    def test_a_broken_set_inside_is_refused(self):
+        """A set that cannot be built is not a set, and the combination
+        carries its refusal out rather than joining what is left."""
+        engine = self._engine()
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 0, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["Nowhere"]}]},
+                {"current_selection": True}]})
+        assert result["error_category"] == "value_not_found"

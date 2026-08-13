@@ -149,6 +149,30 @@ A scope stated on its own, with no filters beside it, applies as it
 reads. Stated on the query it reaches every measure; stated on a metric
 or on one part of an arithmetic metric, it reaches only that one.
 
+### Combining sets
+
+Two sets joined by one operation answer what no modifier on a single field
+can: "bought in 2023 **or** lives in the South".
+
+```jsonc
+{"combine": "union",
+ "of": [{"ignore_selections": true,
+         "filters": [{"field": "Year", "values": ["2023"]}]},
+        {"ignore_selections": true,
+         "filters": [{"field": "Region", "values": ["South"]}]}]}
+```
+
+| `combine` | Answers |
+|:---|:---|
+| `union` | everything in either set |
+| `intersect` | only what is in both |
+| `exclude` | the first without the second |
+| `symmetric_difference` | what belongs to exactly one of them |
+
+Each set is described the way any scope is, with filters of its own. A
+filter stated outside the combination is refused: Qlik reads no modifier
+written around one.
+
 ### Metrics beyond a single aggregation
 
 A metric is `{"field": ..., "agg": ...}`, and four keys extend it:

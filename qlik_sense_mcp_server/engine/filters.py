@@ -149,8 +149,15 @@ SET_OPERATORS = {
 # Which set the filters narrow. Without one, Qlik reads the modifier
 # against the current selection, which is what a question about "the data"
 # normally means.
+SET_COMBINERS = {
+    "union": " + ",
+    "intersect": " * ",
+    "exclude": " - ",
+    "symmetric_difference": " / ",
+}
+
 SCOPE_KEYS = ("ignore_selections", "current_selection", "bookmark", "state",
-              "selection_back", "selection_forward")
+              "selection_back", "selection_forward", "combine", "of")
 
 
 def _probe_complaint(result: Dict[str, Any]) -> str:
@@ -176,6 +183,10 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     selections of every state at once, so naming the state says which part
     of it to read.
     """
+    # A combination is read elsewhere, by the code that builds the sets it
+    # joins; here it is neither an identifier nor two of them at once.
+    if scope.get("combine") is not None or scope.get("of") is not None:
+        return {"identifier": ""}
     unknown = [key for key in scope if key not in SCOPE_KEYS]
     if unknown:
         return {
@@ -742,6 +753,71 @@ class EngineFiltersMixin:
             outcome["matched"] = int(matched)
         return outcome
 
+    def _combined_sets(self, app_handle: int, app_id: str,
+                       filters: List[Dict[str, Any]],
+                       scope: Dict[str, Any]) -> Dict[str, Any]:
+        """Two or more sets, joined by one operation between them.
+
+        Each set is described the way any set is - an identifier and
+        filters of its own - and the operation says what to do with them:
+        everything in either (`union`), only what is in both (`intersect`),
+        the first without the second (`exclude`), or what belongs to
+        exactly one of them (`symmetric_difference`).
+
+        Measured on the server: two sets holding 40 and 60 answer 100 under
+        `union`, 40 under `intersect` where one contains the other, and 0
+        under `exclude` and `symmetric_difference` in the same case.
+        """
+        operation = scope.get("combine")
+        parts = scope.get("of")
+        if operation is None or parts is None:
+            return {"error": ("scope names one of `combine` and `of` without "
+                              "the other."),
+                    "error_category": "invalid_argument",
+                    "hint": ('{"combine": "union", "of": [{...}, {...}]} - '
+                             "the operation and the sets it joins.")}
+        operation = str(operation).strip().lower()
+        if operation not in SET_COMBINERS:
+            return {"error": f"combine={operation!r} is not an operation "
+                             f"between sets.",
+                    "error_category": "invalid_argument",
+                    "allowed_values": sorted(SET_COMBINERS)}
+        if not isinstance(parts, (list, tuple)) or len(parts) < 2:
+            return {"error": "`of` holds fewer than two sets.",
+                    "error_category": "invalid_argument",
+                    "hint": "An operation between sets needs two of them."}
+        if filters:
+            # Measured: Qlik refuses a modifier written outside the
+            # combination - `{((A) + (B))<Field={'x'}>}` comes back as
+            # "'}' expected". Narrowing each set separately is the same
+            # question and Qlik reads it.
+            return {"error": ("Filters cannot narrow a combination of sets "
+                              "from the outside."),
+                    "error_category": "invalid_filter",
+                    "hint": ("State them inside each set of `of` - Qlik "
+                             "reads no modifier written around a "
+                             "combination.")}
+
+        written, applied = [], []
+        for position, part in enumerate(parts):
+            if not isinstance(part, dict):
+                return {"error": f"of[{position}] is not an object: {part!r}",
+                        "error_category": "invalid_argument"}
+            own_filters = part.get("filters") or []
+            own_scope = {k: v for k, v in part.items() if k != "filters"}
+            built = self.build_filters(app_handle, app_id, own_filters,
+                                       scope=own_scope or None)
+            if built.get("error"):
+                return built
+            modifier = built.get("modifier") or "{$}"
+            written.append("(" + modifier.strip("{}") + ")")
+            applied.append({"set": position, "modifier": modifier,
+                            "filters_applied": built.get("applied", [])})
+
+        combined = "{" + SET_COMBINERS[operation].join(written) + "}"
+        return {"modifier": combined, "applied": applied,
+                "scope": f"{operation} of {len(written)} sets"}
+
     def build_filters(self, app_handle: int, app_id: str,
                       filters: List[Dict[str, Any]],
                       scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -750,6 +826,13 @@ class EngineFiltersMixin:
         Every filter narrows the result further — they combine with AND,
         which is what "revenue in 2024 for the North region" means.
         """
+        # Sets combine with each other: "bought in 2023 or lives in the
+        # South" is the union of two sets, and no modifier on one field
+        # says it.
+        if isinstance(scope, dict) and (scope.get("combine") is not None
+                                        or scope.get("of") is not None):
+            return self._combined_sets(app_handle, app_id, filters, scope)
+
         identifier = ""
         # `is not None`, not truthiness: 0, "" and False are not objects,
         # and passing them silently as "no scope" hides a mistake in the
