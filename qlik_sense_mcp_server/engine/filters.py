@@ -862,8 +862,16 @@ class EngineFiltersMixin:
                     verdict = self.send_request(
                         "CheckExpression", [condition], handle=app_handle)
                     complaint = str(verdict.get("qErrorMsg") or "").strip()
+                    # Qlik answers with two things, and a name it does not
+                    # know is the second: a misspelled field is read as a
+                    # value of itself, so the condition scores false
+                    # everywhere and the answer is empty rather than wrong.
+                    unknown = [
+                        condition[bad["qFrom"]:bad["qFrom"] + bad["qCount"]]
+                        for bad in verdict.get("qBadFieldNames") or []
+                    ]
                 except Exception:
-                    complaint = ""
+                    complaint, unknown = "", []
                 if complaint:
                     return {"error": (
                         f"match_expression on "
@@ -873,8 +881,35 @@ class EngineFiltersMixin:
                         "hint": ("It is scored for each value of the field, "
                                  "so it reads like a measure: "
                                  "Sum([Amount]) > 1000.")}
+                if unknown:
+                    return {"error": (
+                        f"match_expression on "
+                        f"{escape_qlik_field_name(field)} names a field this "
+                        f"app does not have: "
+                        + ", ".join(escape_qlik_field_name(name)
+                                    for name in unknown)),
+                        "error_category": "field_not_found",
+                        "next_actions": [
+                            "call get_app_details(app_id) and read "
+                            "`fields[].name`",
+                            "field names are case-sensitive; copy them "
+                            "exactly",
+                        ]}
                 name = escape_qlik_field_name(field)
-                parts.append(f'{name}={{"={condition}"}}')
+                modifier = f'{name}={{"={condition}"}}'
+                counted = self.evaluate_expressions(
+                    app_handle,
+                    [f"=Count({{{identifier}<{modifier}>}} DISTINCT {name})"])
+                matched = counted[0].get("number") if counted else None
+                if matched is not None and int(matched) == 0:
+                    return {"error": (
+                        f"No value of {name} satisfies "
+                        f"{condition!r}."),
+                        "error_category": "value_not_found",
+                        "next_actions": [
+                            f"read the values with get_app_field on {name}",
+                        ]}
+                parts.append(modifier)
                 applied.append({"field": field,
                                 "match_expression": condition})
                 continue

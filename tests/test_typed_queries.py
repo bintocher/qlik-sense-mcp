@@ -43,6 +43,7 @@ class _Engine(QlikEngineAPI):
         self.pages = {}
         self.cube_defs = []
         self.short_page = 0
+        self.stops_sending = False
 
     def send_requests_pipelined(self, requests, raise_on_error=True, timeout=None):
         self.batches.append([r["method"] for r in requests])
@@ -84,7 +85,11 @@ class _Engine(QlikEngineAPI):
         if method == "GetHyperCubeData":
             page = (params or [None, [{}]])[1][0]
             top, height = page.get("qTop", 0), page.get("qHeight", 0)
+            if self.stops_sending:
+                return {"qDataPages": [{"qMatrix": []}]}
             more = self.rows[top:top + height]
+            if self.short_page:
+                more = more[:self.short_page]
             return {"qDataPages": [{"qMatrix": [
                 [{"qText": str(v),
                   "qNum": v if isinstance(v, (int, float)) else "NaN"}
@@ -1461,3 +1466,21 @@ class TestAShortPageIsReadOn:
         engine = _Engine(rows=[["North", 1], ["South", 2]])
         result = engine.run_queries(1, "app", [_query(limit=2)])
         assert not any("GetHyperCubeData" in batch for batch in engine.batches)
+
+
+class TestReadingOnUntilThePageIsWhole:
+    def test_several_short_replies_are_read_on(self):
+        engine = _Engine(rows=[["A", 1], ["B", 2], ["C", 3], ["D", 4]])
+        engine.short_page = 1
+        reply = engine.run_queries(1, "app", [_query(limit=4)])["results"][0]
+        assert reply["returned_rows"] == 4
+        assert [row[0] for row in reply["rows"]] == ["A", "B", "C", "D"]
+
+    def test_engine_giving_up_is_said_out_loud(self):
+        engine = _Engine(rows=[["A", 1], ["B", 2], ["C", 3]])
+        engine.short_page = 1
+        engine.stops_sending = True
+        reply = engine.run_queries(1, "app", [_query(limit=3)])["results"][0]
+        assert reply["returned_rows"] == 1
+        assert any("came back" in w and "offset=1" in w
+                   for w in reply["warnings"])
