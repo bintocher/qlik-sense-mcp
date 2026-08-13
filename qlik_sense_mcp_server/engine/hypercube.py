@@ -650,6 +650,15 @@ class EngineHypercubeMixin:
                     measure = {"expression": measure}
                 elif isinstance(measure, dict):
                     measure = dict(measure)
+                    if not str(measure.get("expression") or "").strip():
+                        return {
+                            "error": (f"measures[{position}] carries no "
+                                      f"expression: {measure!r}"),
+                            "error_category": "invalid_argument",
+                            "failed_step": "plan",
+                            "hint": ('{"expression": "Sum([Amount])", '
+                                     '"label": "Revenue"}.'),
+                        }
                 else:
                     # A number is neither an expression nor a measure, and
                     # saying so beats an interpreter error.

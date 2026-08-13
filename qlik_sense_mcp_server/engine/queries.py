@@ -33,10 +33,11 @@ MAX_PAGE_READS = 5
 # twice, so nesting them doubles the text at every level.
 MAX_EXPRESSION_CHARS = 20000
 
-# What one range really costs: the tags of the field, a reference count
+# What a period really costs: the tags of the field, a reference count
 # with the candidate forms of a date, and the four control values the reply
-# carries.
-RANGE_PROBE_COST = 8
+# carries. A numeric range asks one question and gets one answer.
+PERIOD_PROBE_COST = 8
+RANGE_PROBE_COST = 2
 
 
 def _yes_or_no(value: Any, key: str, query_id: str
@@ -191,8 +192,12 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
                 # A range is not one call: the working form of a date field
                 # is chosen by measuring a reference against the candidate
                 # forms, all in one batch but all of them expressions.
-                if any(entry.get(key) is not None for key in
-                       ("from", "to", "period", "greater_than", "less_than")):
+                if entry.get("period") is not None:
+                    total += PERIOD_PROBE_COST
+                elif any(entry.get(key) is not None for key in
+                         ("from", "to", "greater_than", "less_than")):
+                    # A bound may still turn out to be a date, but the
+                    # common case is a number and one probe.
                     total += RANGE_PROBE_COST
                 for operator in ("values", "exclude", "add", "intersect"):
                     stated = entry.get(operator)
