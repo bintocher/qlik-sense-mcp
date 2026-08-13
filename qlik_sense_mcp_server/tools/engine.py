@@ -194,6 +194,7 @@ def engine_query(
     queries: Optional[List[Dict[str, Any]]] = None,
     group_by: Optional[List[str]] = None,
     metrics: Optional[List[Dict[str, Any]]] = None,
+    measures: Optional[List[Dict[str, Any]]] = None,
     filters: Optional[List[Dict[str, Any]]] = None,
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
@@ -337,6 +338,7 @@ def engine_query(
         queries = [{
             "group_by": group_by or [],
             "metrics": metrics or [],
+            "measures": measures or [],
             "filters": filters or [],
             "sort_by": sort_by,
             "sort_order": sort_order,

@@ -192,12 +192,30 @@ class EngineQueriesMixin:
         return escape_qlik_field_name(field), None
 
     @staticmethod
-    def _needs_fraction(query_id):
-        return {"id": query_id,
-                "error": "agg='fractile' names no p.",
-                "error_category": "invalid_argument",
-                "hint": ('Add "p": 0.85 for the 85th percentile. Qlik takes '
-                         'p between 0 and 1.')}
+    def _check_fraction(fraction, query_id):
+        """A percentile needs a fraction, and one Qlik can use.
+
+        Measured: `Fractile([days], 1.5)` answers "-" rather than an
+        error, which reads as a value. So the bound is checked here.
+        """
+        if fraction is None:
+            return {"id": query_id,
+                    "error": "agg='fractile' names no p.",
+                    "error_category": "invalid_argument",
+                    "hint": ('Add "p": 0.85 for the 85th percentile. Qlik '
+                             'takes p between 0 and 1.')}
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+            return {"id": query_id,
+                    "error": f"p={fraction!r} is not a number.",
+                    "error_category": "invalid_argument"}
+        if not 0 <= fraction <= 1:
+            return {"id": query_id,
+                    "error": f"p={fraction} is not between 0 and 1.",
+                    "error_category": "invalid_argument",
+                    "hint": ("0 is the smallest value, 1 the largest, 0.5 the "
+                             "median. Qlik answers a fraction outside that "
+                             "with a dash rather than an error.")}
+        return None
 
     @staticmethod
     def _write_metric(metric, modifier, query_id):
@@ -239,8 +257,11 @@ class EngineQueriesMixin:
                     "hint": ("For a calculation this vocabulary cannot "
                              "state, write the expression in `measures`, or "
                              "use engine_create_hypercube.")}
-            if aggregation == "fractile" and fraction is None:
-                return {}, EngineQueriesMixin._needs_fraction(query_id)
+            if aggregation == "fractile":
+                refusal = EngineQueriesMixin._check_fraction(
+                    fraction, query_id)
+                if refusal:
+                    return {}, refusal
             expression = AGGREGATIONS[aggregation].format(
                 modifier=prefix.rstrip() if prefix else "",
                 field=field, p=fraction).replace("(  ", "(").replace("( ", "(")
@@ -284,8 +305,10 @@ class EngineQueriesMixin:
                          if aggregation == "count_distinct" else
                          "For anything else, write the expression in "
                          "`measures`.")}
-        if aggregation == "fractile" and fraction is None:
-            return {}, EngineQueriesMixin._needs_fraction(query_id)
+        if aggregation == "fractile":
+            refusal = EngineQueriesMixin._check_fraction(fraction, query_id)
+            if refusal:
+                return {}, refusal
 
         per_fields = [per] if isinstance(per, str) else list(per or [])
         if not per_fields:
@@ -394,15 +417,25 @@ class EngineQueriesMixin:
                     return [], failed
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
-            modifier = own
-            if not modifier and FILTER_MARKER in expression:
+            # `own`, never `modifier`: writing back into the parameter made
+            # the first measure with its own filter the base for the next
+            # one, so a measure that stated no filter inherited its
+            # neighbour's instead of the query's — silently, and with a
+            # plausible number to show for it.
+            # A measure that stated `filters: []` said "no filter" — the
+            # marker then has nothing to hold and comes out. Only a marker
+            # with no filter stated anywhere is a mistake worth refusing.
+            if own_applied is not None and not own:
+                expression = expression.replace(FILTER_MARKER, "").replace(
+                    "(  ", "(").replace("( ", "(")
+            elif not own and FILTER_MARKER in expression:
                 return [], {"id": query_id, "error": (
                     f"Measure {expression!r} marks a place for a filter, but "
                     f"the query states none."),
                     "error_category": "invalid_argument",
                     "hint": ("Add `filters`, or drop the marker — Qlik has no "
                              "meaning for it and would read it as text.")}
-            if modifier:
+            if own:
                 if FILTER_MARKER not in expression:
                     return [], {"id": query_id, "error": (
                         f"Measure {expression!r} is written by hand and this "
@@ -420,7 +453,7 @@ class EngineQueriesMixin:
                             "every row while the reply said the period had "
                             "been applied."
                         )}
-                expression = expression.replace(FILTER_MARKER, modifier)
+                expression = expression.replace(FILTER_MARKER, own)
             written = {"expression": expression,
                        "label": str(measure.get("label") or expression)}
             if own_applied is not None:
