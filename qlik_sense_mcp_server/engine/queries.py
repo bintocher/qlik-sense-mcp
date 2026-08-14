@@ -544,6 +544,9 @@ class EngineQueriesMixin:
                          '"sum"}, {"field": "OrderId", "agg": '
                          '"count_distinct"}].')}
 
+        refusal = _yes_or_no(metric.get("total"), "total", query_id)
+        if refusal:
+            return {}, refusal
         if metric.get("total") and metric.get("total_except") is not None:
             return {}, {"id": query_id, "error": (
                 "total and total_except say different things about the same "
@@ -551,6 +554,11 @@ class EngineQueriesMixin:
                 "error_category": "invalid_argument",
                 "hint": ("total ignores the grouping entirely; total_except "
                          "keeps the fields it names. State one of them.")}
+        # Stated on the operation, it belongs to every part of it: a share
+        # of the whole is the same share whichever aggregation is written
+        # first. A part that says it for itself keeps its own.
+        shared_total = {key: metric[key] for key in ("total", "total_except")
+                        if metric.get(key) is not None}
 
         written = []
         part_filters = []
@@ -596,6 +604,9 @@ class EngineQueriesMixin:
                 own = built.get("modifier", "")
                 own_applied = built.get("applied", [])
                 own_scope = built.get("scope")
+            if shared_total and not any(part.get(key) is not None
+                                        for key in ("total", "total_except")):
+                part = dict(part, **shared_total)
             one, failure = EngineQueriesMixin._write_metric(
                 part, own, query_id, slice_for, inherited_scope=stated_scope)
             if failure:

@@ -1506,11 +1506,13 @@ class TestAPeriodSaysWhenItsFormWasNotProven:
         assert "note" not in result["applied"][0]
 
 
-class TestABoundTooLargeToWrite:
-    """Past 2**53 a float no longer holds every integer, and a bound
-    written from it takes in a neighbouring value."""
+class TestABoundThatShiftsWhenWritten:
+    """Not a size limit: 2**54 is written exactly, while 2**53 + 1 comes
+    back one less than it went in and the filter takes in a neighbouring
+    row."""
 
-    @pytest.mark.parametrize("bound", [2 ** 53 + 1, -(2 ** 53) - 2, 1e300])
+    @pytest.mark.parametrize("bound", [2 ** 53 + 1, -(2 ** 53) - 1,
+                                       10 ** 300])
     def test_it_is_refused(self, bound):
         result = _Engine(values=("North",)).build_filters(
             1, "app", [{"field": "price", "greater_than": bound}])
@@ -1546,8 +1548,9 @@ class TestABoundWrittenAsText:
     """A bound may be written as text - a documented form - and the number
     inside it shifts exactly the same way."""
 
-    @pytest.mark.parametrize("bound", ["9007199254740993", " 9007199254740994 ",
-                                       "1e300"])
+    @pytest.mark.parametrize("bound", ["9007199254740993", " 1e300 ",
+                                       "9007199254740993.0",
+                                       "9.007199254740993e15"])
     def test_it_is_measured_too(self, bound):
         result = _Engine(values=("North",)).build_filters(
             1, "app", [{"field": "price", "greater_than": bound}])
