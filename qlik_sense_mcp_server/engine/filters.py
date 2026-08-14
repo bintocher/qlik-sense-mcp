@@ -138,6 +138,18 @@ def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
                  "for fewer values at a time.")}
 
 
+def _deeper_than(value: Any, limit: int, depth: int = 0) -> bool:
+    """Whether a value nests deeper than a limit, without walking it all."""
+    if depth > limit:
+        return True
+    if isinstance(value, dict):
+        return any(_deeper_than(inner, limit, depth + 1)
+                   for inner in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_deeper_than(inner, limit, depth + 1) for inner in value)
+    return False
+
+
 def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
            counting: bool = False) -> Dict[str, Any]:
     """How much text, how many values and how deep a description carries.
@@ -161,7 +173,13 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         return tally
 
     if counting == "item" and isinstance(value, (list, tuple, dict)):
-        # One value, whatever shape it has.
+        # One value, whatever shape it has - but its depth is measured
+        # first: turning a deeply nested container into text recurses as
+        # far as the nesting goes.
+        if _deeper_than(value, MAX_FILTER_DEPTH):
+            tally["too_deep"] = True
+            tally["done"] = True
+            return tally
         text = str(value)
         tally["values"] += 1
         tally["chars"] += len(text)
@@ -173,8 +191,10 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         return tally
 
     if isinstance(value, (dict, list, tuple)):
-        members = (list(value.items()) if isinstance(value, dict)
-                   else [(None, item) for item in value])
+        # Walked as it comes: building a list of the members first costs
+        # the memory this ceiling exists to bound.
+        members = (value.items() if isinstance(value, dict)
+                   else ((None, item) for item in value))
         for key, inner in members:
             tally["pieces"] += 1
             if tally["pieces"] > MAX_FILTER_PIECES:
@@ -186,7 +206,10 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
             # The list under `values` is a list of values; each member of
             # it is one value, container or not.
             if key in VALUE_KEYS if key is not None else False:
-                inside = "list"
+                # A list under the key holds values; a container written
+                # there directly is itself the one value.
+                inside = ("list" if isinstance(inner, (list, tuple))
+                          else "item")
             elif counting == "list":
                 inside = "item"
             else:
