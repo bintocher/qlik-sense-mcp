@@ -544,6 +544,14 @@ class EngineQueriesMixin:
                          '"sum"}, {"field": "OrderId", "agg": '
                          '"count_distinct"}].')}
 
+        if metric.get("total") and metric.get("total_except") is not None:
+            return {}, {"id": query_id, "error": (
+                "total and total_except say different things about the same "
+                "metric."),
+                "error_category": "invalid_argument",
+                "hint": ("total ignores the grouping entirely; total_except "
+                         "keeps the fields it names. State one of them.")}
+
         written = []
         part_filters = []
         for position, part in enumerate(parts):

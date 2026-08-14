@@ -1540,3 +1540,34 @@ class TestAFormNobodyMeasured:
         result = engine.build_filters(1, "app", [{"field": "F",
                                                   "period": "2011"}])
         assert result["error_category"] == "invalid_period"
+
+
+class TestABoundWrittenAsText:
+    """A bound may be written as text - a documented form - and the number
+    inside it shifts exactly the same way."""
+
+    @pytest.mark.parametrize("bound", ["9007199254740993", " 9007199254740994 ",
+                                       "1e300"])
+    def test_it_is_measured_too(self, bound):
+        result = _Engine(values=("North",)).build_filters(
+            1, "app", [{"field": "price", "greater_than": bound}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_an_ordinary_text_bound_still_works(self):
+        engine = _Engine(values=("North",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "price", "greater_than": "400"}])
+        assert "error" not in result
+
+    def test_text_that_is_not_a_number_is_left_to_the_rest(self):
+        engine = _Engine(values=("North",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "price", "greater_than": "yesterday"}])
+        # Refused for what it is, not for how large it is.
+        assert "neither dates nor numbers" in result["error"]

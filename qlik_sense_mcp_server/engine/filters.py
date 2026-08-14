@@ -114,12 +114,23 @@ def _exactly_held(value: Any) -> bool:
     from it is a different bound - one that quietly takes in a neighbouring
     value.
     """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, str):
+        # A bound may be written as text - a documented form - and the
+        # number inside it shifts exactly the same way.
+        text = value.strip()
+        try:
+            value = int(text)
+        except ValueError:
+            try:
+                value = float(text)
+            except ValueError:
+                return True
+    if not isinstance(value, (int, float)):
         return True
     # Compared without going through float first: float(2**53 + 1) is
     # 2**53, which is exactly the shift being guarded against.
-    if isinstance(value, int):
-        return abs(value) <= 2 ** 53
     return abs(value) <= 2 ** 53
 
 
