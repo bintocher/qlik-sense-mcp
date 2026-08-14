@@ -209,7 +209,7 @@ def _written_length(value: Any, ceiling: int, max_depth: int,
                     doubles += 1
                 else:
                     plain += _written_letter(letter, False)
-                if plain > ceiling:
+                if plain + singles + doubles > ceiling:
                     break
             # Which quotes Python puts around it is known only once both
             # are counted, and the quotes themselves are cheap to add.
@@ -490,7 +490,11 @@ def _set_name(name: str) -> str:
     text = str(name).strip()
     if text.startswith("[") and text.endswith("]") and len(text) > 1:
         return text
-    if all(letter.isalnum() or letter == "_" for letter in text):
+    # A name of digits alone would read as one of Qlik's own identifiers -
+    # `{1}` is every record, `{2}` a set nobody named - so it goes in
+    # brackets even though it needs no other escaping.
+    if (text and not text.isdigit()
+            and all(letter.isalnum() or letter == "_" for letter in text)):
         return text
     return f"[{text}]"
 
@@ -549,6 +553,11 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
         if not name:
             return {"error": f"scope names an empty {key}.",
                     "error_category": "invalid_argument"}
+        if "]" in name.strip("[]"):
+            return {"error": (
+                f"scope names a {key} holding ']', which cannot be written "
+                f"in a set: Qlik has no escape for it."),
+                "error_category": "invalid_argument"}
         return {"identifier": _set_name(name)}
     # Steps through the selection history: `$1` back, `$_1` forward. Two
     # keys rather than one signed number, because Qlik spells them with

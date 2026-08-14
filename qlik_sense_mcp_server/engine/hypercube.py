@@ -1047,14 +1047,22 @@ class EngineHypercubeMixin:
                     f"re-run with a smaller limit, or narrow the query with "
                     f"set analysis."
                 )
-            elif total_rows_on_server > rows_fetched:
+            elif total_rows_on_server > page_offset + rows_fetched:
+                # Counted from where the page starts: the last page of a
+                # walk holds fewer rows than the server has in total, and
+                # calling that "truncated" sends the caller round again.
                 if sort_column_index is not None:
                     # Already a ranked query: the truncation is intended,
                     # the caller asked for the top/bottom N of a bigger set.
                     truncation_warning = (
-                        f"Showing the {rows_fetched} "
-                        f"{'highest' if sort_direction == -1 else 'lowest'} "
-                        f"rows by '{column_names[sort_column_index]}' out of "
+                        f"Showing "
+                        + (f"rows {page_offset + 1}-"
+                           f"{page_offset + rows_fetched} by "
+                           if page_offset else
+                           f"the {rows_fetched} "
+                           f"{'highest' if sort_direction == -1 else 'lowest'} "
+                           f"rows by ")
+                        + f"'{column_names[sort_column_index]}' out of "
                         f"{total_rows_on_server} total rows on the server. "
                         f"This is expected for a ranked query — raise `limit` "
                         f"only if you genuinely need more of the ranking."
