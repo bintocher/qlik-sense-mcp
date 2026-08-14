@@ -775,6 +775,7 @@ class EngineFiltersMixin:
         both = (entry.get("matching") is not None
                 and entry.get("not_matching") is not None)
         pieces = []
+        inner_notes: List[str] = []
         for key, function in (("matching", "P"),
                               ("not_matching", "P" if both else "E")):
             wanted = entry.get(key)
@@ -804,6 +805,12 @@ class EngineFiltersMixin:
                 scope={"ignore_selections": True} if base == "all" else None)
             if inner.get("error"):
                 return inner
+            # What the inner filters could not prove, the element set
+            # cannot prove either: a period whose form went unmeasured
+            # inside `matching` picks its rows just as blindly.
+            inner_notes.extend(applied["note"]
+                               for applied in inner.get("applied") or []
+                               if applied.get("note"))
             of_field = bare_field_name(str(wanted.get("of_field") or field))
             if "[" in of_field or "]" in of_field:
                 return {"error": (
@@ -869,8 +876,9 @@ class EngineFiltersMixin:
         note = _unproven(counted[0] if counted else {},
                          f"Whether any value of {name} satisfies the "
                          f"condition stated for it")
-        if note:
-            outcome["note"] = note
+        notes = ([note] if note else []) + inner_notes
+        if notes:
+            outcome["note"] = " ".join(notes)
         return outcome
 
     def pattern_modifier(self, app_handle: int, field: str, kind: str,
@@ -1140,9 +1148,10 @@ class EngineFiltersMixin:
                         f"period and " + ", ".join(sorted(bounds_named))
                         + " at once."),
                     "error_category": "invalid_filter",
-                    "hint": ("A period names both ends; a bound beside it "
-                             "would replace one of them and widen what was "
-                             "asked for."),
+                    "hint": ("A period names both ends. A bound beside it "
+                             "replaces one of them, so the answer covers "
+                             "some other stretch of time than the one "
+                             "named."),
                 }
 
             # One filter, one kind of condition. Stating several is a
