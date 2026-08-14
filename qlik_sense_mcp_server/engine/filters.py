@@ -145,7 +145,9 @@ def _plain_number(value: Any) -> Optional[str]:
     """
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # An integer past what a double holds raises rather than rounds;
+        # either way it is not a bound Qlik can compare against.
         return None
     if not math.isfinite(number):
         return None
@@ -1128,6 +1130,21 @@ class EngineFiltersMixin:
                 }
             # Which of the set operators this filter uses, if any. More
             # than one at a time is a contradiction, not a combination.
+            bounds_named = [key for key in ("from", "to", "greater_than",
+                                            "less_than")
+                            if entry.get(key) is not None]
+            if entry.get("period") is not None and bounds_named:
+                return {
+                    "error": (
+                        f"Filter on {escape_qlik_field_name(field)} states a "
+                        f"period and " + ", ".join(sorted(bounds_named))
+                        + " at once."),
+                    "error_category": "invalid_filter",
+                    "hint": ("A period names both ends; a bound beside it "
+                             "would replace one of them and widen what was "
+                             "asked for."),
+                }
+
             # One filter, one kind of condition. Stating several is a
             # contradiction rather than a combination, and answering the
             # first one silently drops the rest — with a plausible number
