@@ -117,32 +117,51 @@ MAX_FILTER_VALUES = 1000
 MAX_FILTER_DEPTH = 20
 
 
-def _weigh(value: Any, depth: int = 0) -> Dict[str, Any]:
-    """How much text, how many pieces and how deep a description carries.
+VALUE_KEYS = ("values", "exclude", "add", "intersect")
 
-    Every kind of value counts: a number reaches Qlik as the text of that
-    number, and a piece hidden under twenty layers of lists reaches it just
-    the same. An unmeasured depth is not a safe depth - it is a way past
-    every ceiling here.
+
+def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
+           counting: bool = False) -> Dict[str, Any]:
+    """How much text, how many values and how deep a description carries.
+
+    Stops as soon as any ceiling is passed: walking a collection of
+    arbitrary size to find out that it is too large costs exactly what the
+    ceiling exists to prevent.
+
+    Only the values are counted as values - a field name is not one - but
+    every piece of text is weighed, because all of it reaches Qlik.
     """
+    if tally is None:
+        tally = {"chars": 0, "values": 0, "too_deep": False, "longest": 0,
+                 "done": False}
+    if tally["done"]:
+        return tally
     if depth > MAX_FILTER_DEPTH:
-        return {"chars": 0, "pieces": 0, "too_deep": True, "longest": 0}
+        tally["too_deep"] = True
+        tally["done"] = True
+        return tally
     if isinstance(value, dict):
-        parts = list(value.values())
-    elif isinstance(value, (list, tuple)):
-        parts = list(value)
-    else:
-        text = "" if value is None else str(value)
-        return {"chars": len(text), "pieces": 1, "too_deep": False,
-                "longest": len(text)}
-    total = {"chars": 0, "pieces": 0, "too_deep": False, "longest": 0}
-    for part in parts:
-        weight = _weigh(part, depth + 1)
-        total["chars"] += weight["chars"]
-        total["pieces"] += weight["pieces"]
-        total["too_deep"] = total["too_deep"] or weight["too_deep"]
-        total["longest"] = max(total["longest"], weight["longest"])
-    return total
+        for key, inner in value.items():
+            _weigh(inner, depth + 1, tally, counting or key in VALUE_KEYS)
+            if tally["done"]:
+                return tally
+        return tally
+    if isinstance(value, (list, tuple)):
+        for inner in value:
+            _weigh(inner, depth + 1, tally, counting)
+            if tally["done"]:
+                return tally
+        return tally
+    text = "" if value is None else str(value)
+    tally["chars"] += len(text)
+    tally["longest"] = max(tally["longest"], len(text))
+    if counting:
+        tally["values"] += 1
+    if (tally["longest"] > MAX_VALUE_CHARS
+            or tally["chars"] > MAX_FILTER_CHARS
+            or tally["values"] > MAX_FILTER_VALUES):
+        tally["done"] = True
+    return tally
 
 
 def _too_much(description: Any) -> Optional[Dict[str, Any]]:
@@ -160,19 +179,19 @@ def _too_much(description: Any) -> Optional[Dict[str, Any]]:
             f"longer than the {MAX_VALUE_CHARS} this server sends."),
             "error_category": "limit_exceeded",
             "hint": "Field values and expressions are short by nature."}
+    if weight["values"] > MAX_FILTER_VALUES:
+        return {"error": (
+            f"The filters name more than {MAX_FILTER_VALUES} values, over "
+            f"what this server checks in one call."),
+            "error_category": "limit_exceeded",
+            "hint": "Every value is checked against the field before use."}
     if weight["chars"] > MAX_FILTER_CHARS:
         return {"error": (
-            f"The filters together carry {weight['chars']} characters, over "
-            f"the {MAX_FILTER_CHARS} this server sends."),
+            f"The filters together carry more than {MAX_FILTER_CHARS} "
+            f"characters, over what this server sends."),
             "error_category": "limit_exceeded",
             "hint": ("Many short values build one long modifier; ask for "
                      "fewer at a time.")}
-    if weight["pieces"] > MAX_FILTER_VALUES:
-        return {"error": (
-            f"The filters name {weight['pieces']} pieces, over the "
-            f"{MAX_FILTER_VALUES} this server checks in one call."),
-            "error_category": "limit_exceeded",
-            "hint": "Every value is checked against the field before use."}
     return None
 
 
@@ -1485,6 +1504,14 @@ class EngineFiltersMixin:
                         "scope": identifier}
             return {"modifier": "", "applied": []}
         modifier = "{" + identifier + "<" + ",".join(parts) + ">}"
+        if len(modifier) > MAX_FILTER_CHARS:
+            return {"error": (
+                f"The filters build a modifier of {len(modifier)} "
+                f"characters, over the {MAX_FILTER_CHARS} this server "
+                f"sends."),
+                "error_category": "limit_exceeded",
+                "hint": ("Quoting makes a value longer than it was written; "
+                         "ask for fewer values at a time.")}
         outcome = {"modifier": modifier, "applied": applied}
         if identifier:
             outcome["scope"] = identifier
