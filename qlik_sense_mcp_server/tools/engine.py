@@ -369,6 +369,19 @@ def engine_query(
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
+    THE APP'S OWN MEASURES
+        `get_app_details` carries `library`: the measures and dimensions
+        the author of this app defined, with their expressions and their
+        descriptions. When one of them answers the question, name it
+        instead of assembling the aggregation yourself:
+
+            {"measures": [{"master": "Sales MUSD"}]}
+
+        This is what the dashboard itself calls that number. Building it
+        by hand risks a neighbouring field or a different aggregation -
+        an answer that looks reasonable and is not the one anyone here
+        would recognise.
+
     SETS
         `scope` says what a query counts over before any filter narrows
         it: `{"ignore_selections": true}` for the whole model,
