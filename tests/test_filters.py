@@ -1959,15 +1959,28 @@ class TestARememberedFormIsStillMeasured:
 
 
 class TestAContainerIsMeasuredExactly:
+    def test_the_count_matches_what_is_written(self):
+        """Measured against the writing itself, not against a guess."""
+        from qlik_sense_mcp_server.engine.filters import (
+            _written_length, quote_value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+
+        for value in (["a" * 100] * 20, {"k": "v" * 50}, [1, 2, "three"],
+                      ["it's", "fine"]):
+            chars, quotes = _written_length(value, MAX_VALUE_CHARS,
+                                            MAX_FILTER_DEPTH)
+            written = len(quote_value(value))
+            assert written <= chars + quotes + 2 <= written + 2
+
     def test_the_count_matches_the_text(self):
         from qlik_sense_mcp_server.engine.filters import (
-            _text_length, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+            _written_length, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
 
         # Never under the truth, and never far over it: a quote inside a
         # value changes which quotes Python puts around it, which is worth
         # one character and not worth a second walk of the value.
         for value in (["x" * 2000], {"a": "b'c"}, [1, 2, ["three"]]):
-            counted = _text_length(value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+            counted = _written_length(value, MAX_VALUE_CHARS,
+                                      MAX_FILTER_DEPTH)[0]
             assert len(str(value)) <= counted <= len(str(value)) + 2
 
     def test_half_the_ceiling_still_passes(self):
@@ -1980,3 +1993,30 @@ class TestAContainerIsMeasuredExactly:
         result = engine.build_filters(1, "app", [
             {"field": "Region", "values": [["x" * (MAX_VALUE_CHARS // 2)]]}])
         assert "error" not in result
+
+
+class TestMeasuringStopsAtTheFirstExcess:
+    def test_a_wide_container_costs_nothing_to_refuse(self):
+        import time
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        wide = {f"k{index}": "v" * 50 for index in range(300_000)}
+        started = time.monotonic()
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [wide]}])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+
+    def test_a_container_of_plain_strings_is_measured_whole(self):
+        """Its members are written in quotes, and those quotes are doubled
+        again by the quoting around the container."""
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        members = ["x" * 100] * (MAX_VALUE_CHARS // 100)
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [members]}])
+        assert result["error_category"] == "limit_exceeded"

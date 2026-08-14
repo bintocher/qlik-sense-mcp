@@ -138,63 +138,43 @@ def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
                  "for fewer values at a time.")}
 
 
-def _count_quotes(value: Any, ceiling: int, max_depth: int,
-                  depth: int = 0) -> int:
-    """How many single quotes a value carries, counted without building it."""
-    if depth > max_depth:
-        return 0
-    if isinstance(value, dict):
-        total = 0
-        for key, inner in value.items():
-            total += _count_quotes(key, ceiling, max_depth, depth + 1)
-            total += _count_quotes(inner, ceiling, max_depth, depth + 1)
-            if total > ceiling:
-                return total
-        return total
-    if isinstance(value, (list, tuple)):
-        total = 0
-        for inner in value:
-            total += _count_quotes(inner, ceiling, max_depth, depth + 1)
-            if total > ceiling:
-                return total
-        return total
-    text = value if isinstance(value, str) else repr(value)
-    return text.count("'")
+def _written_length(value: Any, ceiling: int, max_depth: int,
+                    depth: int = 0) -> Optional[Tuple[int, int]]:
+    """The length of a value as text, and how many quotes it holds.
 
-
-def _text_length(value: Any, ceiling: int, max_depth: int,
-                 depth: int = 0) -> Optional[int]:
-    """How long this value reads as text, counted without building it.
-
-    Stops as soon as the ceiling is passed, and answers None when the
-    value nests deeper than allowed - a container of any width or depth is
-    measured for the price of the part that already broke the rule.
+    Both are counted in one walk that stops at the first excess: the text
+    is never built, and a container of any width costs the price of the
+    part that already broke the rule. Answers None when the value nests
+    deeper than allowed.
     """
     if depth > max_depth:
         return None
     if isinstance(value, (list, tuple, dict)):
-        # Brackets, and the commas between the members.
-        total = 2
-        members = (value.items() if isinstance(value, dict) else value)
+        chars, quotes = 2, 0
         first = True
+        members = (value.items() if isinstance(value, dict) else value)
         for member in members:
             if not first:
-                total += 2
+                chars += 2
             first = False
-            parts = member if isinstance(value, dict) else (member,)
-            for part in parts:
-                length = _text_length(part, ceiling, max_depth, depth + 1)
-                if length is None:
+            pieces = member if isinstance(value, dict) else (member,)
+            for position, piece in enumerate(pieces):
+                inner = _written_length(piece, ceiling, max_depth, depth + 1)
+                if inner is None:
                     return None
-                total += length + (2 if isinstance(value, dict)
-                                   and part is parts[0] else 0)
-                if total > ceiling:
-                    return total
-        return total
+                chars += inner[0] + (2 if isinstance(value, dict)
+                                     and position == 0 else 0)
+                quotes += inner[1]
+                if chars > ceiling:
+                    return chars, quotes
+        return chars, quotes
     if isinstance(value, str):
-        # As it will be written: in quotes, with the quotes inside doubled.
-        return len(value) + value.count("'") + 2
-    return len(repr(value))
+        # Inside a container Python writes it in quotes, and those quotes
+        # are doubled by the quoting around the container just like the
+        # ones the value already held.
+        return len(value) + 2, value.count("'") + 2
+    text = repr(value)
+    return len(text), text.count("'")
 
 
 def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
@@ -224,14 +204,13 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         # see - the text of the container - but that text is never built:
         # it is added up piece by piece, and the walk stops at the first
         # excess.
-        length = _text_length(value, MAX_VALUE_CHARS,
-                              MAX_FILTER_DEPTH - depth)
-        if length is not None:
-            # Quoted whole: two quotes around it, and the quotes inside it
+        written = _written_length(value, MAX_VALUE_CHARS,
+                                  MAX_FILTER_DEPTH - depth)
+        length = None
+        if written is not None:
+            # Quoted whole: two quotes around it, and every quote inside it
             # doubled - not every character.
-            quotes = _count_quotes(value, MAX_VALUE_CHARS,
-                                   MAX_FILTER_DEPTH - depth)
-            length = length + quotes + 2
+            length = written[0] + written[1] + 2
         tally["values"] += 1
         if length is None:
             tally["too_deep"] = True
@@ -875,10 +854,6 @@ class EngineFiltersMixin:
 
         # Every candidate disagreed with the reference: whichever went out
         # would select some other set of days than the one asked for, and a
-        # number counted over the wrong days is the failure this whole
-        # measurement exists to prevent.
-        # Nothing agreed with the reference. Whichever form went out would
-        # select some other set of days than the one asked for, and a
         # number counted over the wrong days is the failure this whole
         # measurement exists to prevent.
         self._forget_form(app_id, field)
