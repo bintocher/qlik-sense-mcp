@@ -108,6 +108,49 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
         return None
 
 
+# What one filter value may be, and what all of them together may be.
+# A modifier is built from them and read by Qlik on the connection every
+# query shares.
+MAX_VALUE_CHARS = 4096
+MAX_FILTER_CHARS = 20000
+
+
+def _oversized(value: Any, depth: int = 0) -> Optional[str]:
+    """The complaint an over-long piece of a filter earns, or nothing."""
+    if depth > 20:
+        return None
+    if isinstance(value, str):
+        if len(value) > MAX_VALUE_CHARS:
+            return (f"a value of {len(value)} characters, longer than the "
+                    f"{MAX_VALUE_CHARS} this server sends")
+        return None
+    if isinstance(value, dict):
+        for inner in value.values():
+            found = _oversized(inner, depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(value, (list, tuple)):
+        for inner in value:
+            found = _oversized(inner, depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _total_size(value: Any, depth: int = 0) -> int:
+    """How many characters of text a filter description carries."""
+    if depth > 20:
+        return 0
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(_total_size(inner, depth + 1) for inner in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(_total_size(inner, depth + 1) for inner in value)
+    return 0
+
+
 def _exactly_held(value: Any) -> bool:
     """Whether the bound Qlik receives is the bound that was asked for.
 
@@ -1070,6 +1113,23 @@ class EngineFiltersMixin:
                 return resolved
             identifier = resolved["identifier"]
 
+        # Measured here rather than in one caller: both tools build their
+        # filters through this, and a value of a few megabytes holds the
+        # shared connection for as long as Qlik takes to read it.
+        complaint = _oversized(filters)
+        if complaint:
+            return {"error": f"A filter carries {complaint}.",
+                    "error_category": "limit_exceeded",
+                    "hint": "Field values and expressions are short by nature."}
+        together = _total_size(filters)
+        if together > MAX_FILTER_CHARS:
+            return {"error": (
+                f"The filters together carry {together} characters, over "
+                f"the {MAX_FILTER_CHARS} this server sends."),
+                "error_category": "limit_exceeded",
+                "hint": ("Many short values build one long modifier; ask "
+                         "for fewer at a time.")}
+
         parts: List[str] = []
         applied: List[Dict[str, Any]] = []
         for entry in filters or []:
@@ -1148,10 +1208,9 @@ class EngineFiltersMixin:
                         f"period and " + ", ".join(sorted(bounds_named))
                         + " at once."),
                     "error_category": "invalid_filter",
-                    "hint": ("A period names both ends. A bound beside it "
-                             "replaces one of them, so the answer covers "
-                             "some other stretch of time than the one "
-                             "named."),
+                    "hint": ("A period names both ends, and a bound beside "
+                             "it replaces one of them. State one or the "
+                             "other."),
                 }
 
             # One filter, one kind of condition. Stating several is a

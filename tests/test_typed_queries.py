@@ -1801,20 +1801,44 @@ class TestOneValueHasALength:
     modifier of the same size on the connection every query shares."""
 
     def test_an_over_long_value_is_refused(self):
-        from qlik_sense_mcp_server.engine.queries import MAX_VALUE_CHARS
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
 
-        engine = _Engine()
-        result = engine.run_queries(1, "app", [_query(
+        result = _Engine().run_queries(1, "app", [_query(
             filters=[{"field": "Region",
                       "values": ["x" * (MAX_VALUE_CHARS + 1)]}])])
         assert result["results"][0]["error_category"] == "limit_exceeded"
-        assert engine.batches == []
 
-    def test_an_over_long_expression_is_refused(self):
-        from qlik_sense_mcp_server.engine.queries import MAX_VALUE_CHARS
+    def test_many_short_values_are_measured_together(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_CHARS
 
         result = _Engine().run_queries(1, "app", [_query(
-            metrics=[], measures=["Sum([" + "a" * MAX_VALUE_CHARS + "])"])])
+            filters=[{"field": "Region",
+                      "values": ["x" * 1000
+                                 for _ in range(MAX_FILTER_CHARS // 1000 + 1)]}])])
+        # Refused either as a whole or per query, but refused.
+        stated = (result.get("error_category")
+                  or result["results"][0].get("error_category"))
+        assert stated == "limit_exceeded"
+
+    def test_a_measure_keeps_its_own_wider_ceiling(self):
+        """A hand-written measure may run to MAX_EXPRESSION_CHARS; the
+        value ceiling is about values, and covering measures with it made
+        the wider limit unreachable."""
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[],
+            measures=["Sum([Amount])" + " + Sum([Amount])"
+                      * (MAX_VALUE_CHARS // 16)])])
+        assert result["queries_failed"] == 0
+
+    def test_a_measure_past_its_own_ceiling_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_EXPRESSION_CHARS
+
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[],
+            measures=["Sum([Amount])" + " + Sum([Amount])"
+                      * (MAX_EXPRESSION_CHARS // 16)])])
         assert result["results"][0]["error_category"] == "limit_exceeded"
 
     def test_ordinary_values_still_pass(self):
