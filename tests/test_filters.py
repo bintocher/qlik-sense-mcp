@@ -1968,7 +1968,9 @@ class TestAContainerIsMeasuredExactly:
                       ["it's", "fine"], ['say "hi"'], ["both ' and \""],
                       ["back" + chr(92) + "slash"], ["O'Brien"] * 50,
                       ["line" + chr(10)], ["tab" + chr(9)],
-                      ["null" + chr(0)], ["zero" + chr(0x200b)]):
+                      ["null" + chr(0)], ["zero" + chr(0x200b)],
+                      ["emoji" + chr(0x1F600)], [chr(10) + chr(39)],
+                      ["it's" + chr(10)]):
             chars, quotes = _written_length(value, MAX_VALUE_CHARS,
                                             MAX_FILTER_DEPTH)
             assert chars + quotes + 2 == len(quote_value(value))
@@ -2022,3 +2024,19 @@ class TestMeasuringStopsAtTheFirstExcess:
         result = engine.build_filters(
             1, "app", [{"field": "Region", "values": [members]}])
         assert result["error_category"] == "limit_exceeded"
+
+
+class TestMeasuringNeverBuildsTheText:
+    def test_an_unprintable_value_is_measured_without_writing_it(self):
+        import time
+
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        # Four characters of writing for each one of these.
+        payload = chr(0) * (MAX_VALUE_CHARS * 100)
+        started = time.monotonic()
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [[payload]]}])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
