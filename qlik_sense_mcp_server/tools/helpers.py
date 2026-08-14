@@ -29,21 +29,31 @@ _LOG_REPLY_CHARS = 4000
 # head of a reply most carefully, so the category and the fix go before the
 # echo of the request and long before the timings.
 _ERROR_KEY_ORDER = (
-    "error_category", "error", "did_you_mean", "allowed_values",
-    "unknown_fields", "invalid_expressions", "available_columns",
-    "next_actions", "hint", "tool", "request",
+    "error_category", "error", "unknown_fields", "invalid_expressions",
+    "tool", "request",
 )
+
+# What a refusal does not carry: advice on what to do next, and lists the
+# caller can ask for itself. Deciding the next step is the caller's work -
+# the server states what is wrong and stops there. A suggested spelling is
+# worse than none: a name offered by the server is taken on trust and
+# rarely checked.
+_ADVICE_KEYS = ("hint", "next_actions", "did_you_mean", "allowed_values",
+                "available_values", "available_columns", "accepted_forms")
 
 
 def _err(msg: str, **extra: Any) -> str:
     """An error a caller can act on without a second guess.
 
-    Ordered deliberately: the category first, then what to do about it,
-    then the echo of what was sent. Timings and tracebacks last — they
-    matter to a human reading a log, not to whoever has to fix the call.
+    Ordered deliberately: the category first, what is wrong second, then
+    the echo of what was sent. No advice on what to do about it: choosing
+    the next step is the caller's work, and a list the caller might need
+    it can ask for with a call of its own.
     """
     payload = {"error": msg}
     payload.update(extra)
+    for key in _ADVICE_KEYS:
+        payload.pop(key, None)
 
     ordered = {key: payload[key] for key in _ERROR_KEY_ORDER if key in payload}
     for key, value in payload.items():
@@ -61,6 +71,24 @@ _BULK_KEYS = ("rows", "field_values", "values", "executions", "apps",
               "tasks", "objects", "sheets", "fields", "tables", "call_list")
 
 
+def _without_advice(value: Any) -> Any:
+    """The same reply, with the advice taken out of every refusal in it.
+
+    A batch carries its refusals inside `results`, so they never pass
+    through `_err`. The rule is the same wherever a refusal appears: state
+    what is wrong, and leave the next step to the caller.
+    """
+    if isinstance(value, list):
+        return [_without_advice(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    cleaned = {key: _without_advice(item) for key, item in value.items()}
+    if "error" in cleaned:
+        for key in _ADVICE_KEYS:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def _ok(obj: Any) -> str:
     """Serialise a successful reply: readable envelope, compact bulk.
 
@@ -72,6 +100,7 @@ def _ok(obj: Any) -> str:
     if not isinstance(obj, dict):
         return json.dumps(obj, indent=2, ensure_ascii=False)
 
+    obj = _without_advice(obj)
     compact = {}
     for key, value in obj.items():
         if key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:

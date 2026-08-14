@@ -81,7 +81,9 @@ class TestToolLayer:
         qrs = tool()
         result = self._call(task_id="t", name="n", repeat="minutely")
         assert result["error_category"] == "invalid_argument"
-        assert "hourly" in result["allowed_values"]
+        # The refusal names what is wrong and stops there: a caller that
+        # needs the list of options asks for it.
+        assert "minutely" in result["error"]
         assert not qrs.sent
 
 
