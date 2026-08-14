@@ -1013,7 +1013,8 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 @mcp.tool()
 @_timed
 @_engine_serialised
-def get_app_object(app_id: str, object_id: str) -> str:
+def get_app_object(app_id: str, object_id: str, limit: int = 50,
+                   offset: int = 0) -> str:
     """
     Read one chart in full: its definition and the data it currently
     shows.
@@ -1032,10 +1033,17 @@ def get_app_object(app_id: str, object_id: str) -> str:
     Args:
         app_id: application GUID.
         object_id: from `get_app_sheet_objects`.
+        limit: rows of the object's own data to return, 50 by default.
+            The definition and the expressions come back whole; it is the
+            data that is paged, because a live table holds thousands of
+            rows and the answer stops being readable long before it stops
+            being complete.
+        offset: row to start from. The reply carries `data_rows`,
+            `data_rows_total` and, while there is more, `next_offset`.
 
     Returns:
-        The object's whole `qLayout`, plus `measures`, `dimensions` and
-        `fields_used`. Read the expressions from `measures`: Engine does
+        The object's `qLayout` with one page of its data, plus `measures`,
+        `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does
         not put them in the layout, where `qMeasureInfo` carries only the
         fallback title, formatting and statistics. Master items are
         resolved to their library definitions. Computed data sits in
@@ -1094,6 +1102,34 @@ def get_app_object(app_id: str, object_id: str) -> str:
             # rather than pretending the object has no measures.
             logger.warning("GetProperties failed for %s: %s", object_id, prop_error)
             layout_result["properties_error"] = str(prop_error)
+        # The definition is what this tool is for and comes back whole;
+        # the data is paged. Measured on a live table: the whole reply ran
+        # to 111 thousand characters, nearly all of it rows.
+        if offset is not None and (isinstance(offset, bool)
+                                   or not isinstance(offset, int)
+                                   or offset < 0):
+            return _err(f"offset={offset!r} is not a row number.",
+                        error_category="invalid_argument",
+                        hint="Pass 0 or a positive integer, or omit it.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            return _err(f"limit={limit!r} is not a number of rows.",
+                        error_category="invalid_argument",
+                        hint="Pass a positive integer, or omit it.")
+        cube = ((layout_result.get("qLayout") or {}).get("qHyperCube") or {})
+        pages = cube.get("qDataPages") or []
+        if pages:
+            rows = [row for page in pages for row in (page.get("qMatrix") or [])]
+            shown = rows[offset:offset + limit]
+            cube["qDataPages"] = [{"qArea": {"qTop": offset, "qLeft": 0,
+                                             "qHeight": len(shown),
+                                             "qWidth": len(shown[0]) if shown
+                                             else 0},
+                                   "qMatrix": shown}]
+            layout_result["data_rows"] = len(shown)
+            layout_result["data_rows_total"] = (
+                (cube.get("qSize") or {}).get("qcy", len(rows)))
+            if offset + len(shown) < len(rows):
+                layout_result["next_offset"] = offset + len(shown)
         return _ok(layout_result)
     except Exception as ex:
         return _err(str(ex), app_id=app_id, object_id=object_id)
