@@ -1845,3 +1845,22 @@ class TestOneValueHasALength:
         result = _Engine().run_queries(1, "app", [_query(
             filters=[{"field": "Region", "values": ["North"]}])])
         assert result["queries_failed"] == 0
+
+
+class TestABatchIsCountedBeforeItIsWalked:
+    def test_a_huge_batch_is_refused_at_once(self):
+        import time
+
+        from qlik_sense_mcp_server.engine.queries import MAX_QUERIES_PER_CALL
+
+        engine = _Engine()
+        started = time.monotonic()
+        result = engine.run_queries(
+            1, "app", [_query()] * (MAX_QUERIES_PER_CALL * 10_000))
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+        assert engine.batches == []
+
+    def test_a_batch_within_the_cap_still_runs(self):
+        result = _Engine().run_queries(1, "app", [_query(), _query()])
+        assert result["queries_failed"] == 0

@@ -1134,6 +1134,15 @@ class EngineQueriesMixin:
         reason; the rest of the batch still answers.
         """
         started = time.monotonic()
+        # Counted before anything is walked: a batch already past the
+        # ceiling costs nothing to refuse.
+        if len(queries) > MAX_QUERIES_PER_CALL:
+            return {"error": (
+                f"{len(queries)} queries in one call; the cap is "
+                f"{MAX_QUERIES_PER_CALL}."),
+                "error_category": "limit_exceeded",
+                "hint": "Ask for fewer at a time."}
+
         expressions = sum(
             _listed(q.get("group_by") or q.get("dimensions"))
             + _metric_cost(q.get("metrics")) + _listed(q.get("measures"))

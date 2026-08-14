@@ -1829,3 +1829,30 @@ class TestAContainerIsOneValueAndMeasuredAsOne:
                         "values": ["North"] * MAX_FILTER_VALUES}],
             scope={"bookmark": "BM01"})
         assert "error" not in result
+
+
+class TestMeasuringCostsNothing:
+    """Every ceiling here is about what a request may cost; finding out
+    that a request is too large must not cost that much itself."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_deeply_nested_container_value_is_refused_not_raised(self):
+        """Turning it into text recurses as far as the nesting goes."""
+        buried = ["x"]
+        for _ in range(2000):
+            buried = [buried]
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": [buried]}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_container_written_straight_into_values_is_one_value(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": {"a": "x" * 5000}}])
+        assert result["error_category"] == "limit_exceeded"
