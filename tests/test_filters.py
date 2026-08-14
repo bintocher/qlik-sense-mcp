@@ -1264,10 +1264,12 @@ class TestWhatASetInACombinationMaySay:
         assert result["error_category"] == "invalid_filter"
 
     def test_a_bookmark_named_with_a_brace_keeps_its_name(self):
+        """Written in brackets, because a name Qlik cannot read plainly
+        needs them - measured: {My State} comes back as "'}' expected"."""
         result = self._engine().build_filters(1, "app", [], scope={
             "combine": "union", "of": [{"bookmark": "BM{1}"},
                                        {"current_selection": True}]})
-        assert result["modifier"] == "{(BM{1}) + ($)}"
+        assert result["modifier"] == "{([BM{1}]) + ($)}"
 
     def test_symmetric_difference_joins_two_sets(self):
         """Qlik applies it pairwise, so three sets would answer "in an odd
@@ -2035,6 +2037,46 @@ class TestMeasuringNeverBuildsTheText:
         engine = _Engine(values=("North",), date_fields=("F",))
         # Four characters of writing for each one of these.
         payload = chr(0) * (MAX_VALUE_CHARS * 100)
+        started = time.monotonic()
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [[payload]]}])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+
+
+class TestASetNameThatNeedsBrackets:
+    """Measured on the server: `{My State}` comes back as "'}' expected",
+    while `{[My State]}` is read."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("scope, written", [
+        ({"state": "My State"}, "{[My State]}"),
+        ({"bookmark": "BM 01"}, "{[BM 01]}"),
+        ({"state": "Compare", "bookmark": "BM01"}, "{Compare::BM01}"),
+        ({"state": "A B", "bookmark": "C D"}, "{[A B]::[C D]}"),
+        ({"bookmark": "[Already]"}, "{[Already]}"),
+        ({"bookmark": "BM01"}, "{BM01}"),
+    ])
+    def test_it_is_written_as_qlik_reads_it(self, scope, written):
+        result = self._engine().build_filters(1, "app", [], scope=scope)
+        assert result["modifier"] == written
+
+
+class TestCountingInOneWalk:
+    def test_an_unprintable_value_is_walked_once(self):
+        import time
+
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        payload = chr(0) * (MAX_VALUE_CHARS * 200)
         started = time.monotonic()
         result = engine.build_filters(
             1, "app", [{"field": "Region", "values": [[payload]]}])
