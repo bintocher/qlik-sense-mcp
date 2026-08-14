@@ -736,7 +736,16 @@ def get_app_field(
     if e:
         return e
     lim = min(max(limit or DEFAULT_FIELD_LIMIT, 1), MAX_FIELD_LIMIT)
-    off = max(offset or 0, 0)
+    # Refused, not clamped: a page before the first is a request nobody
+    # can answer, and the first page is the answer to a different one.
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         # Verify the field exists before reading values. The hypercube
@@ -858,7 +867,14 @@ def get_app_variables(
     if e:
         return e
     lim = min(max(limit or DEFAULT_FIELD_LIMIT, 1), MAX_FIELD_LIMIT)
-    off = max(offset or 0, 0)
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
     script_flag = None
     if created_in_script is not None:
         script_flag = _to_bool(created_in_script, None)

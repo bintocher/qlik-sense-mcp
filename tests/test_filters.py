@@ -164,12 +164,17 @@ class TestPeriodForm:
 
 
 class TestFormIsRemembered:
-    def test_the_second_period_on_a_field_costs_one_count(self):
+    def test_the_second_period_on_a_field_costs_two_counts(self):
+        """The remembered form still saves the other candidates, but it is
+        measured against the reference like any other: remembering that a
+        form worked once is not knowing it counts the right days for this
+        period."""
         engine = _Engine()
         engine.period_modifier(1, "app", "F", "2011", "2011")
+        first = len(engine.asked)
         engine.asked.clear()
         engine.period_modifier(1, "app", "F", "2012", "2012")
-        assert len(engine.asked) == 1
+        assert len(engine.asked) == 2 < first
 
     def test_forgetting_puts_the_measurement_back(self):
         engine = _Engine()
@@ -287,11 +292,13 @@ class TestFormMemoryExpires:
         assert len(engine.asked) > 1
 
     def test_within_the_window_it_is_still_reused(self):
+        """Reused means measured against the reference alone, without the
+        other candidate forms."""
         engine = _Engine()
         engine.period_modifier(1, "app", "F", "2011", "2011")
         engine.asked.clear()
         engine.period_modifier(1, "app", "F", "2012", "2012")
-        assert len(engine.asked) == 1
+        assert len(engine.asked) == 2
 
 
 class TestImpossibleBounds:
@@ -1919,4 +1926,57 @@ class TestLengthIsWhatQlikReceives:
     def test_an_ordinary_container_still_passes(self):
         result = self._engine().build_filters(
             1, "app", [{"field": "Region", "values": [["North"]]}])
+        assert "error" not in result
+
+
+class TestARememberedFormIsStillMeasured:
+    """Remembering that a form worked once is not knowing it counts the
+    right days for this period; trusting it outright let a period no form
+    agrees with through for as long as the memory lived."""
+
+    def test_a_remembered_form_that_no_longer_agrees_is_refused(self):
+        engine = _Engine(date_fields=("F",))
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": None, "number": 1, "is_numeric": True, "error": None}
+            for index, _ in enumerate(exprs)]
+        result = engine.period_modifier(1, "app", "F", "2012", "2012")
+        assert result["error_category"] == "invalid_period"
+
+    def test_the_memory_is_dropped_when_it_stops_agreeing(self):
+        engine = _Engine(date_fields=("F",))
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        assert engine._remembered_form("app", "F") is not None
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": None, "number": 1, "is_numeric": True, "error": None}
+            for index, _ in enumerate(exprs)]
+        engine.period_modifier(1, "app", "F", "2012", "2012")
+        assert engine._remembered_form("app", "F") is None
+
+
+class TestAContainerIsMeasuredExactly:
+    def test_the_count_matches_the_text(self):
+        from qlik_sense_mcp_server.engine.filters import (
+            _text_length, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+
+        # Never under the truth, and never far over it: a quote inside a
+        # value changes which quotes Python puts around it, which is worth
+        # one character and not worth a second walk of the value.
+        for value in (["x" * 2000], {"a": "b'c"}, [1, 2, ["three"]]):
+            counted = _text_length(value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+            assert len(str(value)) <= counted <= len(str(value)) + 2
+
+    def test_half_the_ceiling_still_passes(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [
+            {"field": "Region", "values": [["x" * (MAX_VALUE_CHARS // 2)]]}])
         assert "error" not in result
