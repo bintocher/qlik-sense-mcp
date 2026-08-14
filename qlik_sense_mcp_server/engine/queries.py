@@ -756,6 +756,16 @@ class EngineQueriesMixin:
                          'is computed for. Without it, drop inner_agg for a '
                          'plain aggregation.')}
 
+        if not isinstance(inner_agg, str):
+            return {}, {"id": query_id, "error": (
+                f"inner_agg={inner_agg!r} is not the name of an "
+                f"aggregation."),
+                "error_category": "invalid_argument",
+                "hint": ('It is a name on its own: "inner_agg": "sum". The '
+                         'field it works on is `field`, and the grouping is '
+                         '`per`.'),
+                "allowed_values": sorted(
+                    name for name in AGGREGATIONS if name != "fractile")}
         inner_name = str(inner_agg).strip().lower()
         if inner_name not in AGGREGATIONS or inner_name == "fractile":
             return {}, {"id": query_id, "error": (
@@ -1466,6 +1476,13 @@ class EngineQueriesMixin:
                     "allowed_values": ["desc", "asc"]}
             sort_index = self._resolve_sort_column(
                 plan["sort_by"], dimensions, measures)
+            if not isinstance(plan["sort_by"], str):
+                return {"error": (
+                    f"sort_by={plan['sort_by']!r} is not one column name."),
+                    "error_category": "invalid_sort",
+                    "hint": ("A result is ordered by one column. Name it: "
+                             '"sort_by": "Revenue".'),
+                    "available_columns": column_names}
             if sort_index is None:
                 return {"error": (
                     f"sort_by={plan['sort_by']!r} names no column of this "

@@ -1345,6 +1345,62 @@ class EngineFiltersMixin:
         return {"modifier": combined, "applied": applied,
                 "scope": f"{operation} of {len(written)} sets"}
 
+    def _known_sets(self, app_handle: int) -> Dict[str, Any]:
+        """The bookmarks and alternate states this app actually has.
+
+        Qlik answers a set built on a name it does not know with a number
+        rather than with a word about it - measured: a query scoped to a
+        bookmark that is not there came back as a plain zero. Asked here so
+        the name can be refused instead.
+        """
+        bookmarks, states = set(), set()
+        try:
+            reply = self.send_request(
+                "GetBookmarks", [{"qTypes": ["bookmark"], "qData": {}}],
+                handle=app_handle)
+            for item in (reply or {}).get("qList") or []:
+                title = ((item.get("qMeta") or {}).get("title") or "").strip()
+                identity = ((item.get("qInfo") or {}).get("qId") or "").strip()
+                bookmarks.update(name for name in (title, identity) if name)
+        except Exception as exc:
+            logger.debug("Could not list bookmarks: %s", exc)
+            return {"known": False}
+        try:
+            layout = self.send_request("GetAppLayout", [], handle=app_handle)
+            states.update(
+                str(name).strip() for name in
+                ((layout or {}).get("qLayout") or {}).get("qStateNames") or []
+                if str(name).strip())
+        except Exception as exc:
+            logger.debug("Could not list states: %s", exc)
+        return {"known": True, "bookmarks": bookmarks, "states": states}
+
+    def _named_set_missing(self, app_handle: int,
+                           scope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """The refusal a bookmark or state name earns for not existing."""
+        wanted = {key: str(scope.get(key) or "").strip()
+                  for key in ("bookmark", "state")
+                  if str(scope.get(key) or "").strip()}
+        if not wanted:
+            return None
+        known = self._known_sets(app_handle)
+        if not known.get("known"):
+            # The question did not arrive; the query goes on unchecked
+            # rather than being refused over a failed check.
+            return None
+        for key, name in wanted.items():
+            have = known["bookmarks"] if key == "bookmark" else known["states"]
+            if name.strip("[]") in have or name in have:
+                continue
+            return {
+                "error": f"This app has no {key} named {name!r}.",
+                "error_category": "not_found",
+                "available_values": sorted(have)[:20],
+                "hint": ("Qlik answers a set built on a name it does not "
+                         "know with a plain zero rather than with an error."),
+            }
+        return None
+
     def build_filters(self, app_handle: int, app_id: str,
                       filters: List[Dict[str, Any]],
                       scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1372,6 +1428,9 @@ class EngineFiltersMixin:
             if resolved.get("error"):
                 return resolved
             identifier = resolved["identifier"]
+            missing = self._named_set_missing(app_handle, scope)
+            if missing:
+                return missing
 
         # Measured here rather than in one caller: both tools build their
         # filters through this, and a value of a few megabytes holds the
