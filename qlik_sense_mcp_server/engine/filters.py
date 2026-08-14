@@ -108,47 +108,72 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
         return None
 
 
-# What one filter value may be, and what all of them together may be.
-# A modifier is built from them and read by Qlik on the connection every
-# query shares.
+# What one filter value may be, what all of them together may be, how many
+# there may be, and how deep a description may nest. A modifier is built
+# from all of it and read by Qlik on the connection every query shares.
 MAX_VALUE_CHARS = 4096
 MAX_FILTER_CHARS = 20000
+MAX_FILTER_VALUES = 1000
+MAX_FILTER_DEPTH = 20
 
 
-def _oversized(value: Any, depth: int = 0) -> Optional[str]:
-    """The complaint an over-long piece of a filter earns, or nothing."""
-    if depth > 20:
-        return None
-    if isinstance(value, str):
-        if len(value) > MAX_VALUE_CHARS:
-            return (f"a value of {len(value)} characters, longer than the "
-                    f"{MAX_VALUE_CHARS} this server sends")
-        return None
+def _weigh(value: Any, depth: int = 0) -> Dict[str, Any]:
+    """How much text, how many pieces and how deep a description carries.
+
+    Every kind of value counts: a number reaches Qlik as the text of that
+    number, and a piece hidden under twenty layers of lists reaches it just
+    the same. An unmeasured depth is not a safe depth - it is a way past
+    every ceiling here.
+    """
+    if depth > MAX_FILTER_DEPTH:
+        return {"chars": 0, "pieces": 0, "too_deep": True, "longest": 0}
     if isinstance(value, dict):
-        for inner in value.values():
-            found = _oversized(inner, depth + 1)
-            if found:
-                return found
-        return None
-    if isinstance(value, (list, tuple)):
-        for inner in value:
-            found = _oversized(inner, depth + 1)
-            if found:
-                return found
+        parts = list(value.values())
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        text = "" if value is None else str(value)
+        return {"chars": len(text), "pieces": 1, "too_deep": False,
+                "longest": len(text)}
+    total = {"chars": 0, "pieces": 0, "too_deep": False, "longest": 0}
+    for part in parts:
+        weight = _weigh(part, depth + 1)
+        total["chars"] += weight["chars"]
+        total["pieces"] += weight["pieces"]
+        total["too_deep"] = total["too_deep"] or weight["too_deep"]
+        total["longest"] = max(total["longest"], weight["longest"])
+    return total
+
+
+def _too_much(description: Any) -> Optional[Dict[str, Any]]:
+    """The refusal a filter description earns for its size, or nothing."""
+    weight = _weigh(description)
+    if weight["too_deep"]:
+        return {"error": (
+            f"A filter nests deeper than {MAX_FILTER_DEPTH} levels."),
+            "error_category": "limit_exceeded",
+            "hint": ("Conditions inside conditions end somewhere; this one "
+                     "does not.")}
+    if weight["longest"] > MAX_VALUE_CHARS:
+        return {"error": (
+            f"A filter carries a value of {weight['longest']} characters, "
+            f"longer than the {MAX_VALUE_CHARS} this server sends."),
+            "error_category": "limit_exceeded",
+            "hint": "Field values and expressions are short by nature."}
+    if weight["chars"] > MAX_FILTER_CHARS:
+        return {"error": (
+            f"The filters together carry {weight['chars']} characters, over "
+            f"the {MAX_FILTER_CHARS} this server sends."),
+            "error_category": "limit_exceeded",
+            "hint": ("Many short values build one long modifier; ask for "
+                     "fewer at a time.")}
+    if weight["pieces"] > MAX_FILTER_VALUES:
+        return {"error": (
+            f"The filters name {weight['pieces']} pieces, over the "
+            f"{MAX_FILTER_VALUES} this server checks in one call."),
+            "error_category": "limit_exceeded",
+            "hint": "Every value is checked against the field before use."}
     return None
-
-
-def _total_size(value: Any, depth: int = 0) -> int:
-    """How many characters of text a filter description carries."""
-    if depth > 20:
-        return 0
-    if isinstance(value, str):
-        return len(value)
-    if isinstance(value, dict):
-        return sum(_total_size(inner, depth + 1) for inner in value.values())
-    if isinstance(value, (list, tuple)):
-        return sum(_total_size(inner, depth + 1) for inner in value)
-    return 0
 
 
 def _exactly_held(value: Any) -> bool:
@@ -1000,6 +1025,13 @@ class EngineFiltersMixin:
         `union`, 40 under `intersect` where one contains the other, and 0
         under `exclude` and `symmetric_difference` in the same case.
         """
+        # Weighed whole: each set is measured again as it is built, and
+        # measuring only the parts let a combination carry any number of
+        # them past the ceiling.
+        refusal = _too_much([filters, scope])
+        if refusal:
+            return refusal
+
         # A key stated beside the combination is still a key: accepting
         # `{"combine": ..., "of": ..., "bookmark": "BM"}` dropped the
         # bookmark silently and answered over a different set.
@@ -1115,20 +1147,12 @@ class EngineFiltersMixin:
 
         # Measured here rather than in one caller: both tools build their
         # filters through this, and a value of a few megabytes holds the
-        # shared connection for as long as Qlik takes to read it.
-        complaint = _oversized(filters)
-        if complaint:
-            return {"error": f"A filter carries {complaint}.",
-                    "error_category": "limit_exceeded",
-                    "hint": "Field values and expressions are short by nature."}
-        together = _total_size(filters)
-        if together > MAX_FILTER_CHARS:
-            return {"error": (
-                f"The filters together carry {together} characters, over "
-                f"the {MAX_FILTER_CHARS} this server sends."),
-                "error_category": "limit_exceeded",
-                "hint": ("Many short values build one long modifier; ask "
-                         "for fewer at a time.")}
+        # shared connection for as long as Qlik takes to read it. The scope
+        # is weighed with them - a bookmark name goes into the same
+        # modifier.
+        refusal = _too_much([filters, scope])
+        if refusal:
+            return refusal
 
         parts: List[str] = []
         applied: List[Dict[str, Any]] = []

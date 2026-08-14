@@ -1633,3 +1633,54 @@ class TestANoteFromInsideAnElementSet:
             {"field": "Client",
              "matching": {"filters": [{"field": "F", "period": "2011"}]}}])
         assert "could not be measured" in result["applied"][0]["note"]
+
+
+class TestNoWayPastTheCeilings:
+    """Every ceiling here guards the same thing: what Qlik has to read on
+    the connection every query shares. A way around one of them is a way
+    around all of them."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_depth_is_not_a_way_around_length(self):
+        """Unmeasured depth used to answer "nothing here", so a value of
+        any length passed by being wrapped in enough lists."""
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_DEPTH
+
+        buried = ["x" * 5000]
+        for _ in range(MAX_FILTER_DEPTH + 5):
+            buried = [buried]
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": buried}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_bookmark_name_is_weighed_too(self):
+        """It goes into the same modifier as the values do."""
+        result = self._engine().build_filters(
+            1, "app", [], scope={"bookmark": "b" * 5000})
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_numbers_are_weighed_like_text(self):
+        """A number reaches Qlik as the text of that number."""
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": list(range(5000))}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_combination_is_weighed_whole(self):
+        heavy = {"ignore_selections": True, "filters": [
+            {"field": "Region", "values": ["y" * 1000 for _ in range(15)]}]}
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [dict(heavy) for _ in range(3)]})
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_filter_passes_all_of_them(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"bookmark": "BM01"})
+        assert "error" not in result
