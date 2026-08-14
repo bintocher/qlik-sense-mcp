@@ -1966,7 +1966,9 @@ class TestAContainerIsMeasuredExactly:
 
         for value in (["a" * 100] * 20, {"k": "v" * 50}, [1, 2, "three"],
                       ["it's", "fine"], ['say "hi"'], ["both ' and \""],
-                      ["back\slash"], ["O'Brien"] * 50):
+                      ["back" + chr(92) + "slash"], ["O'Brien"] * 50,
+                      ["line" + chr(10)], ["tab" + chr(9)],
+                      ["null" + chr(0)], ["zero" + chr(0x200b)]):
             chars, quotes = _written_length(value, MAX_VALUE_CHARS,
                                             MAX_FILTER_DEPTH)
             assert chars + quotes + 2 == len(quote_value(value))

@@ -174,6 +174,12 @@ def _written_length(value: Any, ceiling: int, max_depth: int,
         # single quotes around it unless that would need escaping, double
         # quotes otherwise. Counted rather than guessed - the two differ by
         # enough to let a value past the ceiling or to refuse one under it.
+        if not value.isprintable():
+            # A newline is written as two characters, a null as four, and
+            # an invisible space as six. Rare enough to write out and
+            # measure exactly rather than to reproduce rule by rule.
+            written = repr(value)
+            return len(written), written.count("'")
         singles = value.count("'")
         doubles = value.count('"')
         backslashes = value.count("\\")
