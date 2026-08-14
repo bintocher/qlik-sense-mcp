@@ -1793,3 +1793,31 @@ class TestTotalOnTheOperationItself:
                 {"field": "Amount", "agg": "sum"},
                 {"field": "Amount", "agg": "sum"}]}])])
         assert result["results"][0]["error_category"] == "invalid_argument"
+
+
+class TestOneValueHasALength:
+    """The ceiling counts how many things a request names and says nothing
+    about how long each of them is. One value of a few megabytes builds a
+    modifier of the same size on the connection every query shares."""
+
+    def test_an_over_long_value_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_VALUE_CHARS
+
+        engine = _Engine()
+        result = engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Region",
+                      "values": ["x" * (MAX_VALUE_CHARS + 1)]}])])
+        assert result["results"][0]["error_category"] == "limit_exceeded"
+        assert engine.batches == []
+
+    def test_an_over_long_expression_is_refused(self):
+        from qlik_sense_mcp_server.engine.queries import MAX_VALUE_CHARS
+
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[], measures=["Sum([" + "a" * MAX_VALUE_CHARS + "])"])])
+        assert result["results"][0]["error_category"] == "limit_exceeded"
+
+    def test_ordinary_values_still_pass(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North"]}])])
+        assert result["queries_failed"] == 0

@@ -87,6 +87,42 @@ def _scope_is_readable(scope: Any, query_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+MAX_VALUE_CHARS = 4096
+
+
+def _oversized_value(query: Any, query_id: str, depth: int = 0
+                     ) -> Optional[Dict[str, Any]]:
+    """The refusal an over-long piece of a request earns, or nothing.
+
+    The ceiling counts how many things a request names; it says nothing
+    about how long each of them is. One value of a few megabytes builds a
+    modifier of the same size and holds the connection every query shares
+    while Engine reads it.
+    """
+    if depth > MAX_NESTING:
+        return None
+    if isinstance(query, str):
+        if len(query) > MAX_VALUE_CHARS:
+            return {"id": query_id, "error": (
+                f"A value of {len(query)} characters is longer than the "
+                f"{MAX_VALUE_CHARS} this server sends."),
+                "error_category": "limit_exceeded",
+                "hint": "Field values and expressions are short by nature."}
+        return None
+    if isinstance(query, dict):
+        for value in query.values():
+            found = _oversized_value(value, query_id, depth + 1)
+            if found:
+                return found
+        return None
+    if isinstance(query, (list, tuple)):
+        for value in query:
+            found = _oversized_value(value, query_id, depth + 1)
+            if found:
+                return found
+    return None
+
+
 def _narrowings(records, modifier):
     """Every filter recorded under a modifier, at any depth.
 
@@ -323,6 +359,10 @@ class EngineQueriesMixin:
                     query: Dict[str, Any], position: int) -> Dict[str, Any]:
         """Turn one typed query into dimensions, measures and a modifier."""
         query_id = str(query.get("id") or f"q{position + 1}")
+
+        oversized = _oversized_value(query, query_id)
+        if oversized:
+            return oversized
 
         stated_filters = query.get("filters")
         if stated_filters is not None and not isinstance(stated_filters,

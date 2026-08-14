@@ -1616,3 +1616,20 @@ class TestANumberTooLargeForADouble:
         result = _Engine(values=("North",)).build_filters(
             1, "app", [{"field": "price", "greater_than": "1" + "0" * 400}])
         assert result["error_category"] == "invalid_filter"
+
+
+class TestANoteFromInsideAnElementSet:
+    """A period whose form went unmeasured inside `matching` picks its rows
+    just as blindly as one at the top."""
+
+    def test_the_note_is_carried_out(self):
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": None, "number": 1, "is_numeric": True, "error": None}
+            for index, _ in enumerate(exprs)]
+        result = engine.build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"filters": [{"field": "F", "period": "2011"}]}}])
+        assert "could not be measured" in result["applied"][0]["note"]
