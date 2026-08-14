@@ -436,6 +436,17 @@ def engine_query(
             hint='One query: {"group_by": ["Region"], "metrics": '
                  '[{"field": "Amount", "agg": "sum"}]}.',
         )
+    # Counted before the app is opened: a batch already past the ceiling
+    # should not cost a connection, a load, or a wait on a cold server.
+    from ..engine.queries import MAX_QUERIES_PER_CALL
+
+    if len(queries) > MAX_QUERIES_PER_CALL:
+        return _err(
+            f"{len(queries)} queries in one call; the cap is "
+            f"{MAX_QUERIES_PER_CALL}.",
+            error_category="limit_exceeded",
+            hint=f"Send up to {MAX_QUERIES_PER_CALL} at a time.",
+        )
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         return _ok(context.engine_api.run_queries(app_handle, app_id, queries))

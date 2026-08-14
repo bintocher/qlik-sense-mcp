@@ -138,6 +138,39 @@ def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
                  "for fewer values at a time.")}
 
 
+def _text_length(value: Any, ceiling: int, max_depth: int,
+                 depth: int = 0) -> Optional[int]:
+    """How long this value reads as text, counted without building it.
+
+    Stops as soon as the ceiling is passed, and answers None when the
+    value nests deeper than allowed - a container of any width or depth is
+    measured for the price of the part that already broke the rule.
+    """
+    if depth > max_depth:
+        return None
+    if isinstance(value, (list, tuple, dict)):
+        # Brackets, and the commas between the members.
+        total = 2
+        members = (value.items() if isinstance(value, dict) else value)
+        first = True
+        for member in members:
+            if not first:
+                total += 2
+            first = False
+            parts = member if isinstance(value, dict) else (member,)
+            for part in parts:
+                length = _text_length(part, ceiling, max_depth, depth + 1)
+                if length is None:
+                    return None
+                total += length + (2 if isinstance(value, dict)
+                                   and part is parts[0] else 0)
+                if total > ceiling:
+                    return total
+        return total
+    return len(repr(value) if not isinstance(value, str) else value) + (
+        2 if isinstance(value, str) else 0)
+
+
 def _deeper_than(value: Any, limit: int, depth: int = 0) -> bool:
     """Whether a value nests deeper than a limit, without walking it all."""
     if depth > limit:
@@ -173,17 +206,18 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         return tally
 
     if counting == "item" and isinstance(value, (list, tuple, dict)):
-        # One value, whatever shape it has - but its depth is measured
-        # first: turning a deeply nested container into text recurses as
-        # far as the nesting goes.
-        if _deeper_than(value, MAX_FILTER_DEPTH):
+        # One value, whatever shape it has. Its length is what Qlik will
+        # see - the text of the container - but that text is never built:
+        # it is added up piece by piece, and the walk stops at the first
+        # excess.
+        length = _text_length(value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+        tally["values"] += 1
+        if length is None:
             tally["too_deep"] = True
             tally["done"] = True
             return tally
-        text = str(value)
-        tally["values"] += 1
-        tally["chars"] += len(text)
-        tally["longest"] = max(tally["longest"], len(text))
+        tally["chars"] += length
+        tally["longest"] = max(tally["longest"], length)
         if (tally["values"] > MAX_FILTER_VALUES
                 or tally["chars"] > MAX_FILTER_CHARS
                 or tally["longest"] > MAX_VALUE_CHARS):
