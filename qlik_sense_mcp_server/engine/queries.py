@@ -362,7 +362,13 @@ class EngineQueriesMixin:
                 return {"id": query_id, "error": (
                     f"Query {query_id!r} lists a grouping field with no name."),
                     "error_category": "invalid_argument"}
-            if any(ch in bare_field_name(field) for ch in _UNSAFE_IN_FIELD_NAME):
+            # `=` is the whole distinction, and it is the caller's own
+            # declaration - the same one the hypercube tool documents. An
+            # expression is left exactly as written; a name goes in
+            # brackets.
+            is_expression = field.startswith("=")
+            if not is_expression and any(
+                    ch in bare_field_name(field) for ch in _UNSAFE_IN_FIELD_NAME):
                 return {"id": query_id, "error": (
                     f"Grouping field {escape_qlik_field_name(field)} carries a "
                     f"bracket, which cannot be written into an expression "
@@ -373,7 +379,14 @@ class EngineQueriesMixin:
             # is built in two places independently — the batch collects it
             # for checking, the check builds it again. Wrap in one of them
             # and the keys drift apart, silently.
-            dimensions.append({"field": escape_qlik_field_name(field)})
+            # A grouping may carry a name of its own, the way a measure
+            # does: `=Year([OrderDate])` reads as a column called "Year"
+            # and can be sorted by that name.
+            written = {"field": field if is_expression
+                       else escape_qlik_field_name(field)}
+            if isinstance(item, dict) and str(item.get("label") or "").strip():
+                written["label"] = str(item["label"]).strip()
+            dimensions.append(written)
 
         filters = query.get("filters") or []
         # One modifier per distinct set of filters, built once and reused.
