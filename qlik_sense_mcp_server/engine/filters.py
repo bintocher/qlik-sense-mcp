@@ -107,6 +107,22 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
         return None
 
 
+def _exactly_held(value: Any) -> bool:
+    """Whether this number survives the round trip into an expression.
+
+    Past 2**53 a float no longer holds every integer, and a bound written
+    from it is a different bound - one that quietly takes in a neighbouring
+    value.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return True
+    # Compared without going through float first: float(2**53 + 1) is
+    # 2**53, which is exactly the shift being guarded against.
+    if isinstance(value, int):
+        return abs(value) <= 2 ** 53
+    return abs(value) <= 2 ** 53
+
+
 def _plain_number(value: Any) -> Optional[str]:
     """A bound as Qlik reads it: a plain number, no thousands separators.
 
@@ -375,6 +391,15 @@ class EngineFiltersMixin:
                 "accepted_forms": list(BOUND_FORMS) + ["400", "400.5"],
             }
         name = escape_qlik_field_name(field)
+        for bound in (low, high):
+            if bound is not None and not _exactly_held(bound):
+                return {"error": (
+                    f"Bound {bound!r} on {escape_qlik_field_name(field)} is "
+                    f"too large to be written exactly."),
+                    "error_category": "invalid_filter",
+                    "hint": ("Above 9007199254740992 a number shifts when "
+                             "written, and the filter would take in a "
+                             "neighbouring value.")}
         parts = []
         if low is not None:
             parts.append(f"{'>' if low_exclusive else '>='}{_plain_number(low)}")
@@ -597,11 +622,14 @@ class EngineFiltersMixin:
         # disagreed.
         usable = [(label, modifier)
                   for (label, modifier), value in zip(candidates, values[1:])
-                  if not _probe_unusable(value)]
+                  if not _probe_unusable(value)
+                  and value.get("number") is not None]
         if not usable:
             return {"error": (
-                f"Qlik cannot read any form of a period filter on "
-                f"{escape_qlik_field_name(field)}: {complaints[0]}"),
+                f"No form of a period filter on "
+                f"{escape_qlik_field_name(field)} could be measured"
+                + (f": {complaints[0]}" if complaints else
+                   ": Qlik answered none of them with a count.")),
                 "error_category": "invalid_period"}
         label, modifier = usable[-1]
         unproven_note = (

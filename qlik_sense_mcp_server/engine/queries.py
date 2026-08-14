@@ -37,7 +37,6 @@ MAX_EXPRESSION_CHARS = 20000
 # with the candidate forms of a date, and the four control values the reply
 # carries. A numeric range asks one question and gets one answer.
 PERIOD_PROBE_COST = 8
-RANGE_PROBE_COST = 2
 
 
 def _yes_or_no(value: Any, key: str, query_id: str
@@ -192,13 +191,12 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
                 # A range is not one call: the working form of a date field
                 # is chosen by measuring a reference against the candidate
                 # forms, all in one batch but all of them expressions.
-                if entry.get("period") is not None:
+                if any(entry.get(key) is not None for key in
+                       ("from", "to", "period", "greater_than", "less_than")):
+                    # Written as bounds or as a period, the same filter can
+                    # take the calendar path: the field decides, not the
+                    # spelling. Counted at what that path costs.
                     total += PERIOD_PROBE_COST
-                elif any(entry.get(key) is not None for key in
-                         ("from", "to", "greater_than", "less_than")):
-                    # A bound may still turn out to be a date, but the
-                    # common case is a number and one probe.
-                    total += RANGE_PROBE_COST
                 for operator in ("values", "exclude", "add", "intersect"):
                     stated = entry.get(operator)
                     total += (len(stated) if isinstance(stated, (list, tuple))
@@ -484,6 +482,13 @@ class EngineQueriesMixin:
         refusal = _yes_or_no(metric.get("total"), "total", query_id)
         if refusal:
             return "", refusal
+        if metric.get("total") and metric.get("total_except") is not None:
+            return "", {"id": query_id, "error": (
+                "total and total_except say different things about the same "
+                "metric."),
+                "error_category": "invalid_argument",
+                "hint": ("total ignores the grouping entirely; total_except "
+                         "keeps the fields it names. State one of them.")}
         total = metric.get("total")
         except_fields = metric.get("total_except")
         if except_fields is not None:

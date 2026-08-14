@@ -1136,6 +1136,12 @@ class EngineHypercubeMixin:
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
             }
+            # A filter that could not be checked says so here as well as
+            # in `filters_applied`: the neighbouring tool puts it among the
+            # warnings, and one shape of answer beats two.
+            for applied in filters_applied:
+                if isinstance(applied, dict) and applied.get("note"):
+                    warnings.append(applied["note"])
             if filters_applied:
                 # What each described filter resolved to, including the
                 # period actually selected and how many values of the field

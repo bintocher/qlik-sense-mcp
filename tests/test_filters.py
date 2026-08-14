@@ -1504,3 +1504,39 @@ class TestAPeriodSaysWhenItsFormWasNotProven:
         result = engine.build_filters(1, "app", [{"field": "F",
                                                   "period": "2011"}])
         assert "note" not in result["applied"][0]
+
+
+class TestABoundTooLargeToWrite:
+    """Past 2**53 a float no longer holds every integer, and a bound
+    written from it takes in a neighbouring value."""
+
+    @pytest.mark.parametrize("bound", [2 ** 53 + 1, -(2 ** 53) - 2, 1e300])
+    def test_it_is_refused(self, bound):
+        result = _Engine(values=("North",)).build_filters(
+            1, "app", [{"field": "price", "greater_than": bound}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_an_ordinary_bound_still_works(self):
+        engine = _Engine(values=("North",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "price", "greater_than": 400}])
+        assert "error" not in result
+
+
+class TestAFormNobodyMeasured:
+    """A candidate Qlik answered with neither a count nor a complaint was
+    not measured, and choosing it puts an unproven form into the query."""
+
+    def test_an_unmeasured_candidate_is_not_chosen(self):
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 5, "is_numeric": True, "error": None}
+            if index == 0 else
+            {"text": None, "number": None, "is_numeric": False, "error": None}
+            for index, _ in enumerate(exprs)]
+        result = engine.build_filters(1, "app", [{"field": "F",
+                                                  "period": "2011"}])
+        assert result["error_category"] == "invalid_period"
