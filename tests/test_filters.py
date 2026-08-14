@@ -1965,11 +1965,11 @@ class TestAContainerIsMeasuredExactly:
             _written_length, quote_value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
 
         for value in (["a" * 100] * 20, {"k": "v" * 50}, [1, 2, "three"],
-                      ["it's", "fine"]):
+                      ["it's", "fine"], ['say "hi"'], ["both ' and \""],
+                      ["back\slash"], ["O'Brien"] * 50):
             chars, quotes = _written_length(value, MAX_VALUE_CHARS,
                                             MAX_FILTER_DEPTH)
-            written = len(quote_value(value))
-            assert written <= chars + quotes + 2 <= written + 2
+            assert chars + quotes + 2 == len(quote_value(value))
 
     def test_the_count_matches_the_text(self):
         from qlik_sense_mcp_server.engine.filters import (
