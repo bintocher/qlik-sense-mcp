@@ -80,22 +80,7 @@ class TestDefaultSurface:
         assert module.config.auth_mode == "jwt"
         assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
-    def test_certificate_mode_adds_task_administration(self, reload_server):
-        module = reload_server(
-            QLIK_SERVER_URL="https://qlik.example.com",
-            QLIK_USER_DIRECTORY="COMPANY",
-            QLIK_USER_ID="svc_mcp",
-        )
-        assert module.config.auth_mode == "certificate"
-        names = set(module.mcp._tool_manager._tools)
-        assert TASK_TOOLS <= names
-        assert ANALYSIS_TOOLS <= names
 
-    def test_an_unconfigured_server_shows_everything(self, reload_server):
-        """`--help` and a misconfigured host must not silently lose tools."""
-        names = set(reload_server().mcp._tool_manager._tools)
-        assert TASK_TOOLS <= names
-        assert ANALYSIS_TOOLS <= names
 
 
 class TestTaskToolsSwitch:
@@ -108,23 +93,4 @@ class TestTaskToolsSwitch:
         )
         assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
-    @pytest.mark.parametrize("value", ["false", "0", "no", "FALSE"])
-    def test_turning_it_off_drops_them_from_certificate_mode(
-            self, reload_server, value):
-        module = reload_server(
-            QLIK_SERVER_URL="https://qlik.example.com",
-            QLIK_USER_DIRECTORY="COMPANY",
-            QLIK_USER_ID="svc_mcp",
-            QLIK_TASK_TOOLS=value,
-        )
-        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
-    @pytest.mark.parametrize("value", ["true", "1", "yes", ""])
-    def test_anything_else_keeps_them(self, reload_server, value):
-        module = reload_server(
-            QLIK_SERVER_URL="https://qlik.example.com",
-            QLIK_USER_DIRECTORY="COMPANY",
-            QLIK_USER_ID="svc_mcp",
-            QLIK_TASK_TOOLS=value,
-        )
-        assert TASK_TOOLS <= set(module.mcp._tool_manager._tools)

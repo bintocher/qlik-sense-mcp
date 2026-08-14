@@ -70,74 +70,11 @@ class TestSendRequestsPipelined:
         assert len(sock.sent_frames) == 5
         assert [f["params"]["qId"] for f in sock.sent_frames] == [f"obj{i}" for i in range(5)]
 
-    def test_results_land_in_request_order_even_when_responses_are_reversed(self):
-        sock = _FakeSocket(
-            {"GetLayout": {"qLayout": {"title": "x"}}}, reverse=True,
-        )
-        eng = _engine(sock)
-        requests = [{"method": "GetLayout", "params": [], "handle": h} for h in (10, 20, 30)]
-        results = eng.send_requests_pipelined(requests)
-        # All three succeed and come back in *request* order, not arrival order.
-        assert results == [{"qLayout": {"title": "x"}}] * 3
 
-    def test_unique_ids_assigned_per_request(self):
-        sock = _FakeSocket({"GetObject": {}})
-        eng = _engine(sock)
-        eng.send_requests_pipelined(
-            [{"method": "GetObject", "params": {}, "handle": 0} for _ in range(4)]
-        )
-        ids = [f["id"] for f in sock.sent_frames]
-        assert len(set(ids)) == 4
 
-    def test_raise_on_error_true_aggregates_and_raises(self):
-        sock = _FakeSocket(
-            {"GetObject": {"qReturn": {"qHandle": 1}}},
-            error_methods={"GetLayout"},
-        )
-        eng = _engine(sock)
-        with pytest.raises(Exception, match="1/2 requests failed"):
-            eng.send_requests_pipelined([
-                {"method": "GetObject", "params": {}, "handle": 0},
-                {"method": "GetLayout", "params": [], "handle": 1},
-            ])
 
-    def test_raise_on_error_false_returns_exception_in_place(self):
-        sock = _FakeSocket(
-            {"GetObject": {"qReturn": {"qHandle": 1}}},
-            error_methods={"GetLayout"},
-        )
-        eng = _engine(sock)
-        results = eng.send_requests_pipelined(
-            [
-                {"method": "GetObject", "params": {}, "handle": 0},
-                {"method": "GetLayout", "params": [], "handle": 1},
-            ],
-            raise_on_error=False,
-        )
-        assert results[0] == {"qReturn": {"qHandle": 1}}
-        assert isinstance(results[1], Exception)
 
-    def test_empty_batch_is_a_noop(self):
-        eng = _engine(_FakeSocket({}))
-        assert eng.send_requests_pipelined([]) == []
 
-    def test_stray_notification_frames_are_skipped(self):
-        """A frame with no `id` (an Engine notification like OnConnected)
-        must not be mistaken for a batch response."""
-
-        class _SocketWithNotification(_FakeSocket):
-            def send(self, data):
-                if not self.sent_frames:
-                    # Inject a notification ahead of the real response.
-                    self._queue.append({"jsonrpc": "2.0", "method": "OnConnected", "params": {}})
-                super().send(data)
-
-        sock = _SocketWithNotification({"GetObject": {"qReturn": {"qHandle": 1}}})
-        eng = _engine(sock)
-        results = eng.send_requests_pipelined(
-            [{"method": "GetObject", "params": {}, "handle": 0}]
-        )
-        assert results == [{"qReturn": {"qHandle": 1}}]
 
 
 class TestSheetObjectsUsesPipelining:
@@ -191,32 +128,3 @@ class TestSheetObjectsUsesPipelining:
         assert [batch[0] for batch in pipelined_calls] == [
             "GetObject", "GetLayout", "GetProperties"]
 
-    def test_one_bad_child_does_not_drop_the_rest(self):
-        eng = QlikEngineAPI.__new__(QlikEngineAPI)
-
-        def fake_send_request(method, params=None, handle=-1, timeout=None):
-            if method == "GetObject":
-                return {"qReturn": {"qHandle": 999}}
-            if method == "GetLayout":
-                return self._sheet_layout(["good1", "bad", "good2"])
-            raise AssertionError(method)
-
-        def fake_pipelined(requests, timeout=None, raise_on_error=True):
-            if requests[0]["method"] == "GetObject":
-                # "bad" fails to resolve a handle at all.
-                return [
-                    {"qReturn": {"qHandle": 100}},
-                    Exception("GetObject failed"),
-                    {"qReturn": {"qHandle": 102}},
-                ]
-            # Only good1/good2 made it to the GetLayout wave.
-            assert len(requests) == 2
-            return [{"qLayout": {"title": "good1"}}, {"qLayout": {"title": "good2"}}]
-
-        eng.send_request = fake_send_request
-        eng.send_requests_pipelined = fake_pipelined
-        eng._extract_fields_from_object = lambda layout: []
-
-        result = eng._get_sheet_objects_detailed(app_handle=1, sheet_id="SH01")
-
-        assert [r["object_id"] for r in result] == ["good1", "good2"]

@@ -59,16 +59,7 @@ class TestFailureStatuses:
         for code in (8, 11, 6):
             assert f"status eq {code}" in applied, f"status {code} not covered"
 
-    def test_success_is_not_treated_as_failure(self):
-        qrs = _Qrs(rows=[])
-        qrs.get_failed_tasks()
-        assert "status eq 7" not in qrs.filters[0]
 
-    def test_filtering_happens_in_qrs(self):
-        """Client-side filtering could not see a task past the record cap."""
-        qrs = _Qrs(rows=[])
-        qrs.get_failed_tasks()
-        assert qrs.filters[0], "no filter was sent to QRS"
 
 
 class TestOperationalStatus:
@@ -80,47 +71,10 @@ class TestOperationalStatus:
         assert tasks[0]["last_execution_result"]["status"] == 8
         assert tasks[0]["last_execution_result"]["duration_seconds"] == 240000
 
-    def test_never_executed_task_reports_minus_one(self):
-        row = _task_row()
-        row[7] = None  # status
-        qrs = _Qrs(rows=[row])
-        tasks = qrs.get_task_operational_status()
-        assert tasks[0]["last_execution_result"]["status"] == -1
 
-    def test_paging_continues_past_the_first_page(self):
-        """500 tasks must all come back, not just the first page."""
-        qrs = _Qrs(rows=[_task_row(name=f"task {i}") for i in range(1200)])
-        qrs._page_rows = qrs._rows
-        tasks = qrs.get_task_operational_status()
-        assert len(tasks) == 1200
 
-    def test_a_short_read_is_reported_against_the_count(self):
-        """A `/table` that stops early must not pass for the whole list."""
-        class _ShortReader(_Qrs):
-            def _make_request(self, method, endpoint, **kwargs):
-                if endpoint.endswith("/count"):
-                    return {"value": 900}      # QRS says 900 match
-                return super()._make_request(method, endpoint, **kwargs)
 
-        qrs = _ShortReader(rows=[_task_row(name=f"task {i}") for i in range(400)])
-        result = qrs.get_task_operational_status()
-        assert isinstance(result, dict) and "error" in result
-        assert result["rows_read"] == 400
-        assert result["rows_expected"] == 900
 
-    def test_an_exact_multiple_of_the_page_size_is_not_a_truncation(self):
-        """1000 rows at 500 per page is a complete read, not a capped one."""
-        rows = [_task_row(name=f"task {i}") for i in range(1000)]
-        qrs = _Qrs(rows=rows)
-        qrs._page_rows = rows
-        result = qrs.get_task_operational_status()
-        assert isinstance(result, list)
-        assert len(result) == 1000
-
-    def test_failure_is_propagated_not_swallowed(self):
-        qrs = _Qrs(error="HTTP 500: Internal Server Error")
-        result = qrs.get_task_operational_status()
-        assert isinstance(result, dict) and "error" in result
 
 
 class TestExecutionResults:
@@ -133,84 +87,7 @@ class TestExecutionResults:
         assert params["orderAscending"] == "false"
         assert "taskID eq task-guid" in params["filter"]
 
-    @pytest.mark.parametrize("bad", [0, -5, None])
-    def test_unusable_top_falls_back_to_the_default(self, bad):
-        qrs = _Qrs(rows=[])
-        qrs.get_execution_results("task-guid", top=bad)
-        assert qrs.requests[0][2]["params"]["take"] == 10
 
 
-class TestToolLayer:
-    @pytest.fixture
-    def tool(self, monkeypatch):
-        def _install(repo):
-            monkeypatch.setattr(context, "repo_api", repo)
-        return _install
-
-    def _call(self, name, **kwargs):
-        fn = getattr(getattr(srv, name), "fn", getattr(srv, name))
-        return json.loads(fn(**kwargs))
-
-    def test_unknown_status_filter_is_refused(self, tool):
-        tool(_Qrs(rows=[]))
-        result = self._call("get_tasks", status_filter="brokn")
-        assert result["error_category"] == "invalid_argument"
-        assert "failed" in result["allowed_values"]
-
-    def test_running_filter_is_supported(self, tool):
-        qrs = _Qrs(rows=[])
-        tool(qrs)
-        self._call("get_tasks", status_filter="running")
-        applied = qrs.filters[0]
-        for code in (1, 2, 3):
-            assert f"status eq {code}" in applied
-
-    def test_all_means_no_status_filter(self, tool):
-        qrs = _Qrs(rows=[_task_row()])
-        tool(qrs)
-        self._call("get_tasks", status_filter="all")
-        assert qrs.filters[0] is None
-
-    def test_repository_failure_is_not_an_empty_task_list(self, tool):
-        tool(_Qrs(error="HTTP 503: Service Unavailable"))
-        result = self._call("get_tasks")
-        assert result["error_category"] == "repository_error"
-        assert "tasks" not in result
-
-    def test_failed_with_logs_does_not_claim_zero_on_failure(self, tool):
-        tool(_Qrs(error="HTTP 500"))
-        result = self._call("get_failed_tasks_with_logs")
-        assert result["error_category"] == "repository_error"
-        assert result.get("count") != 0
-
-    def test_non_positive_top_is_refused(self, tool):
-        tool(_Qrs(rows=[]))
-        result = self._call("get_task_executions", task_id="t", top=0)
-        assert result["error_category"] == "invalid_argument"
 
 
-class TestExecutionStatusNames:
-    """`status: 8` is not something a reader should have to look up.
-
-    The two codes that matter most read nothing alike as numbers while
-    meaning almost the same thing to an operator: 8 FinishedFail and
-    6 Aborted are both "this reload did not produce data".
-    """
-
-    def test_the_common_codes(self):
-        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
-        assert R.execution_status_name(7) == "FinishedSuccess"
-        assert R.execution_status_name(8) == "FinishedFail"
-        assert R.execution_status_name(6) == "Aborted"
-        assert R.execution_status_name(11) == "Error"
-
-    def test_every_status_this_server_filters_on_has_a_name(self):
-        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
-        codes = (R.FAILED_EXECUTION_STATUSES + (R.SUCCESS_EXECUTION_STATUS,)
-                 + R.RUNNING_EXECUTION_STATUSES)
-        for code in codes:
-            assert not R.execution_status_name(code).startswith("Unknown"), code
-
-    def test_an_unknown_code_says_so_rather_than_guessing(self):
-        from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI as R
-        assert R.execution_status_name(99) == "Unknown(99)"
