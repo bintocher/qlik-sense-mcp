@@ -1734,3 +1734,61 @@ class TestQuotingMakesAValueLonger:
             {"field": "Region", "values": ["'" * 4000 for _ in range(3)]}])
         assert result["error_category"] == "limit_exceeded"
         assert "modifier" in result["error"]
+
+
+class TestNothingSlipsPastTheSizeCheck:
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_container_inside_values_is_one_value(self):
+        """Qlik is asked about it as it stands, so it counts as one."""
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_VALUES
+
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Region",
+             "values": [[1, 2] for _ in range(MAX_FILTER_VALUES + 1)]}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_heap_of_empty_pieces_is_bounded(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_PIECES
+
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Region",
+             "matching": {"filters": [None] * (MAX_FILTER_PIECES + 1)}}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_a_combination_measures_what_it_builds(self):
+        quoted = "'" * 4000
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True, "filters": [
+                    {"field": "Region", "values": [quoted, quoted]}]},
+                {"ignore_selections": True, "filters": [
+                    {"field": "Region", "values": [quoted]}]}]})
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_element_set_measures_before_it_probes(self):
+        engine = self._engine()
+        engine.seen = []
+
+        def evaluate(handle, exprs):
+            engine.seen.extend(exprs)
+            return [{"text": None, "number": 4, "is_numeric": True,
+                     "error": None} for _ in exprs]
+
+        engine.evaluate_expressions = evaluate
+        quoted = "'" * 4000
+        result = engine.build_filters(1, "app", [
+            {"field": "Client", "matching": {"filters": [
+                {"field": "Region", "values": [quoted, quoted, quoted]}]}}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_ordinary_filters_pass(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
