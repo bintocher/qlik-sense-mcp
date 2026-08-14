@@ -202,6 +202,9 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         # excess.
         length = _text_length(value, MAX_VALUE_CHARS,
                               MAX_FILTER_DEPTH - depth)
+        if length is not None:
+            # Quoted whole, and every quote inside it doubled again.
+            length = length * 2 + 2
         tally["values"] += 1
         if length is None:
             tally["too_deep"] = True
@@ -245,8 +248,10 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         return tally
 
     text = "" if value is None else str(value)
-    tally["chars"] += len(text)
-    tally["longest"] = max(tally["longest"], len(text))
+    written = len(text) + (text.count("'") + 2 if counting in ("item", "list")
+                           else 0)
+    tally["chars"] += written
+    tally["longest"] = max(tally["longest"], written)
     if counting in ("item", "list"):
         tally["values"] += 1
     if (tally["longest"] > MAX_VALUE_CHARS
@@ -814,14 +819,11 @@ class EngineFiltersMixin:
                 f"{escape_qlik_field_name(field)}: {complaints[0]}"),
                 "error_category": "invalid_period"}
 
-        # Every candidate disagreed with the reference. The one that goes
-        # out is built from the same comparison the reference uses - but
-        # never one Qlik has already refused, even when another form only
-        # disagreed.
-        usable = [(label, modifier)
-                  for (label, modifier), value in zip(candidates, values[1:])
-                  if not _probe_unusable(value)
-                  and value.get("number") is not None]
+        # Every candidate disagreed with the reference: whichever went out
+        # would select some other set of days than the one asked for, and a
+        # number counted over the wrong days is the failure this whole
+        # measurement exists to prevent.
+        usable = []
         if not usable:
             return {"error": (
                 f"No form of a period filter on "

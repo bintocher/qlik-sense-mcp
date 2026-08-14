@@ -1483,12 +1483,12 @@ class TestEveryKindOfFilterSaysWhenItWasNotChecked:
         assert "note" not in result["applied"][0]
 
 
-class TestAPeriodSaysWhenItsFormWasNotProven:
-    """The form of a period is chosen by measuring; when no candidate
-    agreed with the reference, the reply must not read like a confirmed
-    filter."""
+class TestAPeriodNoFormAgreedOn:
+    """The form of a period is chosen by measuring. When no candidate
+    agreed with the reference, whichever went out would select some other
+    set of days than the one asked for."""
 
-    def test_the_note_is_carried(self):
+    def test_it_is_refused(self):
         engine = _Engine(date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
             {"text": None, "number": 5, "is_numeric": True, "error": None}
@@ -1497,7 +1497,7 @@ class TestAPeriodSaysWhenItsFormWasNotProven:
             for index, _ in enumerate(exprs)]
         result = engine.build_filters(1, "app", [{"field": "F",
                                                   "period": "2011"}])
-        assert "could not be measured" in result["applied"][0]["note"]
+        assert result["error_category"] == "invalid_period"
 
     def test_an_agreed_form_carries_no_note(self):
         engine = _Engine(date_fields=("F",))
@@ -1622,7 +1622,7 @@ class TestANoteFromInsideAnElementSet:
     """A period whose form went unmeasured inside `matching` picks its rows
     just as blindly as one at the top."""
 
-    def test_the_note_is_carried_out(self):
+    def test_it_is_refused_from_inside_too(self):
         engine = _Engine(values=("2023",), date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
             {"text": None, "number": 5, "is_numeric": True, "error": None}
@@ -1632,7 +1632,7 @@ class TestANoteFromInsideAnElementSet:
         result = engine.build_filters(1, "app", [
             {"field": "Client",
              "matching": {"filters": [{"field": "F", "period": "2011"}]}}])
-        assert "could not be measured" in result["applied"][0]["note"]
+        assert result["error_category"] == "invalid_period"
 
 
 class TestNoWayPastTheCeilings:
@@ -1704,7 +1704,9 @@ class TestQuotingMakesAValueLonger:
         result = engine.build_filters(1, "app", [
             {"field": "Region", "values": ["'" * 4000 for _ in range(3)]}])
         assert result["error_category"] == "limit_exceeded"
-        assert "modifier" in result["error"]
+        # Counted as it will be written, so the value ceiling catches it
+        # before anything is built.
+        assert "characters" in result["error"]
 
 
 class TestNothingSlipsPastTheSizeCheck:
