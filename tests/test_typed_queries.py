@@ -1737,3 +1737,20 @@ class TestTwoWaysToIgnoreTheGrouping:
             result = _Engine().run_queries(1, "app", [_query(
                 metrics=[metric])])
             assert result["queries_failed"] == 0
+
+
+class TestTheArithmeticShapeIsCheckedToo:
+    def test_both_ways_of_ignoring_the_grouping_are_refused(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"label": "n", "op": "divide", "total": True,
+                      "total_except": ["Region"], "of": [
+                          {"field": "Amount", "agg": "sum"},
+                          {"field": "Amount", "agg": "sum"}]}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
+
+    def test_one_of_them_still_works(self):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"label": "n", "op": "divide", "total": True, "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum"}]}])])
+        assert result["queries_failed"] == 0
