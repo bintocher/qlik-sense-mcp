@@ -201,3 +201,5 @@ uv.lock
 # Diffs dumped into the tree by a review run.
 diff_*.txt
 *_diff.txt
+# Diffs dumped into the tree while reviewing.
+*.diff
