@@ -133,9 +133,12 @@ class TestPaging:
         fetch = created[0][0]["qHyperCubeDef"]["qInitialDataFetch"][0]
         assert fetch["qTop"] == 10
 
-    def test_a_negative_offset_is_treated_as_the_start(self):
+    def test_a_negative_offset_is_refused(self):
+        """A page before the first is a request nobody can answer, and
+        answering the first page instead returns data for a different
+        question."""
         result = self._engine().create_hypercube(1, DIMS, MEASURES, 5, offset=-3)
-        assert result["offset"] == 0
+        assert result["error_category"] == "invalid_argument"
 
 
 class TestWholeAppSearch:

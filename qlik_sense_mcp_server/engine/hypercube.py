@@ -726,7 +726,19 @@ class EngineHypercubeMixin:
             # multiple well-scoped queries, not one giant one.
             HARD_MAX_ROWS = self.HARD_MAX_ROWS
             HARD_MAX_CELLS = self.HARD_MAX_CELLS
-            page_offset = max(0, int(offset or 0))
+            # Refused, not clamped: a page before the first is a request
+            # nobody can answer, and answering the first page instead
+            # returns data for a different question.
+            if offset is not None and (isinstance(offset, bool)
+                                       or not isinstance(offset, int)
+                                       or offset < 0):
+                return {
+                    "error": f"offset={offset!r} is not a row number.",
+                    "error_category": "invalid_argument",
+                    "failed_step": "plan",
+                    "hint": "Pass 0 or a positive integer, or omit it.",
+                }
+            page_offset = int(offset or 0)
             n_cols = len(converted_dimensions) + len(converted_measures)
             n_dims = len(converted_dimensions)
             column_names = self._column_names(converted_dimensions, converted_measures)
