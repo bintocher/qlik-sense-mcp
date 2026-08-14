@@ -415,8 +415,14 @@ class EngineQueriesMixin:
             return reply
         modifier = built.get("modifier", "")
 
+        # The library is read only when a measure is named from it.
+        library = None
+        if any(isinstance(m, dict) and m.get("master")
+               for m in query.get("measures") or []):
+            reader = getattr(self, "_library_for", None)
+            library = reader(app_handle) if reader else {}
         measures, error = self._build_measures(
-            query, modifier, query_id, slice_for)
+            query, modifier, query_id, slice_for, library=library)
         if error:
             return error
         if not measures:
@@ -842,7 +848,7 @@ class EngineQueriesMixin:
 
     @staticmethod
     def _build_measures(query: Dict[str, Any], modifier: str, query_id: str,
-                        slice_for=None
+                        slice_for=None, library=None
                         ) -> "tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]":
         """Write one Qlik expression per metric.
 
@@ -936,6 +942,26 @@ class EngineQueriesMixin:
         for measure in query.get("measures") or []:
             if isinstance(measure, str):
                 measure = {"expression": measure}
+            if isinstance(measure, dict) and measure.get("master"):
+                wanted = str(measure["master"]).strip()
+                known = library or {}
+                found = next(
+                    (item for item in known.get("measures") or []
+                     if item.get("name", "").strip().casefold()
+                     == wanted.casefold()
+                     or item.get("id") == wanted), None)
+                if found is None:
+                    return [], {"id": query_id, "error": (
+                        f"This app defines no measure named {wanted!r}."),
+                        "error_category": "not_found",
+                        "available_values": sorted(
+                            item.get("name", "")
+                            for item in known.get("measures") or [])[:20],
+                        "hint": ("The library of the app is in "
+                                 "get_app_details under `library`.")}
+                measure = dict(measure, expression=found["expression"],
+                               label=measure.get("label") or found["name"])
+                measure.pop("master", None)
             if not isinstance(measure, dict):
                 return [], {"id": query_id, "error": (
                     f"A measure must be an expression or an object, got "
@@ -1427,10 +1453,30 @@ class EngineQueriesMixin:
             self._query_reply(plan, plan.get("cube"), plan.get("shaped"))
             for plan in plans
         ]
+        failed = [r.get("id") for r in results if r.get("error")]
+        if failed and len(failed) == len(results):
+            first = next(r for r in results if r.get("error"))
+            return {
+                "error": first["error"],
+                "error_category": first.get("error_category",
+                                            "invalid_argument"),
+                **{k: v for k, v in first.items()
+                   if k in ("hint", "next_actions", "available_columns",
+                            "available_values", "allowed_values",
+                            "unknown_fields", "unknown_values",
+                            "accepted_forms")},
+                "results": results,
+                "queries_run": 0,
+                "queries_failed": len(failed),
+                "seconds": round(time.monotonic() - started, 3),
+            }
         return {
+            # Ahead of `results`, so a partial failure is read before the
+            # rows are: a caller reads the head of a reply and stops.
+            "queries_failed": len(failed),
+            **({"failed": failed} if failed else {}),
             "results": results,
-            "queries_run": len([r for r in results if not r.get("error")]),
-            "queries_failed": len([r for r in results if r.get("error")]),
+            "queries_run": len(results) - len(failed),
             "seconds": round(time.monotonic() - started, 3),
         }
 
@@ -1550,7 +1596,8 @@ class EngineQueriesMixin:
                               "did_you_mean", "unknown_fields",
                               "unknown_values", "allowed_values",
                               "accepted_forms", "next_actions",
-                              "invalid_expressions", "available_columns")}
+                              "invalid_expressions", "available_columns",
+                              "available_values", "note")}
             return reply
         if cube is None or shaped is None:
             return {"id": plan.get("id"),
@@ -1586,6 +1633,14 @@ class EngineQueriesMixin:
         for check in plan.get("period_check", []):
             if check.get("filter_applied") is False:
                 warnings.append(check["note"])
+            elif check.get("filter_applied") is None and check.get("note"):
+                # Neither confirmed nor denied. Said as a statement about
+                # the number, not about the check: the caller is deciding
+                # whether to trust what it just read.
+                warnings.append(
+                    f"The period on {check.get('field')} is not confirmed, "
+                    f"so these numbers cannot be called filtered: "
+                    + check["note"])
         # A filter built over a probe that never answered is not a filter
         # anyone checked, and the reply says which.
         for _, applied in _narrowings(plan.get("filters_applied"),
@@ -1607,8 +1662,13 @@ class EngineQueriesMixin:
         # place as what the result said afterwards.
         warnings.extend(plan.get("warnings") or [])
 
+        # Warnings first, before the rows. A reply is read from the head,
+        # and every sign that a number cannot be trusted used to sit after
+        # the numbers themselves.
         reply: Dict[str, Any] = {
             "id": plan["id"],
+            **({"warnings": warnings,
+                "numbers_verified": False} if warnings else {}),
             "columns": column_names,
             "rows": rows,
             "returned_rows": len(rows),
@@ -1668,6 +1728,4 @@ class EngineQueriesMixin:
                     f"in no particular order. Set `sort_by` to a measure "
                     f"label to get the largest ones."
                 )
-        if warnings:
-            reply["warnings"] = warnings
         return reply

@@ -164,6 +164,10 @@ def get_about() -> str:
         list apps or read a data model.
 
     Returns:
+        `library` - the measures and dimensions this app defines, with
+        their expressions and descriptions. Reach for them before
+        assembling an aggregation by hand: `engine_query` takes
+        {"measures": [{"master": "<name>"}]}.
         `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
         `sharedPersistence`, `requiresBootstrap`.
 
@@ -479,6 +483,19 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
               "actually selected."
         )
 
+    # The app's own library of measures and dimensions: what the author of
+    # this dashboard calls revenue, and how it is actually computed. Read
+    # once with the model and cached with it - a caller that assembles the
+    # aggregation itself may pick a neighbouring field and answer with a
+    # number nobody here would recognise.
+    library = {"measures": [], "dimensions": []}
+    try:
+        read_library = getattr(context.engine_api, "get_master_items", None)
+        if read_library is not None:
+            library = read_library(app_handle)
+    except Exception as ex:
+        logger.debug("Could not read the library of %s: %s", aid, ex)
+
     result = {
         "metainfo": {
             "app_id": aid,
@@ -489,6 +506,8 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             "reload_dttm": resolved.get("reload_dttm", ""),
         },
         "warnings": warnings,
+        **({"library": library}
+           if library.get("measures") or library.get("dimensions") else {}),
         "tables": tables,
         "fields": fields,
         "tables_count": len(tables),
