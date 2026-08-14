@@ -61,15 +61,25 @@ class EngineSheetsMixin:
             logger.info("Found %d sheets", len(sheets))
             return sheets
 
-    def _library_for(self, app_handle: int) -> Dict[str, Any]:
-        """The library, read once per app handle."""
+    def _library_for(self, app_handle: int,
+                     app_id: Optional[str] = None) -> Dict[str, Any]:
+        """The library of the app this handle currently points at.
+
+        Keyed by the app, never by the handle: Engine hands out handles per
+        session and reuses the numbers, so after switching documents the
+        same number means a different app - and a measure named from the
+        library would be computed from another app's expression.
+        """
+        identity = app_id or getattr(self, "_cached_app_id", None)
+        if not identity:
+            return self.get_master_items(app_handle)
         cache = getattr(self, "_library_cache", None)
         if cache is None:
             cache = {}
             self._library_cache = cache
-        if app_handle not in cache:
-            cache[app_handle] = self.get_master_items(app_handle)
-        return cache[app_handle]
+        if identity not in cache:
+            cache[identity] = self.get_master_items(app_handle)
+        return cache[identity]
 
     def get_master_items(self, app_handle: int) -> Dict[str, Any]:
         """The library of measures and dimensions the app itself defines.

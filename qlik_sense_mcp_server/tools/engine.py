@@ -1151,8 +1151,29 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
                         hint="Pass a positive integer, or omit it.")
         cube = ((layout_result.get("qLayout") or {}).get("qHyperCube") or {})
         pages = cube.get("qDataPages") or []
+        total_rows = (cube.get("qSize") or {}).get("qcy", 0)
+        width = len((cube.get("qDimensionInfo") or [])) + len(
+            (cube.get("qMeasureInfo") or []))
+        rows = [row for page in pages for row in (page.get("qMatrix") or [])]
+        # The layout carries only the first page Engine chose to send, so a
+        # page past it has to be asked for rather than sliced out of what
+        # is already here.
+        if offset + limit > len(rows) and offset + limit <= total_rows:
+            try:
+                more = context.engine_api.send_request(
+                    "GetHyperCubeData",
+                    ["/qHyperCubeDef",
+                     [{"qTop": offset, "qLeft": 0, "qHeight": limit,
+                       "qWidth": width or len((rows[0] if rows else []))}]],
+                    handle=obj_handle)
+                fetched = [row for page in (more or {}).get("qDataPages") or []
+                           for row in (page.get("qMatrix") or [])]
+                if fetched:
+                    rows = [None] * offset + fetched
+            except Exception as page_error:
+                logger.debug("Could not read page %s of %s: %s",
+                             offset, object_id, page_error)
         if pages:
-            rows = [row for page in pages for row in (page.get("qMatrix") or [])]
             shown = rows[offset:offset + limit]
             cube["qDataPages"] = [{"qArea": {"qTop": offset, "qLeft": 0,
                                              "qHeight": len(shown),

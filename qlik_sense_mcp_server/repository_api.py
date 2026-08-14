@@ -257,8 +257,13 @@ class QlikRepositoryAPI:
                 ("reload_dttm", "lastReloadTime"),
             ],
             query_filter=query_filter,
-            skip=offset,
-            take=limit,
+            # When the full name is matched here rather than by QRS, the
+            # page has to be wide enough to hold every candidate: paging
+            # by the shortened filter would drop the very app being asked
+            # for.
+            skip=0 if (name_locally or stream_locally) else offset,
+            take=(min(total_found or limit, 1000)
+                  if (name_locally or stream_locally) else limit),
             sort_column="modifiedDate",
             ascending=False,
         )
@@ -276,6 +281,7 @@ class QlikRepositoryAPI:
                          or stream_locally.lower()
                          in str(row.get("stream") or "").lower())]
             total_found = len(page)
+            page = page[offset:offset + limit]
 
         minimal_apps: List[Dict[str, Any]] = []
         for row in page:
