@@ -167,20 +167,10 @@ def _text_length(value: Any, ceiling: int, max_depth: int,
                 if total > ceiling:
                     return total
         return total
-    return len(repr(value) if not isinstance(value, str) else value) + (
-        2 if isinstance(value, str) else 0)
-
-
-def _deeper_than(value: Any, limit: int, depth: int = 0) -> bool:
-    """Whether a value nests deeper than a limit, without walking it all."""
-    if depth > limit:
-        return True
-    if isinstance(value, dict):
-        return any(_deeper_than(inner, limit, depth + 1)
-                   for inner in value.values())
-    if isinstance(value, (list, tuple)):
-        return any(_deeper_than(inner, limit, depth + 1) for inner in value)
-    return False
+    if isinstance(value, str):
+        # As it will be written: in quotes, with the quotes inside doubled.
+        return len(value) + value.count("'") + 2
+    return len(repr(value))
 
 
 def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
@@ -210,7 +200,8 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         # see - the text of the container - but that text is never built:
         # it is added up piece by piece, and the walk stops at the first
         # excess.
-        length = _text_length(value, MAX_VALUE_CHARS, MAX_FILTER_DEPTH)
+        length = _text_length(value, MAX_VALUE_CHARS,
+                              MAX_FILTER_DEPTH - depth)
         tally["values"] += 1
         if length is None:
             tally["too_deep"] = True
