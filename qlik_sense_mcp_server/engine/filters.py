@@ -114,10 +114,28 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
 MAX_VALUE_CHARS = 4096
 MAX_FILTER_CHARS = 20000
 MAX_FILTER_VALUES = 1000
+# How many pieces a description may hold at all, whatever they are.
+MAX_FILTER_PIECES = 20000
 MAX_FILTER_DEPTH = 20
 
 
 VALUE_KEYS = ("values", "exclude", "add", "intersect")
+
+
+def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
+    """The refusal a built modifier earns for its length, or nothing.
+
+    Measured after building, because quoting makes a value longer than it
+    was written, and measured before any probe runs on it.
+    """
+    if len(modifier) <= MAX_FILTER_CHARS:
+        return None
+    return {"error": (
+        f"The filters build a modifier of {len(modifier)} characters, over "
+        f"the {MAX_FILTER_CHARS} this server sends."),
+        "error_category": "limit_exceeded",
+        "hint": ("Quoting makes a value longer than it was written; ask "
+                 "for fewer values at a time.")}
 
 
 def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
@@ -132,8 +150,8 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
     every piece of text is weighed, because all of it reaches Qlik.
     """
     if tally is None:
-        tally = {"chars": 0, "values": 0, "too_deep": False, "longest": 0,
-                 "done": False}
+        tally = {"chars": 0, "values": 0, "pieces": 0, "too_deep": False,
+                 "too_many": False, "longest": 0, "done": False}
     if tally["done"]:
         return tally
     if depth > MAX_FILTER_DEPTH:
@@ -148,6 +166,18 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         return tally
     if isinstance(value, (list, tuple)):
         for inner in value:
+            if counting and isinstance(inner, (list, tuple, dict)):
+                # Inside `values` even a container is one value: Qlik is
+                # asked about it as it stands.
+                tally["values"] += 1
+                if tally["values"] > MAX_FILTER_VALUES:
+                    tally["done"] = True
+                    return tally
+            tally["pieces"] += 1
+            if tally["pieces"] > MAX_FILTER_PIECES:
+                tally["done"] = True
+                tally["too_many"] = True
+                return tally
             _weigh(inner, depth + 1, tally, counting)
             if tally["done"]:
                 return tally
@@ -173,6 +203,11 @@ def _too_much(description: Any) -> Optional[Dict[str, Any]]:
             "error_category": "limit_exceeded",
             "hint": ("Conditions inside conditions end somewhere; this one "
                      "does not.")}
+    if weight.get("too_many"):
+        return {"error": (
+            f"A filter holds more than {MAX_FILTER_PIECES} pieces."),
+            "error_category": "limit_exceeded",
+            "hint": "Every piece is read, whatever it holds."}
     if weight["longest"] > MAX_VALUE_CHARS:
         return {"error": (
             f"A filter carries a value of {weight['longest']} characters, "
@@ -934,6 +969,9 @@ class EngineFiltersMixin:
         # examples are written. Wrapped in braces it does not parse.
         name = escape_qlik_field_name(field)
         modifier = f"{name}={joined}"
+        refusal = _modifier_too_long(modifier)
+        if refusal:
+            return refusal
         # Proven to select something, like every other kind of condition.
         # "The clients who bought in a year nobody bought in" narrows the
         # field to nothing, and an empty answer reads as "no such data"
@@ -1133,6 +1171,9 @@ class EngineFiltersMixin:
                             "filters_applied": built.get("applied", [])})
 
         combined = "{" + SET_COMBINERS[operation].join(written) + "}"
+        refusal = _modifier_too_long(combined)
+        if refusal:
+            return refusal
         return {"modifier": combined, "applied": applied,
                 "scope": f"{operation} of {len(written)} sets"}
 
@@ -1504,14 +1545,9 @@ class EngineFiltersMixin:
                         "scope": identifier}
             return {"modifier": "", "applied": []}
         modifier = "{" + identifier + "<" + ",".join(parts) + ">}"
-        if len(modifier) > MAX_FILTER_CHARS:
-            return {"error": (
-                f"The filters build a modifier of {len(modifier)} "
-                f"characters, over the {MAX_FILTER_CHARS} this server "
-                f"sends."),
-                "error_category": "limit_exceeded",
-                "hint": ("Quoting makes a value longer than it was written; "
-                         "ask for fewer values at a time.")}
+        refusal = _modifier_too_long(modifier)
+        if refusal:
+            return refusal
         outcome = {"modifier": modifier, "applied": applied}
         if identifier:
             outcome["scope"] = identifier
