@@ -1389,6 +1389,9 @@ class EngineFiltersMixin:
             # rather than being refused over a failed check.
             return None
         for key, name in wanted.items():
+            if key == "state" and name.strip("[]") in ("$", "$Default"):
+                # Qlik's own default state: always there, never listed.
+                continue
             have = known["bookmarks"] if key == "bookmark" else known["states"]
             if name.strip("[]") in have or name in have:
                 continue

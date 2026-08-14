@@ -420,7 +420,7 @@ class EngineQueriesMixin:
         if any(isinstance(m, dict) and m.get("master")
                for m in query.get("measures") or []):
             reader = getattr(self, "_library_for", None)
-            library = reader(app_handle) if reader else {}
+            library = reader(app_handle, app_id) if reader else {}
         measures, error = self._build_measures(
             query, modifier, query_id, slice_for, library=library)
         if error:

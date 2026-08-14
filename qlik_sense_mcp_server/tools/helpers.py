@@ -59,8 +59,18 @@ def _err(msg: str, **extra: Any) -> str:
     for key, value in payload.items():
         if key not in ordered:
             ordered[key] = value
-    return json.dumps(ordered, indent=2, ensure_ascii=False)
+    # The echo of the request may carry the models the schema declared;
+    # they are not JSON on their own.
+    return json.dumps(ordered, indent=2, ensure_ascii=False, default=_plain)
 
+
+
+def _plain(value: Any) -> Any:
+    """Whatever it is, as JSON sees it."""
+    dumped = getattr(value, "model_dump", None)
+    if dumped is not None:
+        return dumped(exclude_none=True, by_alias=True)
+    return str(value)
 
 
 # Keys that hold bulk data. Indenting these costs more than the whole rest
@@ -98,7 +108,7 @@ def _ok(obj: Any) -> str:
     line per cell.
     """
     if not isinstance(obj, dict):
-        return json.dumps(obj, indent=2, ensure_ascii=False)
+        return json.dumps(obj, indent=2, ensure_ascii=False, default=_plain)
 
     obj = _without_advice(obj)
     compact = {}
@@ -117,7 +127,8 @@ def _ok(obj: Any) -> str:
             compact[key] = inner
         else:
             compact[key] = value
-    return json.dumps(compact, indent=2, ensure_ascii=False, cls=_CompactEncoder)
+    return json.dumps(compact, indent=2, ensure_ascii=False, cls=_CompactEncoder,
+                      default=_plain)
 
 
 class _CompactList(list):

@@ -4,7 +4,59 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
-## [2.0.2] - 2026-08-13
+## [2.0.2] - 2026-08-14
+
+### Added
+
+- The app's own library of measures and dimensions comes back with
+  `get_app_details` under `library`, and a query can name a measure from
+  it instead of assembling the aggregation itself:
+  `{"measures": [{"master": "Sales MUSD"}]}`. This is the vocabulary the
+  author of the app wrote down - what revenue means here, and how it is
+  computed. Assembled by hand, the same question can pick a neighbouring
+  field or a different aggregation and answer with a number nobody on
+  that dashboard would recognise.
+- The bookmarks and alternate states an app holds come back under
+  `named_sets`, so a caller asking for one by name has somewhere to read
+  the right spelling.
+- The shape of a typed query is declared in the tool schema: which keys a
+  filter, a metric, a measure, a scope and a query have, which are
+  required, and what values they take. A key that does not exist is
+  refused before Qlik is asked.
+- Data of one object comes back in pages (`limit`, `offset`), while its
+  definition and expressions come whole. Measured on a live table: the
+  reply used to run to 111 thousand characters, nearly all of them rows.
+
+### Changed
+
+- A refusal states what is wrong and stops there. It no longer advises
+  what to do next, and no longer lists what would have been valid:
+  choosing the next step belongs to the caller, and the lists it may need
+  it can ask for with a call of its own.
+- The reply of a query carries its warnings first, before the numbers,
+  together with a plain flag when a number cannot be taken as verified.
+  A batch where every query failed answers as a failure rather than as a
+  list with failures inside it.
+- A period that could not be checked is said out loud instead of being
+  passed over in silence beside a number.
+
+### Fixed
+
+- `get_app_field` no longer claims to return the most frequent values
+  first: the order is the field's own, ascending, and the first ten
+  values of a large field are the first ten alphabetically.
+- An app whose name holds an apostrophe is found by name again. Measured:
+  the repository refuses a quote inside a filter in every form, so the
+  quote no longer goes into the filter at all.
+- A grouping written as an expression stays an expression instead of
+  being read as a field name, and a grouping can carry a label to be
+  sorted by.
+- The page of an object is read from Engine rather than cut out of the
+  first one it happened to send.
+- The default state `$` is accepted; it exists in every app and is never
+  listed among the named ones.
+
+## [2.0.2-dev] - 2026-08-13
 
 ### Added
 

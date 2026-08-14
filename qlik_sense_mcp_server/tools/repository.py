@@ -496,6 +496,19 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     except Exception as ex:
         logger.debug("Could not read the library of %s: %s", aid, ex)
 
+    # The named sets this app holds. Without them a caller asking for a
+    # bookmark by name has nowhere to read the right spelling.
+    named_sets = {}
+    try:
+        read_sets = getattr(context.engine_api, "_known_sets", None)
+        if read_sets is not None:
+            known = read_sets(app_handle) or {}
+            named_sets = {key: sorted(known.get(key) or ())
+                          for key in ("bookmarks", "states")
+                          if known.get(key)}
+    except Exception as ex:
+        logger.debug("Could not read the named sets of %s: %s", aid, ex)
+
     result = {
         "metainfo": {
             "app_id": aid,
@@ -508,6 +521,7 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         "warnings": warnings,
         **({"library": library}
            if library.get("measures") or library.get("dimensions") else {}),
+        **({"named_sets": named_sets} if named_sets else {}),
         "tables": tables,
         "fields": fields,
         "tables_count": len(tables),
