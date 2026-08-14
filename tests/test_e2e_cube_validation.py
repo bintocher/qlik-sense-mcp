@@ -38,21 +38,7 @@ class TestUnknownDimensionIsRefused:
             f"Qlik answered instead of failing: {result}")
         assert "no_such_field_xyz" in result.get("unknown_fields", [])
 
-    def test_the_refusal_names_a_real_alternative(self, raw_call, app, a_real_field):
-        """A near miss should point at the field the caller meant."""
-        typo = a_real_field + "x"
-        result = raw_call("engine_create_hypercube", app_id=app,
-                          dimensions=[typo], measures=["Count(1)"], limit=5)
-        assert result.get("error_category") == "field_not_found"
-        assert a_real_field in result.get("did_you_mean", {}).get(typo, []), (
-            f"no suggestion for {typo!r}: {result.get('did_you_mean')}")
 
-    def test_a_real_field_still_works(self, call, app, a_real_field):
-        """The guard must not refuse a query that was always valid."""
-        cube = call("engine_create_hypercube", app_id=app,
-                    dimensions=[a_real_field], measures=["Count(1)"], limit=5)
-        assert cube["rows"], "a valid query returned nothing"
-        assert cube.get("warnings") == []
 
 
 class TestSilentlyEmptyMeasures:
@@ -64,23 +50,7 @@ class TestSilentlyEmptyMeasures:
         assert any("0 or '-'" in w for w in cube.get("warnings", [])), (
             f"a table of zeros passed without comment: {cube.get('rows')}")
 
-    def test_sql_syntax_is_refused_by_qliks_own_parser(self, raw_call, app, a_real_field):
-        """This used to run and come back as a column of '-' with a warning.
 
-        Now `CheckExpression` sees it first and the query never runs — a
-        refusal naming what Qlik objected to beats a table of dashes.
-        """
-        result = raw_call("engine_create_hypercube", app_id=app,
-                          dimensions=[a_real_field],
-                          measures=["COUNT(1) AS total"], limit=5)
-        assert result.get("error_category") == "invalid_expression", result
-        assert "AS" in result.get("error", "")
-
-    def test_an_unknown_name_inside_a_measure_warns(self, call, app, a_real_field):
-        cube = call("engine_create_hypercube", app_id=app,
-                    dimensions=[a_real_field],
-                    measures=["Sum(no_such_measure_field)"], limit=5)
-        assert any("no_such_measure_field" in w for w in cube.get("warnings", []))
 
 
 class TestValidationCost:

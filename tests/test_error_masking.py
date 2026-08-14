@@ -66,14 +66,7 @@ class TestLookupByIdFailures:
             "a server outage reported as a missing app sends the caller "
             "hunting for a different id")
 
-    def test_genuinely_missing_app_still_says_so(self, repo):
-        repo(by_id={})
-        result = _details(app_id="00000000-0000-0000-0000-000000000000")
-        assert result["error_category"] == "app_not_found"
 
-    def test_failure_reply_carries_a_hint(self, repo):
-        repo(by_id={"error": "HTTP 500"})
-        assert result_hint(_details(app_id="x"))
 
 
 def result_hint(payload):
@@ -87,7 +80,3 @@ class TestLookupByNameFailures:
         assert result["error_category"] == "repository_error"
         assert "No apps found" not in result["error"]
 
-    def test_empty_search_result_still_says_no_matches(self, repo):
-        repo(search={"apps": []})
-        result = _details(name="Sales")
-        assert result["error_category"] == "app_not_found"

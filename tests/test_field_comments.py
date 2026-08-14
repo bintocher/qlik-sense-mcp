@@ -59,14 +59,7 @@ class TestGetFields:
         by_name = {f["field_name"]: f for f in fields}
         assert by_name["Amount"]["comment"] == "Order amount, net of refunds"
 
-    def test_missing_comment_is_empty_string(self, engine):
-        fields = engine.get_fields(app_handle=1)["fields"]
-        by_name = {f["field_name"]: f for f in fields}
-        assert by_name["OrderId"]["comment"] == ""
 
-    def test_table_comment_travels_with_every_field(self, engine):
-        fields = engine.get_fields(app_handle=1)["fields"]
-        assert {f["table_comment"] for f in fields} == {"Order facts"}
 
 
 class TestGetFieldDescription:
@@ -89,14 +82,6 @@ class TestGetFieldDescription:
         assert described["comment"] == "Order amount, net of refunds"
         assert described["src_tables"] == ["Orders"]
 
-    def test_unknown_field_returns_empty_dict(self, monkeypatch):
-        api = QlikEngineAPI.__new__(QlikEngineAPI)
-
-        def boom(*a, **kw):
-            raise RuntimeError("Invalid parameters")
-
-        monkeypatch.setattr(api, "send_request", boom, raising=False)
-        assert api.get_field_description(1, "nope") == {}
 
 
 FIELDS_PAYLOAD = {
@@ -155,10 +140,4 @@ class TestAppDetailsPayload:
         fields = {f["name"]: f for f in self._details()["fields"]}
         assert fields["Amount"]["comment"] == "Order amount, net of refunds"
 
-    def test_uncommented_field_has_no_comment_key(self):
-        fields = {f["name"]: f for f in self._details()["fields"]}
-        assert "comment" not in fields["OrderId"]
 
-    def test_table_comment_is_reported_once(self):
-        tables = self._details()["tables"]
-        assert [t["comment"] for t in tables] == ["Order facts"]

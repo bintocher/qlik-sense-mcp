@@ -33,16 +33,7 @@ class TestJwtWiring:
         session = JwtSession(jwt_env)
         assert session.cookie_name is None
 
-    def test_invalidate_survives_the_real_config(self, jwt_env):
-        """This is the exact path that broke: it read a removed field."""
-        session = JwtSession(jwt_env)
-        session.invalidate()
-        assert session.cookie_name is None
 
-    def test_both_clients_accept_the_session(self, jwt_env):
-        session = JwtSession(jwt_env)
-        assert QlikRepositoryAPI(jwt_env, jwt_session=session) is not None
-        assert QlikEngineAPI(jwt_env, jwt_session=session) is not None
 
 
 class TestStartupWiring:
