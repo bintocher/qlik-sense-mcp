@@ -142,12 +142,13 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
            counting: bool = False) -> Dict[str, Any]:
     """How much text, how many values and how deep a description carries.
 
-    Stops as soon as any ceiling is passed: walking a collection of
-    arbitrary size to find out that it is too large costs exactly what the
-    ceiling exists to prevent.
+    Stops at the first excess: walking a description of arbitrary size to
+    find out that it is too large costs exactly what the ceilings exist to
+    prevent. Every member counts, in a list or in an object.
 
-    Only the values are counted as values - a field name is not one - but
-    every piece of text is weighed, because all of it reaches Qlik.
+    Inside `values` a container is one value and is measured as Qlik will
+    see it - the text of the container - because that is what goes into
+    the modifier.
     """
     if tally is None:
         tally = {"chars": 0, "values": 0, "pieces": 0, "too_deep": False,
@@ -158,34 +159,47 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         tally["too_deep"] = True
         tally["done"] = True
         return tally
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            _weigh(inner, depth + 1, tally, counting or key in VALUE_KEYS)
-            if tally["done"]:
-                return tally
+
+    if counting == "item" and isinstance(value, (list, tuple, dict)):
+        # One value, whatever shape it has.
+        text = str(value)
+        tally["values"] += 1
+        tally["chars"] += len(text)
+        tally["longest"] = max(tally["longest"], len(text))
+        if (tally["values"] > MAX_FILTER_VALUES
+                or tally["chars"] > MAX_FILTER_CHARS
+                or tally["longest"] > MAX_VALUE_CHARS):
+            tally["done"] = True
         return tally
-    if isinstance(value, (list, tuple)):
-        for inner in value:
-            if counting and isinstance(inner, (list, tuple, dict)):
-                # Inside `values` even a container is one value: Qlik is
-                # asked about it as it stands.
-                tally["values"] += 1
-                if tally["values"] > MAX_FILTER_VALUES:
-                    tally["done"] = True
-                    return tally
+
+    if isinstance(value, (dict, list, tuple)):
+        members = (list(value.items()) if isinstance(value, dict)
+                   else [(None, item) for item in value])
+        for key, inner in members:
             tally["pieces"] += 1
             if tally["pieces"] > MAX_FILTER_PIECES:
-                tally["done"] = True
                 tally["too_many"] = True
+                tally["done"] = True
                 return tally
-            _weigh(inner, depth + 1, tally, counting)
+            if key is not None:
+                tally["chars"] += len(str(key))
+            # The list under `values` is a list of values; each member of
+            # it is one value, container or not.
+            if key in VALUE_KEYS if key is not None else False:
+                inside = "list"
+            elif counting == "list":
+                inside = "item"
+            else:
+                inside = counting
+            _weigh(inner, depth + 1, tally, inside)
             if tally["done"]:
                 return tally
         return tally
+
     text = "" if value is None else str(value)
     tally["chars"] += len(text)
     tally["longest"] = max(tally["longest"], len(text))
-    if counting:
+    if counting in ("item", "list"):
         tally["values"] += 1
     if (tally["longest"] > MAX_VALUE_CHARS
             or tally["chars"] > MAX_FILTER_CHARS

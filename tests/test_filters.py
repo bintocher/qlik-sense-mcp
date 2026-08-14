@@ -1692,35 +1692,6 @@ class TestNoWayPastTheCeilings:
         assert "error" not in result
 
 
-class TestTheCeilingCostsNothingToEnforce:
-    """Walking a collection of arbitrary size to find out that it is too
-    large costs exactly what the ceiling exists to prevent."""
-
-    def test_a_huge_list_is_refused_without_walking_it(self):
-        import time
-
-        engine = _Engine(values=("North",), date_fields=("F",))
-        started = time.monotonic()
-        result = engine.build_filters(
-            1, "app", [{"field": "Region", "values": ["x"] * 3_000_000}])
-        assert result["error_category"] == "limit_exceeded"
-        assert time.monotonic() - started < 1.0
-
-    def test_the_stated_number_of_values_is_allowed(self):
-        """The field name and the scope are not values."""
-        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_VALUES
-
-        engine = _Engine(values=("North",), date_fields=("F",))
-        engine.evaluate_expressions = lambda handle, exprs: [
-            {"text": None, "number": 4, "is_numeric": True, "error": None}
-            for _ in exprs]
-        result = engine.build_filters(
-            1, "app", [{"field": "Region",
-                        "values": ["North"] * MAX_FILTER_VALUES}],
-            scope={"bookmark": "BM01"})
-        assert "error" not in result
-
-
 class TestQuotingMakesAValueLonger:
     """A value counted as short can arrive long: the ceiling is about what
     Qlik reads, so the built modifier is measured as well."""
@@ -1791,4 +1762,70 @@ class TestNothingSlipsPastTheSizeCheck:
     def test_ordinary_filters_pass(self):
         result = self._engine().build_filters(
             1, "app", [{"field": "Region", "values": ["North"]}])
+        assert "error" not in result
+
+
+class TestEveryMemberCounts:
+    """A member of an object is a member: the ceiling on how many pieces a
+    description holds covered lists only, so an object of any width walked
+    through untouched."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_a_wide_object_is_refused_at_once(self):
+        import time
+
+        wide = {"field": "Region", "values": ["North"]}
+        wide.update({f"k{index}": index for index in range(500_000)})
+        started = time.monotonic()
+        result = self._engine().build_filters(1, "app", [wide])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+
+    def test_a_wide_object_deeper_in_is_refused_too(self):
+        wide = {f"k{index}": index for index in range(300_000)}
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Region", "matching": {"filters": [wide]}}])
+        assert result["error_category"] == "limit_exceeded"
+
+
+class TestAContainerIsOneValueAndMeasuredAsOne:
+    """Qlik is asked about it as it stands, so it counts once - and its
+    length is the length of what goes into the modifier."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_it_counts_once_not_by_its_contents(self):
+        from qlik_sense_mcp_server.engine.filters import _weigh
+
+        weight = _weigh([{"field": "Region", "values": [[1, 2, 3]] * 3}])
+        assert weight["values"] == 3
+
+    def test_a_long_container_is_measured_whole(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Region",
+             "values": [["x" * (MAX_VALUE_CHARS // 2 + 10)] * 2]}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_the_stated_number_of_values_is_still_allowed(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_VALUES
+
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region",
+                        "values": ["North"] * MAX_FILTER_VALUES}],
+            scope={"bookmark": "BM01"})
         assert "error" not in result
