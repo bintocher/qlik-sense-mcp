@@ -200,14 +200,22 @@ def _written_length(value: Any, ceiling: int, max_depth: int,
             # stopped at the ceiling: building the text would cost several
             # times the value itself, which is what this counting is here
             # to avoid.
-            singles = value.count("'")
-            doubles = value.count('"')
-            quoted_with_double = bool(singles) and not doubles
-            total = 2
+            singles = doubles = 0
+            plain = 0
             for letter in value:
-                total += _written_letter(letter, quoted_with_double)
-                if total > ceiling:
+                if letter == "'":
+                    singles += 1
+                elif letter == '"':
+                    doubles += 1
+                else:
+                    plain += _written_letter(letter, False)
+                if plain > ceiling:
                     break
+            # Which quotes Python puts around it is known only once both
+            # are counted, and the quotes themselves are cheap to add.
+            quoted_with_double = bool(singles) and not doubles
+            total = plain + 2 + (singles + doubles * 2 if quoted_with_double
+                                 else singles * 2 + doubles)
             return total, (singles if quoted_with_double else singles + 2)
         singles = value.count("'")
         doubles = value.count('"')
@@ -472,6 +480,21 @@ def _probe_unusable(result: Dict[str, Any]) -> str:
     return str(stated) if stated else ""
 
 
+def _set_name(name: str) -> str:
+    """A bookmark or state name as it is written inside a set identifier.
+
+    Measured on the server: `{My State}` comes back as "'}' expected",
+    while `{[My State]}` is read. A name already in brackets is left as it
+    is.
+    """
+    text = str(name).strip()
+    if text.startswith("[") and text.endswith("]") and len(text) > 1:
+        return text
+    if all(letter.isalnum() or letter == "_" for letter in text):
+        return text
+    return f"[{text}]"
+
+
 def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
     """The identifier that goes before the modifier, from a description.
 
@@ -510,8 +533,8 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
         if blank:
             return {"error": f"scope names an empty {blank[0]}.",
                     "error_category": "invalid_argument"}
-        return {"identifier": f"{str(scope['state']).strip()}::"
-                              f"{str(scope['bookmark']).strip()}"}
+        return {"identifier": f"{_set_name(scope['state'])}::"
+                              f"{_set_name(scope['bookmark'])}"}
     key = named[0]
     value = scope[key]
     if key in ("ignore_selections", "current_selection"):
@@ -526,7 +549,7 @@ def _set_identifier(scope: Dict[str, Any]) -> Dict[str, Any]:
         if not name:
             return {"error": f"scope names an empty {key}.",
                     "error_category": "invalid_argument"}
-        return {"identifier": name}
+        return {"identifier": _set_name(name)}
     # Steps through the selection history: `$1` back, `$_1` forward. Two
     # keys rather than one signed number, because Qlik spells them with
     # different characters rather than different signs.
