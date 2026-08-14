@@ -169,10 +169,20 @@ def _written_length(value: Any, ceiling: int, max_depth: int,
                     return chars, quotes
         return chars, quotes
     if isinstance(value, str):
-        # Inside a container Python writes it in quotes, and those quotes
-        # are doubled by the quoting around the container just like the
-        # ones the value already held.
-        return len(value) + 2, value.count("'") + 2
+        # Written the way Python writes a string inside a container, which
+        # is what `str(container)` produces and `quote_value` then quotes:
+        # single quotes around it unless that would need escaping, double
+        # quotes otherwise. Counted rather than guessed - the two differ by
+        # enough to let a value past the ceiling or to refuse one under it.
+        singles = value.count("'")
+        doubles = value.count('"')
+        backslashes = value.count("\\")
+        if singles and not doubles:
+            # Written in double quotes; the single quotes stay as they are.
+            return len(value) + backslashes + 2, singles
+        # Written in single quotes; the ones inside are escaped, and both
+        # the escaped ones and the pair around it are doubled later.
+        return (len(value) + singles + backslashes + 2, singles + 2)
     text = repr(value)
     return len(text), text.count("'")
 
