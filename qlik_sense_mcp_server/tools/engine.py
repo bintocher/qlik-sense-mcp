@@ -6,10 +6,11 @@ holds the single shared WebSocket for its whole duration — see
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from . import context
 from .context import mcp
+from .schema import (Filter, Measure, Metric, Query, Scope)
 from .helpers import (
     _check,
     _engine_serialised,
@@ -191,12 +192,12 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
 @_engine_serialised
 def engine_query(
     app_id: str,
-    queries: Optional[List[Dict[str, Any]]] = None,
-    group_by: Optional[List[str]] = None,
-    metrics: Optional[List[Dict[str, Any]]] = None,
-    measures: Optional[List[Dict[str, Any]]] = None,
-    filters: Optional[List[Dict[str, Any]]] = None,
-    scope: Optional[Dict[str, Any]] = None,
+    queries: Optional[List[Query]] = None,
+    group_by: Optional[List[Union[str, Dict[str, Any]]]] = None,
+    metrics: Optional[List[Metric]] = None,
+    measures: Optional[List[Union[str, Measure]]] = None,
+    filters: Optional[List[Filter]] = None,
+    scope: Optional[Scope] = None,
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     limit: int = 100,
@@ -427,6 +428,21 @@ def engine_query(
     e = _check()
     if e:
         return e
+    # The models exist to describe the shape to the caller; the engine
+    # reads plain dictionaries, and a key the caller did not write should
+    # not appear as null further down.
+    def _plain(value):
+        if isinstance(value, list):
+            return [_plain(item) for item in value]
+        dumped = getattr(value, "model_dump", None)
+        if dumped is None:
+            return value
+        return dumped(exclude_none=True, by_alias=True)
+
+    queries = _plain(queries)
+    group_by, metrics = _plain(group_by), _plain(metrics)
+    measures, filters, scope = _plain(measures), _plain(filters), _plain(scope)
+
     if queries is None:
         queries = [{
             "group_by": group_by or [],
@@ -707,7 +723,12 @@ def get_app_field(
     case_sensitive: bool = False,
 ) -> str:
     """
-    List the values a field holds, most frequent first.
+    List the values a field holds, in the field's own order.
+
+    The order is Qlik's own - ascending by value, numeric or alphabetic.
+    It is not an order of importance: the first ten values of a large
+    field are the first ten alphabetically, not the ten that occur most
+    often.
 
     WHEN TO USE
         To see how a value is really spelled before filtering on it. A
