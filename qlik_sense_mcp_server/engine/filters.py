@@ -21,6 +21,7 @@ only where it agrees.
 """
 
 import datetime
+import decimal
 import logging
 import math
 import re
@@ -108,30 +109,30 @@ def _parse_bound(value: Any, upper: bool) -> Optional[datetime.date]:
 
 
 def _exactly_held(value: Any) -> bool:
-    """Whether this number survives the round trip into an expression.
+    """Whether the bound Qlik receives is the bound that was asked for.
 
-    Past 2**53 a float no longer holds every integer, and a bound written
-    from it is a different bound - one that quietly takes in a neighbouring
-    value.
+    Not a size limit: 2**54 is written exactly, while 2**53 + 1 is not.
+    The question is only whether what gets written back matches what was
+    read - a bound that shifts takes in a neighbouring row, and the answer
+    looks entirely reasonable.
     """
-    if isinstance(value, bool):
+    if isinstance(value, bool) or value is None:
         return True
-    if isinstance(value, str):
-        # A bound may be written as text - a documented form - and the
-        # number inside it shifts exactly the same way.
-        text = value.strip()
-        try:
-            value = int(text)
-        except ValueError:
-            try:
-                value = float(text)
-            except ValueError:
-                return True
-    if not isinstance(value, (int, float)):
+    # An integer is measured too: the writing goes through a float, so
+    # 9007199254740993 comes back one less than it went in.
+    text = value.strip() if isinstance(value, str) else value
+    try:
+        asked = decimal.Decimal(str(text))
+    except (decimal.InvalidOperation, ValueError, TypeError):
+        # Not a number at all; the rest of the reading refuses it by name.
         return True
-    # Compared without going through float first: float(2**53 + 1) is
-    # 2**53, which is exactly the shift being guarded against.
-    return abs(value) <= 2 ** 53
+    written = _plain_number(text)
+    if written is None:
+        return True
+    try:
+        return decimal.Decimal(written) == asked
+    except decimal.InvalidOperation:
+        return True
 
 
 def _plain_number(value: Any) -> Optional[str]:
@@ -405,12 +406,12 @@ class EngineFiltersMixin:
         for bound in (low, high):
             if bound is not None and not _exactly_held(bound):
                 return {"error": (
-                    f"Bound {bound!r} on {escape_qlik_field_name(field)} is "
-                    f"too large to be written exactly."),
+                    f"Bound {bound!r} on {escape_qlik_field_name(field)} "
+                    f"shifts to {_plain_number(bound)} when written."),
                     "error_category": "invalid_filter",
-                    "hint": ("Above 9007199254740992 a number shifts when "
-                             "written, and the filter would take in a "
-                             "neighbouring value.")}
+                    "hint": ("The filter would take in a neighbouring "
+                             "value. Not every large number shifts - "
+                             "18014398509481984 is written exactly.")}
         parts = []
         if low is not None:
             parts.append(f"{'>' if low_exclusive else '>='}{_plain_number(low)}")

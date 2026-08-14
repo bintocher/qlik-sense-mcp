@@ -1754,3 +1754,42 @@ class TestTheArithmeticShapeIsCheckedToo:
                 {"field": "Amount", "agg": "sum"},
                 {"field": "Amount", "agg": "sum"}]}])])
         assert result["queries_failed"] == 0
+
+
+class TestTotalOnTheOperationItself:
+    """Stated on the operation it belongs to every part of it: a share of
+    the whole is the same share whichever aggregation is written first. It
+    used to be accepted and then ignored."""
+
+    def test_it_reaches_every_part(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide", "total": True, "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "count"}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum(TOTAL [Amount])" in expression
+        assert "Count(TOTAL [Amount])" in expression
+
+    def test_total_except_reaches_them_too(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide",
+                      "total_except": ["Region"], "of": [
+                          {"field": "Amount", "agg": "sum"},
+                          {"field": "Amount", "agg": "sum"}]}]), 0)
+        assert "TOTAL <[Region]>" in plan["measures"][0]["expression"]
+
+    def test_a_part_keeps_what_it_says_for_itself(self):
+        plan = _Engine()._plan_query(1, "app", _query(
+            metrics=[{"label": "n", "op": "divide", "total": True, "of": [
+                {"field": "Amount", "agg": "sum", "total": False},
+                {"field": "Amount", "agg": "sum"}]}]), 0)
+        expression = plan["measures"][0]["expression"]
+        assert "Sum([Amount]) / Sum(TOTAL [Amount])" in expression
+
+    @pytest.mark.parametrize("stated", ["yes", 1, "false"])
+    def test_the_type_is_checked_here_as_well(self, stated):
+        result = _Engine().run_queries(1, "app", [_query(
+            metrics=[{"label": "n", "op": "divide", "total": stated, "of": [
+                {"field": "Amount", "agg": "sum"},
+                {"field": "Amount", "agg": "sum"}]}])])
+        assert result["results"][0]["error_category"] == "invalid_argument"
