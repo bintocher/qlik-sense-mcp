@@ -1667,10 +1667,16 @@ class TestNoWayPastTheCeilings:
         assert result["error_category"] == "limit_exceeded"
 
     def test_numbers_are_weighed_like_text(self):
-        """A number reaches Qlik as the text of that number."""
+        """A number reaches Qlik as the text of that number. Measured on
+        its own: few enough values to pass that ceiling, long enough as
+        text to pass this one."""
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
         result = self._engine().build_filters(
-            1, "app", [{"field": "Region", "values": list(range(5000))}])
+            1, "app", [{"field": "Region",
+                        "values": [int("9" * (MAX_VALUE_CHARS + 1))]}])
         assert result["error_category"] == "limit_exceeded"
+        assert "characters" in result["error"]
 
     def test_a_combination_is_weighed_whole(self):
         heavy = {"ignore_selections": True, "filters": [
@@ -1684,3 +1690,47 @@ class TestNoWayPastTheCeilings:
             1, "app", [{"field": "Region", "values": ["North"]}],
             scope={"bookmark": "BM01"})
         assert "error" not in result
+
+
+class TestTheCeilingCostsNothingToEnforce:
+    """Walking a collection of arbitrary size to find out that it is too
+    large costs exactly what the ceiling exists to prevent."""
+
+    def test_a_huge_list_is_refused_without_walking_it(self):
+        import time
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        started = time.monotonic()
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": ["x"] * 3_000_000}])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+
+    def test_the_stated_number_of_values_is_allowed(self):
+        """The field name and the scope are not values."""
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_VALUES
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region",
+                        "values": ["North"] * MAX_FILTER_VALUES}],
+            scope={"bookmark": "BM01"})
+        assert "error" not in result
+
+
+class TestQuotingMakesAValueLonger:
+    """A value counted as short can arrive long: the ceiling is about what
+    Qlik reads, so the built modifier is measured as well."""
+
+    def test_the_built_modifier_is_measured(self):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(1, "app", [
+            {"field": "Region", "values": ["'" * 4000 for _ in range(3)]}])
+        assert result["error_category"] == "limit_exceeded"
+        assert "modifier" in result["error"]
