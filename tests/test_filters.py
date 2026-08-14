@@ -1882,3 +1882,39 @@ class TestMeasuringAWideContainer:
         result = engine.build_filters(
             1, "app", [{"field": "Region", "values": [["North", "South"]]}])
         assert "error" not in result
+
+
+class TestLengthIsWhatQlikReceives:
+    """Quoting doubles the quotes inside a value, so a container counted by
+    its plain text could still arrive over the ceiling."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_quotes_inside_a_container_value_are_counted(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_VALUE_CHARS
+
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Region",
+             "values": [["'" * (MAX_VALUE_CHARS // 2 + 10)]]}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_the_depth_budget_runs_from_the_root(self):
+        from qlik_sense_mcp_server.engine.filters import MAX_FILTER_DEPTH
+
+        buried = ["x"]
+        for _ in range(MAX_FILTER_DEPTH + 2):
+            buried = [buried]
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": [buried]}])
+        assert result["error_category"] == "limit_exceeded"
+
+    def test_an_ordinary_container_still_passes(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": [["North"]]}])
+        assert "error" not in result
