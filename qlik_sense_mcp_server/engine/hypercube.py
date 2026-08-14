@@ -281,7 +281,8 @@ class EngineHypercubeMixin:
         name. Brackets belong where a name could be mistaken for
         surrounding text — in messages about it.
         """
-        names = [bare_field_name(str(d.get("field", "")))
+        names = [str(d.get("label") or "").strip()
+                 or bare_field_name(str(d.get("field", "")))
                  for d in converted_dimensions]
         for i, m in enumerate(converted_measures):
             names.append(str(m.get("label") or m.get("expression") or f"Measure_{i}"))
@@ -372,7 +373,7 @@ class EngineHypercubeMixin:
           * an int — used directly as a column index;
           * a measure label, a measure expression, or the auto-generated
             `Measure_<i>` name;
-          * a dimension field name.
+          * a dimension field name, or the label the caller gave it.
         Matching is case-insensitive and tolerates surrounding square
         brackets, because LLMs routinely write `[Sales]` for a field.
         """
@@ -406,7 +407,9 @@ class EngineHypercubeMixin:
                 return n_dims + i
 
         for i, dim in enumerate(converted_dimensions):
-            if target == _key(dim.get("field")):
+            # A grouping may carry a name of its own, and that name is what
+            # the reply calls the column - so it is what a caller sorts by.
+            if target in {_key(dim.get("field")), _key(dim.get("label"))} - {""}:
                 return i
 
         return None
