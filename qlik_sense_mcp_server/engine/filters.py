@@ -138,6 +138,26 @@ def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
                  "for fewer values at a time.")}
 
 
+def _written_letter(letter: str, quoted_with_double: bool) -> int:
+    """How many characters Python writes for one letter inside a string."""
+    if letter == "\\":
+        return 2
+    if letter == "'":
+        return 1 if quoted_with_double else 2
+    if letter == '"':
+        return 2 if quoted_with_double else 1
+    if letter.isprintable():
+        return 1
+    if ord(letter) in (9, 10, 13):
+        return 2
+    code = ord(letter)
+    if code <= 0xFF:
+        return 4
+    if code <= 0xFFFF:
+        return 6
+    return 10
+
+
 def _written_length(value: Any, ceiling: int, max_depth: int,
                     depth: int = 0) -> Optional[Tuple[int, int]]:
     """The length of a value as text, and how many quotes it holds.
@@ -175,11 +195,20 @@ def _written_length(value: Any, ceiling: int, max_depth: int,
         # quotes otherwise. Counted rather than guessed - the two differ by
         # enough to let a value past the ceiling or to refuse one under it.
         if not value.isprintable():
-            # A newline is written as two characters, a null as four, and
-            # an invisible space as six. Rare enough to write out and
-            # measure exactly rather than to reproduce rule by rule.
-            written = repr(value)
-            return len(written), written.count("'")
+            # A newline is written as two characters, a null as four, an
+            # invisible space as six. Counted character by character, and
+            # stopped at the ceiling: building the text would cost several
+            # times the value itself, which is what this counting is here
+            # to avoid.
+            singles = value.count("'")
+            doubles = value.count('"')
+            quoted_with_double = bool(singles) and not doubles
+            total = 2
+            for letter in value:
+                total += _written_letter(letter, quoted_with_double)
+                if total > ceiling:
+                    break
+            return total, (singles if quoted_with_double else singles + 2)
         singles = value.count("'")
         doubles = value.count('"')
         backslashes = value.count("\\")
