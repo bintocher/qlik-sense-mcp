@@ -711,11 +711,17 @@ class EngineFieldsMixin:
                         for i, cell in enumerate(row):
                             if i < len(exprs):
                                 label = exprs[i][1]
+                                # A cell of a hypercube carries no
+                                # `qIsNumeric` - that key belongs to a
+                                # single evaluated expression - so the
+                                # flag was always false, even beside a
+                                # number. Read from the number instead.
+                                number = (cell.get("qNum")
+                                          if cell.get("qNum") != "NaN" else None)
                                 stats[label] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (cell.get("qNum", None)
-                                                if cell.get("qNum") != "NaN" else None),
-                                    "is_numeric": cell.get("qIsNumeric", False),
+                                    "numeric": number,
+                                    "is_numeric": number is not None,
                                 }
                 return stats
         except Exception as e:
@@ -811,11 +817,16 @@ class EngineFieldsMixin:
                     for row in page.get("qMatrix", []):
                         for i, cell in enumerate(row):
                             if i < len(stats_labels):
+                                # A cell of a hypercube carries no
+                                # `qIsNumeric` - that key belongs to a
+                                # single evaluated expression - so the flag
+                                # was always false, even beside a number.
+                                number = (cell.get("qNum")
+                                          if cell.get("qNum") != "NaN" else None)
                                 statistics[stats_labels[i]] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (cell.get("qNum")
-                                                if cell.get("qNum") != "NaN" else None),
-                                    "is_numeric": cell.get("qIsNumeric", False),
+                                    "numeric": number,
+                                    "is_numeric": number is not None,
                                 }
 
                 def _numeric(key):
