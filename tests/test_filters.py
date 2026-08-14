@@ -1574,3 +1574,45 @@ class TestABoundWrittenAsText:
             1, "app", [{"field": "price", "greater_than": "yesterday"}])
         # Refused for what it is, not for how large it is.
         assert "neither dates nor numbers" in result["error"]
+
+
+class TestAPeriodNamesBothEnds:
+    """A bound beside a period replaces one of its ends, and the period
+    quietly widens to take in rows nobody asked for."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("bound", ["from", "to", "greater_than",
+                                       "less_than"])
+    def test_a_bound_beside_it_is_refused(self, bound):
+        result = self._engine().build_filters(
+            1, "app", [dict({"field": "F", "period": "2011"},
+                            **{bound: "2011-06-01"})])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_a_period_alone_still_works(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "F", "period": "2011"}])
+        assert "error" not in result
+
+
+class TestANumberTooLargeForADouble:
+    """Past what a double holds, `float()` raises rather than rounds - and
+    an unhandled raise is not the refusal this reading promises."""
+
+    @pytest.mark.parametrize("bound", [10 ** 400, -(10 ** 400)])
+    def test_it_is_refused_by_name(self, bound):
+        result = _Engine(values=("North",)).build_filters(
+            1, "app", [{"field": "price", "greater_than": bound}])
+        assert result["error_category"] == "invalid_filter"
+
+    def test_the_same_written_as_text(self):
+        result = _Engine(values=("North",)).build_filters(
+            1, "app", [{"field": "price", "greater_than": "1" + "0" * 400}])
+        assert result["error_category"] == "invalid_filter"
