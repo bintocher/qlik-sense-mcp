@@ -18,7 +18,7 @@ import time
 import uuid
 
 from ..utils import bare_field_name, escape_qlik_field_name
-from .filters import _set_identifier
+from .filters import _set_identifier, _too_much
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -385,6 +385,9 @@ class EngineQueriesMixin:
 
         def slice_for(wanted, own_scope=None):
             chosen = own_scope if _scope_names_a_set(own_scope) else scope
+            refusal = _too_much([wanted, chosen])
+            if refusal:
+                return refusal
             signature = json.dumps([wanted, chosen], sort_keys=True,
                                    ensure_ascii=False, default=str)
             if signature not in slices:
@@ -1134,30 +1137,6 @@ class EngineQueriesMixin:
         reason; the rest of the batch still answers.
         """
         started = time.monotonic()
-        # Counted before anything is walked: a batch already past the
-        # ceiling costs nothing to refuse.
-        if len(queries) > MAX_QUERIES_PER_CALL:
-            return {"error": (
-                f"{len(queries)} queries in one call; the cap is "
-                f"{MAX_QUERIES_PER_CALL}."),
-                "error_category": "limit_exceeded",
-                "hint": "Ask for fewer at a time."}
-
-        expressions = sum(
-            _listed(q.get("group_by") or q.get("dimensions"))
-            + _metric_cost(q.get("metrics")) + _listed(q.get("measures"))
-            + _filter_cost(q)
-            for q in queries if isinstance(q, dict))
-        if expressions > MAX_EXPRESSIONS_PER_CALL:
-            return {
-                "error": (
-                    f"{expressions} grouping fields and measures in one call; "
-                    f"the cap is {MAX_EXPRESSIONS_PER_CALL}."
-                ),
-                "error_category": "limit_exceeded",
-                "hint": ("Every one of them is checked by Engine before the "
-                         "batch runs. Ask fewer things at a time."),
-            }
         if len(queries) > MAX_QUERIES_PER_CALL:
             # Refused before anything is planned or opened: the whole batch
             # goes to Engine before the first reply is read, and every
@@ -1173,6 +1152,21 @@ class EngineQueriesMixin:
                     f"together, so a batch that size already costs the same "
                     f"three round-trips as one query."
                 ),
+            }
+        expressions = sum(
+            _listed(q.get("group_by") or q.get("dimensions"))
+            + _metric_cost(q.get("metrics")) + _listed(q.get("measures"))
+            + _filter_cost(q)
+            for q in queries if isinstance(q, dict))
+        if expressions > MAX_EXPRESSIONS_PER_CALL:
+            return {
+                "error": (
+                    f"{expressions} grouping fields and measures in one call; "
+                    f"the cap is {MAX_EXPRESSIONS_PER_CALL}."
+                ),
+                "error_category": "limit_exceeded",
+                "hint": ("Every one of them is checked by Engine before the "
+                         "batch runs. Ask fewer things at a time."),
             }
         plans: List[Dict[str, Any]] = []
         for position, query in enumerate(queries):

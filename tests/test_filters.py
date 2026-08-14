@@ -1856,3 +1856,29 @@ class TestMeasuringCostsNothing:
         result = self._engine().build_filters(
             1, "app", [{"field": "Region", "values": {"a": "x" * 5000}}])
         assert result["error_category"] == "limit_exceeded"
+
+
+class TestMeasuringAWideContainer:
+    """Its length is what Qlik will see, but that text is never built: a
+    container of any width costs the price of the part that already broke
+    the rule."""
+
+    def test_a_wide_container_value_is_refused_at_once(self):
+        import time
+
+        engine = _Engine(values=("North",), date_fields=("F",))
+        wide = {f"k{index}": "v" * 50 for index in range(300_000)}
+        started = time.monotonic()
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [wide]}])
+        assert result["error_category"] == "limit_exceeded"
+        assert time.monotonic() - started < 1.0
+
+    def test_an_ordinary_container_value_passes(self):
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Region", "values": [["North", "South"]]}])
+        assert "error" not in result
