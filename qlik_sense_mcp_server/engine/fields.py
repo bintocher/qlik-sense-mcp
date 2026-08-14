@@ -1,13 +1,28 @@
 """Field-level reads: values, ranges, statistics, descriptions."""
 
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import logging
 
 from ..exceptions import QlikEngineError
 import uuid
 
 logger = logging.getLogger(__name__)
+
+
+def _bad_offset(offset: Any) -> Optional[Dict[str, Any]]:
+    """The refusal a page number earns, or nothing.
+
+    A page before the first is a request nobody can answer, and answering
+    the first page instead returns data for a different question.
+    """
+    if offset is None:
+        return None
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return {"error": f"offset={offset!r} is not a row number.",
+                "error_category": "invalid_argument",
+                "hint": "Pass 0 or a positive integer, or omit it."}
+    return None
 
 
 class EngineFieldsMixin:
@@ -233,7 +248,9 @@ class EngineFieldsMixin:
             },
         }
 
-        offset = max(0, offset)
+        refusal = _bad_offset(offset)
+        if refusal:
+            return refusal
         limit = max(1, limit)
 
         with self.session_object(app_handle, definition) as cube_handle:
@@ -340,7 +357,7 @@ class EngineFieldsMixin:
                     ],
                 },
                 "qInitialDataFetch": [
-                    {"qTop": max(0, offset), "qLeft": 0,
+                    {"qTop": offset, "qLeft": 0,
                      "qHeight": max_values, "qWidth": 1}
                 ],
             },
@@ -594,7 +611,7 @@ class EngineFieldsMixin:
                 "qInitialDataFetch": [
                     # The page top, so the second page of a high-cardinality
                     # field is the second page and not the first one again.
-                    {"qTop": max(0, offset), "qLeft": 0,
+                    {"qTop": max(0, offset or 0), "qLeft": 0,
                      "qHeight": max_values, "qWidth": 2}
                 ],
                 "qSuppressZero": False,

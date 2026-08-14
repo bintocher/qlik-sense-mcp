@@ -222,7 +222,14 @@ def get_apps(
     if e:
         return e
     lim = min(max(limit or DEFAULT_APPS_LIMIT, 1), MAX_APPS_LIMIT)
-    off = max(offset or 0, 0)
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
     # An unrecognised value used to answer exactly like the correct one:
     # `published="all"` fell through to "no filter", which is what "both"
     # means, so a typo looked like it worked.

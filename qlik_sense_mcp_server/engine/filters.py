@@ -138,6 +138,30 @@ def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
                  "for fewer values at a time.")}
 
 
+def _count_quotes(value: Any, ceiling: int, max_depth: int,
+                  depth: int = 0) -> int:
+    """How many single quotes a value carries, counted without building it."""
+    if depth > max_depth:
+        return 0
+    if isinstance(value, dict):
+        total = 0
+        for key, inner in value.items():
+            total += _count_quotes(key, ceiling, max_depth, depth + 1)
+            total += _count_quotes(inner, ceiling, max_depth, depth + 1)
+            if total > ceiling:
+                return total
+        return total
+    if isinstance(value, (list, tuple)):
+        total = 0
+        for inner in value:
+            total += _count_quotes(inner, ceiling, max_depth, depth + 1)
+            if total > ceiling:
+                return total
+        return total
+    text = value if isinstance(value, str) else repr(value)
+    return text.count("'")
+
+
 def _text_length(value: Any, ceiling: int, max_depth: int,
                  depth: int = 0) -> Optional[int]:
     """How long this value reads as text, counted without building it.
@@ -203,8 +227,11 @@ def _weigh(value: Any, depth: int = 0, tally: Optional[Dict[str, Any]] = None,
         length = _text_length(value, MAX_VALUE_CHARS,
                               MAX_FILTER_DEPTH - depth)
         if length is not None:
-            # Quoted whole, and every quote inside it doubled again.
-            length = length * 2 + 2
+            # Quoted whole: two quotes around it, and the quotes inside it
+            # doubled - not every character.
+            quotes = _count_quotes(value, MAX_VALUE_CHARS,
+                                   MAX_FILTER_DEPTH - depth)
+            length = length + quotes + 2
         tally["values"] += 1
         if length is None:
             tally["too_deep"] = True
@@ -518,6 +545,15 @@ class EngineFiltersMixin:
     def _remember_form(self, app_id: str, field: str, form: str) -> None:
         self._filter_form_store()[(app_id, field)] = (form, time.monotonic())
 
+    def _forget_form(self, app_id: str, field: str) -> None:
+        """Drop what was remembered about one field.
+
+        A form is remembered because it agreed with the reference once. A
+        later period on the same field that agrees with nothing says the
+        memory is no longer worth having.
+        """
+        self._filter_form_store().pop((app_id, field), None)
+
     def forget_filter_forms(self, app_id: str = None) -> None:
         """Drop the remembered forms for one app, or for all of them."""
         store = self._filter_form_store()
@@ -734,21 +770,39 @@ class EngineFiltersMixin:
             chosen = [c for c in candidates if c[0] == remembered]
             if chosen:
                 label, modifier = chosen[0]
+                # Measured against the reference, like any other form:
+                # remembering that a form worked once is not the same as
+                # knowing it counts the right days for this period, and
+                # trusting it outright let a period no form agrees with
+                # through for as long as the memory lived.
+                reference = (
+                    f"=Count({{{base}}} DISTINCT If({name}>={serial_from} "
+                    f"and {name}<{serial_to}, {name}))" if base else
+                    f"=Count(DISTINCT If({name}>={serial_from} and "
+                    f"{name}<{serial_to}, {name}))")
                 counted = self.evaluate_expressions(
                     app_handle,
-                    [f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
-                complaint = _probe_complaint(counted[0]) if counted else ""
+                    [reference,
+                     f"=Count({{{base}<{modifier}>}} DISTINCT {name})"])
+                complaint = (_probe_complaint(counted[0]) if counted else "")
                 if complaint:
                     return {"error": (
                         f"Qlik cannot read the period on "
                         f"{escape_qlik_field_name(field)}: {complaint}"),
                         "error_category": "invalid_period"}
-                matched = counted[0].get("number") if counted else None
-                if matched is not None and int(matched) > 0:
+                expected = counted[0].get("number") if counted else None
+                matched = (counted[1].get("number")
+                           if len(counted) > 1 else None)
+                if (expected is not None and matched is not None
+                        and int(expected) == int(matched)):
+                    if int(matched) == 0:
+                        return {"error": (
+                            f"No value of {field!r} falls in the period "
+                            f"asked for."),
+                            "error_category": "empty_period"}
                     return {"modifier": modifier, "form": label,
                             "matched": int(matched)}
-                # Nothing selected: fall through and measure again rather
-                # than answer a zero built on a remembered choice.
+                # It no longer agrees: measure every form again.
 
         reference_expr = (
             f"=Count({{{base}}} DISTINCT If({name}>={serial_from} and "
@@ -823,25 +877,23 @@ class EngineFiltersMixin:
         # would select some other set of days than the one asked for, and a
         # number counted over the wrong days is the failure this whole
         # measurement exists to prevent.
-        usable = []
-        if not usable:
-            return {"error": (
-                f"No form of a period filter on "
-                f"{escape_qlik_field_name(field)} could be measured"
-                + (f": {complaints[0]}" if complaints else
-                   ": Qlik answered none of them with a count.")),
-                "error_category": "invalid_period"}
-        label, modifier = usable[-1]
-        unproven_note = (
-            f"Which form of a period filter on "
-            f"{escape_qlik_field_name(field)} Qlik reads could not be "
-            f"measured: no candidate agreed with the reference count."
-        )
+        # Nothing agreed with the reference. Whichever form went out would
+        # select some other set of days than the one asked for, and a
+        # number counted over the wrong days is the failure this whole
+        # measurement exists to prevent.
+        self._forget_form(app_id, field)
         logger.warning(
             "No filter form matched the reference count on %r (reference=%d)",
             field, reference)
-        return {"modifier": modifier, "form": label, "matched": reference,
-                "note": unproven_note}
+        return {"error": (
+            f"No form of a period filter on "
+            f"{escape_qlik_field_name(field)} counts the same days as the "
+            f"period asked for"
+            + (f": {complaints[0]}" if complaints else ".")),
+            "error_category": "invalid_period",
+            "hint": ("The field may hold dates written in a way this server "
+                     "cannot filter on; read it with "
+                     "engine_get_field_range.")}
 
     def values_modifier(self, app_handle: int, field: str,
                         values: List[Any], operator: str = "values",
