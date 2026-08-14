@@ -4,6 +4,172 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [2.0.2] - 2026-08-14
+
+### Added
+
+- The app's own library of measures and dimensions comes back with
+  `get_app_details` under `library`, and a query can name a measure from
+  it instead of assembling the aggregation itself:
+  `{"measures": [{"master": "Sales MUSD"}]}`. This is the vocabulary the
+  author of the app wrote down - what revenue means here, and how it is
+  computed. Assembled by hand, the same question can pick a neighbouring
+  field or a different aggregation and answer with a number nobody on
+  that dashboard would recognise.
+- The bookmarks and alternate states an app holds come back under
+  `named_sets`, so a caller asking for one by name has somewhere to read
+  the right spelling.
+- The shape of a typed query is declared in the tool schema: which keys a
+  filter, a metric, a measure, a scope and a query have, which are
+  required, and what values they take. A key that does not exist is
+  refused before Qlik is asked.
+- Data of one object comes back in pages (`limit`, `offset`), while its
+  definition and expressions come whole. Measured on a live table: the
+  reply used to run to 111 thousand characters, nearly all of them rows.
+
+### Changed
+
+- A refusal states what is wrong and stops there. It no longer advises
+  what to do next, and no longer lists what would have been valid:
+  choosing the next step belongs to the caller, and the lists it may need
+  it can ask for with a call of its own.
+- The reply of a query carries its warnings first, before the numbers,
+  together with a plain flag when a number cannot be taken as verified.
+  A batch where every query failed answers as a failure rather than as a
+  list with failures inside it.
+- A period that could not be checked is said out loud instead of being
+  passed over in silence beside a number.
+
+### Fixed
+
+- `get_app_field` no longer claims to return the most frequent values
+  first: the order is the field's own, ascending, and the first ten
+  values of a large field are the first ten alphabetically.
+- An app whose name holds an apostrophe is found by name again. Measured:
+  the repository refuses a quote inside a filter in every form, so the
+  quote no longer goes into the filter at all.
+- A grouping written as an expression stays an expression instead of
+  being read as a field name, and a grouping can carry a label to be
+  sorted by.
+- The page of an object is read from Engine rather than cut out of the
+  first one it happened to send.
+- The default state `$` is accepted; it exists in every app and is never
+  listed among the named ones.
+
+## [2.0.2-dev] - 2026-08-13
+
+### Added
+
+- A metric can aggregate over groups rather than over rows: `per` names
+  what each inner value is computed for, `inner_agg` how it is computed.
+  `{"field": "tis_days", "inner_agg": "sum", "per": "IssueId",
+  "agg": "fractile", "p": 0.85}` becomes
+  `Fractile(Aggr(Sum([tis_days]), [IssueId]), 0.85)` — days summed per
+  issue, then the 85th percentile across issues. This is a different
+  question from the same aggregation over rows, and the answers differ:
+  measured on four rows, the median over rows was 6 and the median over
+  issues 10. Without this the second question could only be asked by
+  writing the expression by hand, and asking the first instead returned a
+  number that looked entirely reasonable.
+- `fractile` as an ordinary aggregation, with `p` for the fraction. A
+  fraction outside 0..1 is refused: measured, Qlik answers such a call
+  with a dash rather than an error, and a dash reads as a value.
+- A metric or a hand-written measure can carry its own `filters`,
+  overriding the query's, so a KPI holds its numerator and denominator in
+  one answer. No key means the query's filters; `[]` means none at all.
+  Identical filter sets are built once, not once per measure, and the
+  reply says in `measure_filters` which measure used which slice.
+- `engine_query` accepts `measures` in a single query, not only inside
+  `queries`.
+- A filter says which of the four things it does with the values it
+  names: keep them (`values`), drop them (`exclude`), add them to what is
+  selected (`add`) or keep what is in both (`intersect`). Only one per
+  filter — several conditions on one field are several filters, and
+  stating two at once is refused rather than answered by the first.
+- A filter can name values of its field by a condition on another field:
+  `matching` for the clients who bought in 2023, `not_matching` for those
+  who did not, both together for "bought then and not since". `of_field`
+  reads the values from a different field than the one being narrowed.
+  Measured on a model of a hundred: 60 bought in 2023, 40 did not, 30
+  bought in 2023 and not in 2024.
+- A filter can search text (`contains`, `starts_with`, `ends_with`,
+  case-insensitive) or keep the values an expression holds for
+  (`match_expression`).
+- `scope` says what a query counts over before any filter narrows it: the
+  whole model whatever is selected, a bookmark, an alternate state, or
+  the selections as they were a few steps back (`selection_back`) or
+  forward again (`selection_forward`). Stated on the query it
+  reaches every measure; stated on one metric, or on one part of an
+  arithmetic metric, only that one.
+- `total` and `total_except` count across the grouping instead of within
+  it, so a share of the whole is one metric beside the value it is a
+  share of. Measured on 40 and 60 against a total of 100: the shares came
+  back 0.4 and 0.6, and with `total_except` by region each client's row
+  carried its own region's total.
+- Sets combine with each other, not only with values of a field:
+  `{"combine": "union", "of": [{...}, {...}]}` answers "bought in 2023 or
+  lives in the South", and `intersect`, `exclude` and
+  `symmetric_difference` answer the other three questions of the same
+  shape. Each set carries filters of its own. Measured on two sets holding
+  40 and 60: 100, 0, 40 and 100 respectively. A filter written outside the
+  combination is refused, because Qlik reads no modifier around one.
+- `op` and `of` state arithmetic over aggregations — a ratio, a
+  difference, a product — with each part free to carry its own filters
+  and its own scope. Division answers with no value rather than an error
+  when the denominator is zero. The reply names the slice each part used.
+
+### Fixed
+
+- A field name with a space made the check refuse a query Qlik runs
+  happily: `CheckExpression` reads a bare `Тип ставки` as two tokens and
+  answers "Garbage after expression: 'ставки'". Every model with
+  non-English field names was locked out of `engine_query`. Names are now
+  written in brackets — once, where the query is planned, because the
+  text of an expression is the key by which Engine's verdict finds its
+  way back to the query. A name that arrives already bracketed is left as
+  it is.
+- A filter on a field the app does not have blamed the bounds: a missing
+  field has no tags, so it read as "not a date" and perfectly good dates
+  went into a numeric parse that complained about them. The field is
+  checked before its bounds are read. A failed question is told apart
+  from a missing field, so a dropped frame is not reported as "no such
+  field".
+- The warning about set analysis fired on almost every measure. It was
+  built on `GetFieldsFromExpression` returning the fields a modifier
+  filters on; measured, it returns every field of the expression, so
+  `Sum([Amount])` came back as "set analysis filters on 'Amount'". The
+  warning and the call behind it are gone.
+- A limit above the ceiling, and a cube too wide for one page, are
+  refused with the value that fits instead of being quietly reduced. An
+  offset that is not a row number is refused rather than clamped. Bounds
+  given in the wrong order are refused instead of silently swapped.
+  Stating both an inclusive and an exclusive bound for the same end is
+  refused instead of one being ignored. An empty value inside a filter
+  list is named by its position rather than dropped.
+- A page of field values that filled up looked exactly like a field that
+  ran out. The reply now says whether there is more.
+- An unrecognised `published` value answered like the correct one:
+  anything unknown meant "no filter", which is what `"both"` means. It is
+  refused with the values it takes.
+
+### Changed
+
+- The group with no dimension value is kept by default in both tools -
+  the hypercube used to drop it unasked, which contradicted the same
+  sentence written for the typed query. Dropping it is a
+  statement about the data — facts with no value for the grouping field
+  are still facts — so it is the caller's to make: `exclude_null_dimensions`
+  is available in `engine_query` as well, and defaults to keeping the
+  group in both tools. A ranking may now start with Qlik's `"-"` row
+  where it did not before.
+- Suggestions of near-miss field names and values are gone. The model
+  reads the field list and the values itself; a shortlist picked by
+  string similarity is a guess about spelling, not a fact about the app.
+  The value search behind the old suggestion also cost about 2.5 seconds
+  per refusal.
+- Messages name a field in brackets — `[Дата ставки]` — so the boundary
+  between the name and the sentence around it is visible.
+
 ## [2.0.1] - 2026-08-13
 
 ### Fixed

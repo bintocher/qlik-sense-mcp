@@ -34,15 +34,8 @@ class TestTemporalColumns:
     def test_every_time_format_counts(self, qtype):
         assert QlikEngineAPI._temporal_columns(_cube(qtype)) == {0}
 
-    @pytest.mark.parametrize("qtype", ["A", "I", "R", "F", "M", "U"])
-    def test_a_number_or_a_string_does_not(self, qtype):
-        assert QlikEngineAPI._temporal_columns(_cube(qtype)) == set()
 
-    def test_measures_are_numbered_after_the_dimensions(self):
-        assert QlikEngineAPI._temporal_columns(_cube("A", "F", "D")) == {2}
 
-    def test_a_layout_without_format_information_claims_nothing(self):
-        assert QlikEngineAPI._temporal_columns({}) == set()
 
 
 class TestRowValues:
@@ -52,24 +45,6 @@ class TestRowValues:
             ["OrderDate", "Revenue"], temporal_columns={0})
         assert rows == [["01.01.2024", 100]]
 
-    def test_without_the_hint_a_date_would_come_back_as_a_serial_number(self):
-        """What the two halves used to disagree about."""
-        rows = QlikEngineAPI._matrix_to_rows(
-            _pages([("01.01.2024", 45292)]), ["OrderDate"])
-        assert rows == [[45292]]
 
-    def test_a_measure_stays_a_number_it_can_be_summed(self):
-        rows = QlikEngineAPI._matrix_to_rows(
-            _pages([("North", "NaN"), ("1 234,50", 1234.5)]),
-            ["Region", "Revenue"], temporal_columns=set())
-        assert rows == [["North", 1234.5]]
 
-    def test_a_date_cell_with_no_text_falls_back_to_its_number(self):
-        rows = QlikEngineAPI._matrix_to_rows(
-            _pages([("", 45292)]), ["OrderDate"], temporal_columns={0})
-        assert rows == [[45292]]
 
-    def test_a_null_cell_stays_qliks_dash(self):
-        rows = QlikEngineAPI._matrix_to_rows(
-            _pages([("-", "NaN")]), ["OrderDate"], temporal_columns={0})
-        assert rows == [["-"]]

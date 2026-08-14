@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 _FILTER_MARKER = "{filter}"
 
 
+MAX_EXPRESSION_CHARS = 20000
+
+
 class EngineHypercubeMixin:
     # How long a socket is trusted without probing after its last answered
     # frame. Anything shorter buys nothing: a socket that answered a moment
@@ -109,6 +112,16 @@ class EngineHypercubeMixin:
             str(dim.get("field") or "").strip()
             for dim in dimensions if str(dim.get("field") or "").strip()
         ]
+        for position, measure in enumerate(measures):
+            if not isinstance(measure, dict):
+                return {
+                    "error": (f"measures[{position}] is not a measure: "
+                              f"{measure!r}"),
+                    "error_category": "invalid_argument",
+                    "failed_step": "plan",
+                    "hint": ('An expression, or {"expression": "Sum(...)", '
+                             '"label": "..."}.'),
+                }
         measure_texts = [
             str(measure.get("expression") or "").strip()
             for measure in measures if str(measure.get("expression") or "").strip()
@@ -116,6 +129,21 @@ class EngineHypercubeMixin:
         every_text = dimension_texts + measure_texts
         if not every_text:
             return {"warnings": warnings}
+
+        # One expression has a size, whichever path built it. The typed
+        # query checks what it writes; this is the border every expression
+        # crosses, including the ones a caller wrote by hand.
+        for text in every_text:
+            if len(text) > MAX_EXPRESSION_CHARS:
+                return {
+                    "error": (
+                        f"An expression is {len(text)} characters long, "
+                        f"over the {MAX_EXPRESSION_CHARS} this server "
+                        f"sends."),
+                    "error_category": "limit_exceeded",
+                    "hint": ("Shorten it, or state the parts as separate "
+                             "measures."),
+                }
 
         if inspection is None:
             inspection = self.inspect_expressions(app_handle, every_text)
@@ -253,7 +281,8 @@ class EngineHypercubeMixin:
         name. Brackets belong where a name could be mistaken for
         surrounding text — in messages about it.
         """
-        names = [bare_field_name(str(d.get("field", "")))
+        names = [str(d.get("label") or "").strip()
+                 or bare_field_name(str(d.get("field", "")))
                  for d in converted_dimensions]
         for i, m in enumerate(converted_measures):
             names.append(str(m.get("label") or m.get("expression") or f"Measure_{i}"))
@@ -344,7 +373,7 @@ class EngineHypercubeMixin:
           * an int — used directly as a column index;
           * a measure label, a measure expression, or the auto-generated
             `Measure_<i>` name;
-          * a dimension field name.
+          * a dimension field name, or the label the caller gave it.
         Matching is case-insensitive and tolerates surrounding square
         brackets, because LLMs routinely write `[Sales]` for a field.
         """
@@ -378,7 +407,9 @@ class EngineHypercubeMixin:
                 return n_dims + i
 
         for i, dim in enumerate(converted_dimensions):
-            if target == _key(dim.get("field")):
+            # A grouping may carry a name of its own, and that name is what
+            # the reply calls the column - so it is what a caller sorts by.
+            if target in {_key(dim.get("field")), _key(dim.get("label"))} - {""}:
                 return i
 
         return None
@@ -526,7 +557,7 @@ class EngineHypercubeMixin:
         sort_order: str = "desc",
         suppress_zero: bool = False,
         include_raw_layout: bool = False,
-        exclude_null_dimensions: bool = True,
+        exclude_null_dimensions: bool = False,
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
@@ -541,9 +572,11 @@ class EngineHypercubeMixin:
         `qSortByExpression`, which makes the Engine evaluate the aggregate
         a second time purely for ordering.
 
-        `exclude_null_dimensions` (default True) sets `qNullSuppression`
+        `exclude_null_dimensions` (default False) sets `qNullSuppression`
         on every dimension, dropping the row whose dimension value is
-        NULL (Qlik renders it as "-"). Unattributed facts often
+        NULL (Qlik renders it as "-"). It is off by default: a fact with
+        no value for the grouping field is still a fact, and leaving it
+        out is the caller's statement to make. Unattributed facts often
         accumulate into that single row, which then wins the ranking and
         pushes out the real values — a top-10 that starts with "unknown"
         is rarely what the caller wanted.
@@ -615,11 +648,31 @@ class EngineHypercubeMixin:
                 converted_dimensions.append(dim)
 
             converted_measures = []
-            for measure in measures:
+            for position, measure in enumerate(measures):
                 if isinstance(measure, str):
                     measure = {"expression": measure}
-                else:
+                elif isinstance(measure, dict):
                     measure = dict(measure)
+                    if not str(measure.get("expression") or "").strip():
+                        return {
+                            "error": (f"measures[{position}] carries no "
+                                      f"expression: {measure!r}"),
+                            "error_category": "invalid_argument",
+                            "failed_step": "plan",
+                            "hint": ('{"expression": "Sum([Amount])", '
+                                     '"label": "Revenue"}.'),
+                        }
+                else:
+                    # A number is neither an expression nor a measure, and
+                    # saying so beats an interpreter error.
+                    return {
+                        "error": (f"measures[{position}] is not a measure: "
+                                  f"{measure!r}"),
+                        "error_category": "invalid_argument",
+                        "failed_step": "plan",
+                        "hint": ('An expression, or {"expression": '
+                                 '"Sum(...)", "label": "..."}.'),
+                    }
                 # Default: numeric descending. Only takes effect once this
                 # measure is the leading column of qInterColumnSortOrder.
                 measure.setdefault("sort_by", {"qSortByNumeric": -1})
@@ -676,7 +729,19 @@ class EngineHypercubeMixin:
             # multiple well-scoped queries, not one giant one.
             HARD_MAX_ROWS = self.HARD_MAX_ROWS
             HARD_MAX_CELLS = self.HARD_MAX_CELLS
-            page_offset = max(0, int(offset or 0))
+            # Refused, not clamped: a page before the first is a request
+            # nobody can answer, and answering the first page instead
+            # returns data for a different question.
+            if offset is not None and (isinstance(offset, bool)
+                                       or not isinstance(offset, int)
+                                       or offset < 0):
+                return {
+                    "error": f"offset={offset!r} is not a row number.",
+                    "error_category": "invalid_argument",
+                    "failed_step": "plan",
+                    "hint": "Pass 0 or a positive integer, or omit it.",
+                }
+            page_offset = int(offset or 0)
             n_cols = len(converted_dimensions) + len(converted_measures)
             n_dims = len(converted_dimensions)
             column_names = self._column_names(converted_dimensions, converted_measures)
@@ -746,6 +811,21 @@ class EngineHypercubeMixin:
                         f"together with sort_by."
                     ),
                 }
+
+            # A key meaning yes or no takes yes or no here as well: the
+            # typed query refuses the word spelled out, and both tools
+            # answer to one rule.
+            for key, value in (("exclude_null_dimensions",
+                                exclude_null_dimensions),
+                               ("suppress_zero", suppress_zero),
+                               ("include_raw_layout", include_raw_layout)):
+                if value is not None and not isinstance(value, bool):
+                    return {
+                        "error": f"{key}={value!r} is not yes or no.",
+                        "error_category": "invalid_argument",
+                        "failed_step": "plan",
+                        "hint": "true or false, not the word for it.",
+                    }
 
             # Reject max_rows over the hard cap.
             if max_rows > HARD_MAX_ROWS:
@@ -970,14 +1050,22 @@ class EngineHypercubeMixin:
                     f"re-run with a smaller limit, or narrow the query with "
                     f"set analysis."
                 )
-            elif total_rows_on_server > rows_fetched:
+            elif total_rows_on_server > page_offset + rows_fetched:
+                # Counted from where the page starts: the last page of a
+                # walk holds fewer rows than the server has in total, and
+                # calling that "truncated" sends the caller round again.
                 if sort_column_index is not None:
                     # Already a ranked query: the truncation is intended,
                     # the caller asked for the top/bottom N of a bigger set.
                     truncation_warning = (
-                        f"Showing the {rows_fetched} "
-                        f"{'highest' if sort_direction == -1 else 'lowest'} "
-                        f"rows by '{column_names[sort_column_index]}' out of "
+                        f"Showing "
+                        + (f"rows {page_offset + 1}-"
+                           f"{page_offset + rows_fetched} by "
+                           if page_offset else
+                           f"the {rows_fetched} "
+                           f"{'highest' if sort_direction == -1 else 'lowest'} "
+                           f"rows by ")
+                        + f"'{column_names[sort_column_index]}' out of "
                         f"{total_rows_on_server} total rows on the server. "
                         f"This is expected for a ranked query — raise `limit` "
                         f"only if you genuinely need more of the ranking."
@@ -1071,6 +1159,12 @@ class EngineHypercubeMixin:
                 "dimensions": converted_dimensions,
                 "measures": converted_measures,
             }
+            # A filter that could not be checked says so here as well as
+            # in `filters_applied`: the neighbouring tool puts it among the
+            # warnings, and one shape of answer beats two.
+            for applied in filters_applied:
+                if isinstance(applied, dict) and applied.get("note"):
+                    warnings.append(applied["note"])
             if filters_applied:
                 # What each described filter resolved to, including the
                 # period actually selected and how many values of the field

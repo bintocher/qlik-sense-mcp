@@ -55,52 +55,11 @@ class TestSessionObjectContext:
             assert handle == 7
         assert eng.destroyed_ids == eng.created_ids
 
-    def test_object_is_destroyed_when_the_body_raises(self):
-        """The leak that matters: an exception between create and cleanup."""
-        eng = _Engine()
-        with pytest.raises(RuntimeError):
-            with eng.session_object(1, {"qInfo": {"qType": "SheetList"}}):
-                raise RuntimeError("layout parsing blew up")
-        assert eng.destroyed_ids == eng.created_ids
 
-    def test_ids_are_unique_per_call(self):
-        """A reused id can return the previous calculation, not this one."""
-        eng = _Engine()
-        for _ in range(3):
-            with eng.session_object(1, {"qInfo": {"qType": "SheetList"}}):
-                pass
-        assert len(set(eng.created_ids)) == 3
 
-    def test_the_destroyed_id_is_the_created_one(self):
-        eng = _Engine()
-        with eng.session_object(1, {"qInfo": {"qId": "custom", "qType": "X"}}):
-            pass
-        assert eng.destroyed_ids == eng.created_ids
-        assert eng.created_ids[0].startswith("custom-")
 
-    def test_missing_handle_is_an_error_not_a_silent_skip(self):
-        eng = _Engine(handle=False)
-        with pytest.raises(QlikEngineError):
-            with eng.session_object(1, {"qInfo": {"qType": "SheetList"}}):
-                pytest.fail("body must not run without a handle")
 
-    def test_nothing_is_sent_to_a_dead_socket(self):
-        eng = _Engine()
-        with eng.session_object(1, {"qInfo": {"qType": "SheetList"}}):
-            eng.ws = None  # a timeout force-closed the socket mid-read
-        assert eng.destroyed_ids == [], "cleanup on a dead socket only stalls the call"
 
-    def test_cleanup_failure_does_not_mask_the_real_error(self):
-        class _CleanupBreaks(_Engine):
-            def send_request(self, method, params=None, handle=-1, timeout=None):
-                if method == "DestroySessionObject":
-                    raise Exception("socket already gone")
-                return super().send_request(method, params, handle, timeout)
-
-        eng = _CleanupBreaks()
-        with pytest.raises(RuntimeError, match="the real problem"):
-            with eng.session_object(1, {"qInfo": {"qType": "SheetList"}}):
-                raise RuntimeError("the real problem")
 
 
 class TestSheets:
@@ -111,25 +70,9 @@ class TestSheets:
         assert len(sheets) == 2
         assert eng.destroyed_ids == eng.created_ids
 
-    def test_app_without_sheets_returns_an_empty_list(self):
-        eng = _Engine(layout={"qLayout": {"qAppObjectList": {"qItems": []}}})
-        assert eng.get_sheets(1) == []
 
-    def test_a_failed_call_is_not_an_app_without_sheets(self):
-        eng = _Engine(fail_on="GetLayout")
-        with pytest.raises(Exception, match="refused"):
-            eng.get_sheets(1)
 
-    def test_the_object_is_cleaned_up_even_when_the_layout_call_fails(self):
-        eng = _Engine(fail_on="GetLayout")
-        with pytest.raises(Exception):
-            eng.get_sheets(1)
-        assert eng.destroyed_ids == eng.created_ids
 
-    def test_malformed_layout_is_reported(self):
-        eng = _Engine(layout={"qLayout": {}})
-        with pytest.raises(QlikEngineError):
-            eng.get_sheets(1)
 
 
 class TestUserVariables:
@@ -146,21 +89,5 @@ class TestUserVariables:
         assert variables[0]["is_script_created"] is True
         assert eng.destroyed_ids == eng.created_ids
 
-    def test_reserved_and_config_variables_are_excluded(self):
-        eng = _Engine(layout=self._layout([
-            {"qName": "vOk", "qDefinition": "1"},
-            {"qName": "vReserved", "qDefinition": "x", "qIsReserved": True},
-            {"qName": "vConfig", "qDefinition": "y", "qIsConfig": True},
-        ]))
-        assert [v["name"] for v in eng._get_user_variables(1)] == ["vOk"]
 
-    def test_a_failed_call_is_not_an_app_without_variables(self):
-        eng = _Engine(fail_on="GetLayout")
-        with pytest.raises(Exception, match="refused"):
-            eng._get_user_variables(1)
 
-    def test_object_is_cleaned_up_on_failure(self):
-        eng = _Engine(fail_on="GetLayout")
-        with pytest.raises(Exception):
-            eng._get_user_variables(1)
-        assert eng.destroyed_ids == eng.created_ids

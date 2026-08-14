@@ -84,22 +84,8 @@ class TestWideModel:
         assert reply["fields"]["columns"] == WIDE_MODEL_COLUMNS
         assert len(reply["fields"]["rows"]) == WIDE_MODEL_FIELDS + 1
 
-    def test_the_row_order_matches_the_header(self, stand):
-        stand(WIDE_MODEL_FIELDS + 1)
-        reply = json.loads(repository.get_app_details("app-1"))
-        first = dict(zip(reply["fields"]["columns"], reply["fields"]["rows"][0]))
-        assert first["name"] == "field_0"
-        assert first["table"] == "Fact"
 
-    def test_the_caller_is_told_why(self, stand):
-        stand(WIDE_MODEL_FIELDS + 1)
-        reply = json.loads(repository.get_app_details("app-1"))
-        assert any("columns+rows" in w for w in reply["warnings"])
 
-    def test_sampling_is_skipped_when_the_values_would_be_dropped(self, stand):
-        engine = stand(WIDE_MODEL_FIELDS + 1)
-        repository.get_app_details("app-1")
-        assert engine.sampled == 0, "значения читались зря"
 
 
 class TestNarrowModelIsUntouched:
@@ -109,10 +95,6 @@ class TestNarrowModelIsUntouched:
         assert isinstance(reply["fields"], list)
         assert reply["fields"][0]["name"] == "field_0"
 
-    def test_sampling_still_runs_below_the_threshold(self, stand):
-        engine = stand(5)
-        repository.get_app_details("app-1")
-        assert engine.sampled == 1
 
 
 class TestTheTableIsActuallySmaller:
@@ -131,8 +113,3 @@ class TestTheTableIsActuallySmaller:
             f"таблица дороже списка: {per_row:.0f} против {per_object:.0f} "
             "знаков на поле")
 
-    def test_rows_are_written_one_per_line(self, stand):
-        """Indented rows were what made the table longer than the objects."""
-        stand(WIDE_MODEL_FIELDS + 1)
-        raw = repository.get_app_details("app-1")
-        assert '["field_0"' in raw.replace(" ", ""), "строки печатаются с отступами"

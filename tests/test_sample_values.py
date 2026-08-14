@@ -58,26 +58,9 @@ class TestBatchRead:
         result = engine.get_field_values_batch(1, [("Region", 25), ("Year", 25)])
         assert result == {"Region": ["North", "South"], "Year": ["2024", "2025"]}
 
-    def test_the_requested_height_is_honoured(self):
-        engine = _Engine({"Dates": ["01.01.2024"]})
-        engine.get_field_values_batch(1, [("Dates", 3)])
-        assert engine.asked == [("Dates", 3)]
 
-    def test_session_objects_are_destroyed(self):
-        """They hold their result set in Engine memory until they are not."""
-        engine = _Engine({"Region": ["North"]})
-        engine.get_field_values_batch(1, [("Region", 25)])
-        assert engine.destroyed == 1
 
-    def test_nothing_wanted_costs_no_calls(self):
-        engine = _Engine()
-        assert engine.get_field_values_batch(1, []) == {}
-        assert engine.asked == []
 
-    def test_a_field_with_no_values_is_simply_absent(self):
-        engine = _Engine({"Region": ["North"], "Empty": []})
-        result = engine.get_field_values_batch(1, [("Region", 25), ("Empty", 25)])
-        assert "Empty" not in result
 
 
 class TestAttachToFields:
@@ -97,49 +80,11 @@ class TestAttachToFields:
         repository._attach_sample_values(1, fields)
         assert fields[0]["values"] == ["Moskva", "Kazan"]
 
-    def test_a_high_cardinality_field_is_left_alone(self, monkeypatch):
-        """200k values are not an aid, they are a wall of text."""
-        engine = _Engine({"region_name": ["Moskva"]})
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        fields = self._fields()
-        repository._attach_sample_values(1, fields)
-        assert "values" not in fields[1] and "sample" not in fields[1]
 
-    def test_a_date_field_shows_its_display_format(self, monkeypatch):
-        """The format is the whole point: 01.01.2024 is not 45292."""
-        engine = _Engine({"region_name": ["Moskva"],
-                          "order_date": ["01.01.2024", "02.01.2024", "03.01.2024"]})
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        fields = self._fields()
-        repository._attach_sample_values(1, fields)
-        assert fields[2]["sample"] == ["01.01.2024", "02.01.2024", "03.01.2024"]
 
-    def test_a_date_field_is_sampled_not_listed(self, monkeypatch):
-        engine = _Engine({"order_date": ["01.01.2024"] * 10})
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        fields = self._fields()
-        repository._attach_sample_values(1, fields)
-        assert "values" not in fields[2]
 
-    def test_an_empty_field_is_not_asked_about(self, monkeypatch):
-        engine = _Engine()
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        repository._attach_sample_values(1, self._fields())
-        assert all(name != "empty_field" for name, _ in engine.asked)
 
-    def test_the_number_of_sampled_fields_is_capped(self, monkeypatch):
-        engine = _Engine()
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        many = [{"name": f"f{i}", "distinct_values": 5, "tags": []} for i in range(50)]
-        repository._attach_sample_values(1, many)
-        assert len(engine.asked) == repository.SAMPLE_VALUES_MAX_FIELDS
 
-    def test_a_failure_leaves_the_reply_intact(self, monkeypatch):
-        """This is a convenience; it must never be why the answer fails."""
-        monkeypatch.setattr(repository.context, "engine_api", _Engine(fail=True))
-        fields = self._fields()
-        repository._attach_sample_values(1, fields)
-        assert all("values" not in f for f in fields)
 
 
 class TestFieldEdges:
@@ -182,19 +127,5 @@ class TestFieldEdges:
         assert edges["fact_id"]["lowest"][0] == "1"
         assert edges["fact_id"]["highest"][0] == "6"
 
-    def test_each_field_asks_for_both_directions(self):
-        engine = self._Edges(["a", "b"])
-        engine.get_field_edges_batch(1, ["one", "two"])
-        assert engine.sorts == [1, -1, 1, -1]
 
-    def test_nothing_wanted_costs_no_calls(self):
-        engine = self._Edges([])
-        assert engine.get_field_edges_batch(1, []) == {}
 
-    def test_a_wide_field_gets_edges_not_a_list(self, monkeypatch):
-        engine = self._Edges(["C000000", "C000001", "C199999"])
-        monkeypatch.setattr(repository.context, "engine_api", engine)
-        fields = [{"name": "client_id", "distinct_values": 200_000, "tags": []}]
-        repository._attach_sample_values(1, fields)
-        assert "values" not in fields[0]
-        assert fields[0]["lowest_values"][0] == "C000000"

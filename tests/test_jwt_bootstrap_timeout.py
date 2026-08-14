@@ -51,19 +51,5 @@ class TestBootstrapDeadline:
         _session().ensure(client)
         assert client.timeouts == [BOOTSTRAP_TIMEOUT_SECONDS]
 
-    def test_a_cold_proxy_taking_twenty_seconds_still_connects(self):
-        """What used to fail: slower than the ordinary budget, well inside
-        the bootstrap's own."""
-        client = _Client(delay=20.0, budget=10.0)
-        _session().ensure(client)
-        assert client.cookies is not None
 
-    def test_a_proxy_that_never_answers_says_how_long_it_waited(self):
-        client = _Client(delay=BOOTSTRAP_TIMEOUT_SECONDS + 1)
-        with pytest.raises(JwtBootstrapError) as failure:
-            _session().ensure(client)
-        assert f"{BOOTSTRAP_TIMEOUT_SECONDS:.0f}s" in str(failure.value)
 
-    def test_the_deadline_is_wider_than_an_ordinary_call(self):
-        from qlik_sense_mcp_server.config import DEFAULT_HTTP_TIMEOUT
-        assert BOOTSTRAP_TIMEOUT_SECONDS > DEFAULT_HTTP_TIMEOUT

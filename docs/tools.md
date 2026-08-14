@@ -50,7 +50,7 @@ categories. The lists below are a quick map only.
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |
 | `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, non-null count, null count, total count, min, max, null %, completeness — the null share comes from `NullCount()`, not from subtracting one non-null count from another). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
 | `engine_query` | **The main data-analysis tool.** A query stated rather than written: `group_by` names the grouping fields, `metrics` the aggregations (`{"field": "Amount", "agg": "sum"}`), `filters` the period or values to narrow to. The server writes the Qlik expressions, proves the filters select something, and reports the period each one actually covered. `queries` takes a list of independent questions — different groupings, different measures, different filters — and runs the whole list over three round-trips rather than three per question. |
-| `engine_create_hypercube` | The same shape, with the expressions written by the caller: for a nested aggregation, `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, or a calculated dimension. Ranking is `sort_by` + `sort_order` + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are dropped by default. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. `filters` works here too, applied wherever a measure carries the `{filter}` marker. |
+| `engine_create_hypercube` | The same shape, with the expressions written by the caller: for a nested aggregation, `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, or a calculated dimension. Ranking is `sort_by` + `sort_order` + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are kept unless `exclude_null_dimensions` says otherwise. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. `filters` works here too, applied wherever a measure carries the `{filter}` marker. |
 
 ## Task management (Repository API)
 
@@ -100,6 +100,98 @@ Values come back as data: numbers stay numbers, and a date reads as the
 text Qlik displays for it — the same writing the sample values, the
 field values and the field range use for that field. One value has one
 writing everywhere in the reply.
+
+### Narrowing: what a filter can say
+
+A filter names one field and one condition. Several conditions on one
+field are several filters, not one filter with several keys — stating
+two at once is refused rather than answered by the first of them.
+
+| Written as | Means |
+|:---|:---|
+| `{"field": "Region", "values": ["North"]}` | keep these values |
+| `{"field": "Region", "exclude": ["North"]}` | keep everything else |
+| `{"field": "Region", "add": ["South"]}` | add to what is selected |
+| `{"field": "Region", "intersect": ["North"]}` | keep what is in both |
+| `{"field": "Amount", "greater_than": 400}` | above a bound |
+| `{"field": "OrderDate", "period": "2024-03"}` | a period: a year, a month or a day |
+| `{"field": "Client", "contains": "ltd"}` | text search, case-insensitive |
+| `{"field": "Client", "matching": {...}}` | values of this field that satisfy a condition on another |
+| `{"field": "Client", "match_expression": "Sum(Amount) > 1000"}` | values an expression holds for |
+
+`matching` and `not_matching` take filters of their own, and answer the
+question "which clients bought in 2023" without a second query:
+
+```jsonc
+{"field": "Client",
+ "matching": {"filters": [{"field": "Year", "values": ["2023"]}]},
+ "not_matching": {"filters": [{"field": "Year", "values": ["2024"]}]}}
+```
+
+Both together read as "matched the first and not the second".
+`of_field` reads the values from a different field than the one being
+narrowed.
+
+### Scope: what the query counts over
+
+`scope` says what the numbers are counted over, before any filter
+narrows them:
+
+| Written as | Means |
+|:---|:---|
+| `{"ignore_selections": true}` | the whole model, whatever is selected |
+| `{"bookmark": "BM01"}` | what that bookmark selects |
+| `{"state": "Compare"}` | what that alternate state selects |
+| `{"selection_back": 1}` | the selections as they were one step ago |
+| `{"current_selection": true}` | what is selected right now, stated plainly |
+
+A scope stated on its own, with no filters beside it, applies as it
+reads. Stated on the query it reaches every measure; stated on a metric
+or on one part of an arithmetic metric, it reaches only that one.
+
+### Combining sets
+
+Two sets joined by one operation answer what no modifier on a single field
+can: "bought in 2023 **or** lives in the South".
+
+```jsonc
+{"combine": "union",
+ "of": [{"ignore_selections": true,
+         "filters": [{"field": "Year", "values": ["2023"]}]},
+        {"ignore_selections": true,
+         "filters": [{"field": "Region", "values": ["South"]}]}]}
+```
+
+| `combine` | Answers |
+|:---|:---|
+| `union` | everything in either set |
+| `intersect` | only what is in both |
+| `exclude` | the first without the second |
+| `symmetric_difference` | what belongs to exactly one of them |
+
+Each set is described the way any scope is, with filters of its own. A
+filter stated outside the combination is refused: Qlik reads no modifier
+written around one.
+
+### Metrics beyond a single aggregation
+
+A metric is `{"field": ..., "agg": ...}`, and four keys extend it:
+
+- `filters` — this metric alone is narrowed, the others are not. The
+  numerator and the denominator of a ratio come back in the same row.
+- `total` / `total_except` — count across the grouping instead of within
+  it: a share of the whole (`total`), or of the group named by
+  `total_except`.
+- `inner_agg` + `per` — aggregate twice: `{"field": "Days",
+  "inner_agg": "sum", "per": "IssueId", "agg": "median"}` reads as "the
+  median over issues of the days summed within each issue".
+- `op` + `of` — arithmetic over aggregations. Each part can carry its
+  own `filters` and its own `scope`; division answers with no value
+  rather than an error when the denominator is zero.
+
+The reply lists what each of them was narrowed by under
+`measure_filters`, a part of an arithmetic metric under the metric's
+label with its position.
 
 ### Checking a period from the answer
 

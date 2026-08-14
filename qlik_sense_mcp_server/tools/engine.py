@@ -6,10 +6,11 @@ holds the single shared WebSocket for its whole duration — see
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from . import context
 from .context import mcp
+from .schema import (Filter, Measure, Metric, Query, Scope)
 from .helpers import (
     _check,
     _engine_serialised,
@@ -191,13 +192,19 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
 @_engine_serialised
 def engine_query(
     app_id: str,
-    queries: Optional[List[Dict[str, Any]]] = None,
-    group_by: Optional[List[str]] = None,
-    metrics: Optional[List[Dict[str, Any]]] = None,
-    filters: Optional[List[Dict[str, Any]]] = None,
+    queries: Optional[List[Query]] = None,
+    group_by: Optional[List[Union[str, Dict[str, Any]]]] = None,
+    metrics: Optional[List[Metric]] = None,
+    measures: Optional[List[Union[str, Measure]]] = None,
+    filters: Optional[List[Filter]] = None,
+    scope: Optional[Scope] = None,
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     limit: int = 100,
+    offset: int = 0,
+    exclude_null_dimensions: bool = False,
+    suppress_zero: bool = False,
+    include_raw_layout: bool = False,
 ) -> str:
     """
     Answer a question about an app's data: group by fields, aggregate
@@ -247,10 +254,59 @@ def engine_query(
         metrics: what to aggregate, as
             {"field": "Amount", "agg": "sum", "label": "Revenue"}.
             `agg` is one of sum, count, count_distinct, avg, min, max,
-            median, stdev. `label` is optional and defaults to
-            `<agg>_<field>`; it names the column and is what `sort_by`
-            takes.
-        filters: what to narrow to. Two shapes:
+            median, stdev, fractile. `fractile` also takes `p` — the
+            fraction, so 0.85 is the 85th percentile. `label` is optional
+            and defaults to `<agg>_<field>`; it names the column and is
+            what `sort_by` takes.
+
+            A metric may aggregate over groups rather than over rows. Add
+            `per` — the field each inner value is computed for — and
+            `inner_agg` — how it is computed:
+
+                {"field": "tis_days", "inner_agg": "sum",
+                 "per": "IssueId", "agg": "fractile", "p": 0.85}
+
+            becomes `Fractile(Aggr(Sum([tis_days]), [IssueId]), 0.85)`:
+            days summed per issue first, then the 85th percentile across
+            issues. This is a different question from `median` over rows,
+            and the answers differ — measured on one small set, 10 against
+            6. `per` takes one field or a list of them.
+
+            A metric may also narrow itself, overriding the query's
+            `filters`, so a KPI holds its numerator and denominator at
+            once:
+
+                "metrics": [
+                  {"field": "IssueId", "agg": "count_distinct"},
+                  {"field": "IssueId", "agg": "count_distinct",
+                   "label": "all", "filters": []}]
+
+            No `filters` key means the query's filters; `[]` means none at
+            all. The reply says which measure used which slice in
+            `measure_filters`.
+            A metric may ignore the grouping: `"total": true` aggregates
+            across every group, which is the denominator of a share, and
+            `"total_except": ["Region"]` ignores all of the grouping but
+            those fields, which is a share within a group.
+
+            Arithmetic between aggregations is stated as an operation over
+            parts rather than written as an expression:
+
+                {"label": "share", "op": "divide", "of": [
+                   {"field": "Amount", "agg": "sum"},
+                   {"field": "Amount", "agg": "sum", "total": true}]}
+
+            `op` is divide, multiply, add or subtract. Each part is a
+            metric in its own right, with its own filters, grouping and
+            nesting. Division guards itself: a zero denominator answers
+            with no value rather than with Qlik's dash.
+
+        scope: which set the filters narrow, when it is not the data as
+            loaded. `{"ignore_selections": true}` for everything,
+            `{"bookmark": "BM01"}`, `{"state": "Compare"}`, or both
+            together for a bookmark belonging to a state.
+
+        filters: what to narrow to. Several shapes:
             {"field": "OrderDate", "from": "2024-01-01", "to": "2024-12-31"}
             {"field": "Region", "values": ["North", "South"]}
             `from` and `to` include both ends, and either may be left out
@@ -265,6 +321,26 @@ def engine_query(
             between the two is every row sitting exactly on 400.
             `{"field": "OrderDate", "period": "2024"}` is the whole year in
             one key. Filters combine with AND.
+            `{"field": "Region", "exclude": ["North"]}` keeps everything
+            else; `add` and `intersect` combine with what is selected.
+
+            `{"field": "Name", "contains": "smith"}`, `starts_with`,
+            `ends_with` match by text, case insensitively. The value is
+            compared as text, so `*` and `?` inside it are ordinary
+            characters rather than wildcards.
+
+            `{"field": "Client", "matching": {"filters": [...]}}` keeps the
+            values of a field that satisfy a condition on another field —
+            the customers who bought a product, whatever else they bought.
+            `not_matching` keeps those that do not. Both together read as
+            "these and not those": bought in 2023 and not in 2024. Inside,
+            `of_field` carries the answer from one field to another, and
+            `base` is `"all"` (the default) or `"current"`.
+
+            `{"field": "Year", "match_expression": "[Year]>2023"}` is the
+            way out for a condition none of the above states. The server
+            wraps it and lets Qlik judge it; it does not read it.
+
             A filter that selects nothing is refused with what the field
             does hold, rather than answered with a zero.
         sort_by: a metric label or a grouping field. Set it whenever
@@ -294,9 +370,55 @@ def engine_query(
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
+    THE APP'S OWN MEASURES
+        `get_app_details` carries `library`: the measures and dimensions
+        the author of this app defined, with their expressions and their
+        descriptions. When one of them answers the question, name it
+        instead of assembling the aggregation yourself:
+
+            {"measures": [{"master": "Sales MUSD"}]}
+
+        This is what the dashboard itself calls that number. Building it
+        by hand risks a neighbouring field or a different aggregation -
+        an answer that looks reasonable and is not the one anyone here
+        would recognise.
+
+    SETS
+        `scope` says what a query counts over before any filter narrows
+        it: `{"ignore_selections": true}` for the whole model,
+        `{"bookmark": "BM01"}`, `{"state": "Compare"}`,
+        `{"selection_back": 1}` for the selections a step ago. Two sets
+        join with one operation between them:
+
+            {"combine": "union",
+             "of": [{"ignore_selections": true,
+                     "filters": [{"field": "Year", "values": ["2023"]}]},
+                    {"ignore_selections": true,
+                     "filters": [{"field": "Region",
+                                  "values": ["South"]}]}]}
+
+        `union` is everything in either, `intersect` only what is in both,
+        `exclude` the first without the second, `symmetric_difference`
+        what belongs to exactly one of two. Each set carries filters of its
+        own; a filter written outside the combination is refused, because
+        Qlik reads no modifier around one. A scope stated on the query
+        reaches every measure; stated on a metric or on one part of an
+        arithmetic metric, only that one.
+
+    PAGE AND SHAPE
+        `limit` and `offset` walk the result; `has_more` and `next_offset`
+        say whether there is another page. `exclude_null_dimensions` drops
+        the group with no value for the grouping field — off by default,
+        because such a fact is still a fact. `suppress_zero` drops groups
+        whose measures are all zero. `include_raw_layout` adds
+        `hypercube_data`, the untouched Qlik answer, beside the shaped
+        one - the same key `engine_create_hypercube` uses.
+        Every one of them can also be stated per query inside `queries`.
+
     DOES NOT RETURN
-        Raw Qlik layout, per-cell state, or the expressions it wrote.
-        Row-level records — every reply is aggregated.
+        Per-cell state or the expressions it wrote. Row-level records —
+        every reply is aggregated. The untouched Qlik layout only on
+        request, through `include_raw_layout`.
 
     A filter that selects nothing is refused before the query runs, and a
     value the field does not hold is answered with what the field holds
@@ -306,14 +428,35 @@ def engine_query(
     e = _check()
     if e:
         return e
+    # The models exist to describe the shape to the caller; the engine
+    # reads plain dictionaries, and a key the caller did not write should
+    # not appear as null further down.
+    def _plain(value):
+        if isinstance(value, list):
+            return [_plain(item) for item in value]
+        dumped = getattr(value, "model_dump", None)
+        if dumped is None:
+            return value
+        return dumped(exclude_none=True, by_alias=True)
+
+    queries = _plain(queries)
+    group_by, metrics = _plain(group_by), _plain(metrics)
+    measures, filters, scope = _plain(measures), _plain(filters), _plain(scope)
+
     if queries is None:
         queries = [{
             "group_by": group_by or [],
             "metrics": metrics or [],
+            "measures": measures or [],
             "filters": filters or [],
+            "scope": scope,
             "sort_by": sort_by,
             "sort_order": sort_order,
             "limit": limit,
+            "offset": offset,
+            "exclude_null_dimensions": exclude_null_dimensions,
+            "suppress_zero": suppress_zero,
+            "include_raw_layout": include_raw_layout,
         }]
     if not isinstance(queries, list) or not queries:
         return _err(
@@ -321,6 +464,17 @@ def engine_query(
             error_category="invalid_argument",
             hint='One query: {"group_by": ["Region"], "metrics": '
                  '[{"field": "Amount", "agg": "sum"}]}.',
+        )
+    # Counted before the app is opened: a batch already past the ceiling
+    # should not cost a connection, a load, or a wait on a cold server.
+    from ..engine.queries import MAX_QUERIES_PER_CALL
+
+    if len(queries) > MAX_QUERIES_PER_CALL:
+        return _err(
+            f"{len(queries)} queries in one call; the cap is "
+            f"{MAX_QUERIES_PER_CALL}.",
+            error_category="limit_exceeded",
+            hint=f"Send up to {MAX_QUERIES_PER_CALL} at a time.",
         )
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
@@ -342,7 +496,7 @@ def engine_create_hypercube(
     sort_by: Optional[str] = None,
     sort_order: str = "desc",
     suppress_zero: bool = False,
-    exclude_null_dimensions: bool = True,
+    exclude_null_dimensions: bool = False,
     include_raw_layout: bool = False,
     max_rows: Optional[int] = None,
     offset: int = 0,
@@ -456,7 +610,8 @@ def engine_create_hypercube(
             Useful for `sort_order="asc"`, where zero-valued groups
             would otherwise fill the entire result.
         exclude_null_dimensions: Drop the row whose dimension value is
-            NULL — the one Qlik displays as `"-"`. Default True.
+            NULL — the one Qlik displays as `"-"`. Default False: such a
+            fact is still a fact, so leaving it out is yours to say.
             Facts that carry no value for the grouping field all pile
             into that single row, so it frequently holds a large total
             and wins the ranking, pushing the real values out of a
@@ -568,7 +723,12 @@ def get_app_field(
     case_sensitive: bool = False,
 ) -> str:
     """
-    List the values a field holds, most frequent first.
+    List the values a field holds, in the field's own order.
+
+    The order is Qlik's own - ascending by value, numeric or alphabetic.
+    It is not an order of importance: the first ten values of a large
+    field are the first ten alphabetically, not the ten that occur most
+    often.
 
     WHEN TO USE
         To see how a value is really spelled before filtering on it. A
@@ -610,7 +770,16 @@ def get_app_field(
     if e:
         return e
     lim = min(max(limit or DEFAULT_FIELD_LIMIT, 1), MAX_FIELD_LIMIT)
-    off = max(offset or 0, 0)
+    # Refused, not clamped: a page before the first is a request nobody
+    # can answer, and the first page is the answer to a different one.
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         # Verify the field exists before reading values. The hypercube
@@ -656,10 +825,17 @@ def get_app_field(
                 if matched.get(key) is not None:
                     out[key] = matched[key]
         else:
+            # One more than asked for, to tell "this is the whole field"
+            # from "this is where the page ended". Without it a caller that
+            # asked for 100 and got 100 could not tell the two apart.
             field_data = context.engine_api.get_field_values(
-                app_handle, field_name, lim, include_frequency=False, offset=off)
+                app_handle, field_name, lim + 1, include_frequency=False,
+                offset=off)
             values = [v.get("value", "") for v in field_data.get("values", [])]
-            out = {"field_values": values}
+            out: Dict[str, Any] = {"field_values": values[:lim]}
+            if len(values) > lim:
+                out["has_more"] = True
+                out["next_offset"] = off + lim
         # COMMENT FIELD text of this very field, when the script sets one —
         # already fetched above by the existence check, no second call.
         comment = description.get("comment")
@@ -725,7 +901,14 @@ def get_app_variables(
     if e:
         return e
     lim = min(max(limit or DEFAULT_FIELD_LIMIT, 1), MAX_FIELD_LIMIT)
-    off = max(offset or 0, 0)
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
     script_flag = None
     if created_in_script is not None:
         script_flag = _to_bool(created_in_script, None)
@@ -864,7 +1047,8 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 @mcp.tool()
 @_timed
 @_engine_serialised
-def get_app_object(app_id: str, object_id: str) -> str:
+def get_app_object(app_id: str, object_id: str, limit: int = 50,
+                   offset: int = 0) -> str:
     """
     Read one chart in full: its definition and the data it currently
     shows.
@@ -883,10 +1067,17 @@ def get_app_object(app_id: str, object_id: str) -> str:
     Args:
         app_id: application GUID.
         object_id: from `get_app_sheet_objects`.
+        limit: rows of the object's own data to return, 50 by default.
+            The definition and the expressions come back whole; it is the
+            data that is paged, because a live table holds thousands of
+            rows and the answer stops being readable long before it stops
+            being complete.
+        offset: row to start from. The reply carries `data_rows`,
+            `data_rows_total` and, while there is more, `next_offset`.
 
     Returns:
-        The object's whole `qLayout`, plus `measures`, `dimensions` and
-        `fields_used`. Read the expressions from `measures`: Engine does
+        The object's `qLayout` with one page of its data, plus `measures`,
+        `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does
         not put them in the layout, where `qMeasureInfo` carries only the
         fallback title, formatting and statistics. Master items are
         resolved to their library definitions. Computed data sits in
@@ -945,6 +1136,55 @@ def get_app_object(app_id: str, object_id: str) -> str:
             # rather than pretending the object has no measures.
             logger.warning("GetProperties failed for %s: %s", object_id, prop_error)
             layout_result["properties_error"] = str(prop_error)
+        # The definition is what this tool is for and comes back whole;
+        # the data is paged. Measured on a live table: the whole reply ran
+        # to 111 thousand characters, nearly all of it rows.
+        if offset is not None and (isinstance(offset, bool)
+                                   or not isinstance(offset, int)
+                                   or offset < 0):
+            return _err(f"offset={offset!r} is not a row number.",
+                        error_category="invalid_argument",
+                        hint="Pass 0 or a positive integer, or omit it.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            return _err(f"limit={limit!r} is not a number of rows.",
+                        error_category="invalid_argument",
+                        hint="Pass a positive integer, or omit it.")
+        cube = ((layout_result.get("qLayout") or {}).get("qHyperCube") or {})
+        pages = cube.get("qDataPages") or []
+        total_rows = (cube.get("qSize") or {}).get("qcy", 0)
+        width = len((cube.get("qDimensionInfo") or [])) + len(
+            (cube.get("qMeasureInfo") or []))
+        rows = [row for page in pages for row in (page.get("qMatrix") or [])]
+        # The layout carries only the first page Engine chose to send, so a
+        # page past it has to be asked for rather than sliced out of what
+        # is already here.
+        if offset + limit > len(rows) and offset + limit <= total_rows:
+            try:
+                more = context.engine_api.send_request(
+                    "GetHyperCubeData",
+                    ["/qHyperCubeDef",
+                     [{"qTop": offset, "qLeft": 0, "qHeight": limit,
+                       "qWidth": width or len((rows[0] if rows else []))}]],
+                    handle=obj_handle)
+                fetched = [row for page in (more or {}).get("qDataPages") or []
+                           for row in (page.get("qMatrix") or [])]
+                if fetched:
+                    rows = [None] * offset + fetched
+            except Exception as page_error:
+                logger.debug("Could not read page %s of %s: %s",
+                             offset, object_id, page_error)
+        if pages:
+            shown = rows[offset:offset + limit]
+            cube["qDataPages"] = [{"qArea": {"qTop": offset, "qLeft": 0,
+                                             "qHeight": len(shown),
+                                             "qWidth": len(shown[0]) if shown
+                                             else 0},
+                                   "qMatrix": shown}]
+            layout_result["data_rows"] = len(shown)
+            layout_result["data_rows_total"] = (
+                (cube.get("qSize") or {}).get("qcy", len(rows)))
+            if offset + len(shown) < len(rows):
+                layout_result["next_offset"] = offset + len(shown)
         return _ok(layout_result)
     except Exception as ex:
         return _err(str(ex), app_id=app_id, object_id=object_id)

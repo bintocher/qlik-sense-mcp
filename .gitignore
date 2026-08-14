@@ -195,3 +195,9 @@ uv.lock
 # Local Claude Code skills and audit artifacts (not part of the package)
 .claude/
 .audit/
+
+# Tool output accidentally written into the repository root.
+*tool-results*
+# Diffs dumped into the tree by a review run.
+diff_*.txt
+*_diff.txt

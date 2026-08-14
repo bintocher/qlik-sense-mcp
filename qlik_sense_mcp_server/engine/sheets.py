@@ -61,6 +61,86 @@ class EngineSheetsMixin:
             logger.info("Found %d sheets", len(sheets))
             return sheets
 
+    def _library_for(self, app_handle: int,
+                     app_id: Optional[str] = None) -> Dict[str, Any]:
+        """The library of the app this handle currently points at.
+
+        Keyed by the app, never by the handle: Engine hands out handles per
+        session and reuses the numbers, so after switching documents the
+        same number means a different app - and a measure named from the
+        library would be computed from another app's expression.
+        """
+        identity = app_id or getattr(self, "_cached_app_id", None)
+        if not identity:
+            return self.get_master_items(app_handle)
+        cache = getattr(self, "_library_cache", None)
+        if cache is None:
+            cache = {}
+            self._library_cache = cache
+        if identity not in cache:
+            cache[identity] = self.get_master_items(app_handle)
+        return cache[identity]
+
+    def get_master_items(self, app_handle: int) -> Dict[str, Any]:
+        """The library of measures and dimensions the app itself defines.
+
+        This is the vocabulary the author of the app wrote down: what
+        "revenue" means here, which field it is built from, what the
+        business calls it. Without it a caller assembles `Sum([Amount])`
+        by guesswork and may pick a neighbouring field or the wrong
+        aggregation - the answer looks reasonable and is not the number
+        anyone on this dashboard would recognise.
+
+        Both lists come back in one round trip, and an app with no library
+        answers with two empty lists rather than an error.
+        """
+        wanted = [
+            ("measures", "MeasureList", "qMeasureListDef", "qMeasureList",
+             "qMeasure"),
+            ("dimensions", "DimensionList", "qDimensionListDef",
+             "qDimensionList", "qDim"),
+        ]
+        library: Dict[str, Any] = {"measures": [], "dimensions": []}
+        for key, kind, definition_key, layout_key, body_key in wanted:
+            object_id = f"library-{key}"
+            definition = {
+                "qInfo": {"qId": object_id, "qType": kind},
+                definition_key: {
+                    "qType": key[:-1],
+                    "qData": {"title": "/qMetaDef/title",
+                              "description": "/qMetaDef/description",
+                              "tags": "/qMetaDef/tags",
+                              "expression": f"/{body_key}/qDef"},
+                },
+            }
+            try:
+                with self.session_object(app_handle, definition) as handle:
+                    layout = (self.send_request("GetLayout", [], handle=handle)
+                              or {}).get("qLayout") or {}
+            except Exception as exc:
+                logger.debug("Could not read %s: %s", key, exc)
+                continue
+            for item in (layout.get(layout_key) or {}).get("qItems") or []:
+                data = item.get("qData") or {}
+                meta = item.get("qMeta") or {}
+                entry = {
+                    "name": (data.get("title") or meta.get("title")
+                             or "").strip(),
+                    "expression": str(data.get("expression") or "").strip(),
+                    "id": (item.get("qInfo") or {}).get("qId", ""),
+                }
+                description = (data.get("description")
+                               or meta.get("description") or "").strip()
+                if description:
+                    entry["description"] = description
+                tags = [str(tag) for tag in (data.get("tags")
+                                             or meta.get("tags") or []) if tag]
+                if tags:
+                    entry["tags"] = tags
+                if entry["name"] or entry["expression"]:
+                    library[key].append(entry)
+        return library
+
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
         """Get detailed information about objects on a sheet.
 

@@ -23,6 +23,19 @@ logger = logging.getLogger(__name__)
 COLD_START_TIMEOUT = 60.0
 
 
+def _qrs_searchable(text: str) -> str:
+    """The longest part of a name that QRS can be asked about.
+
+    Measured on the server: a quote inside a filter value is refused in
+    every form - doubled, backslashed, or wrapped in double quotes - with
+    "Cannot parse the expression". So the quote never goes into the
+    filter: QRS is asked about the longest quote-free part, and the full
+    name is matched here.
+    """
+    parts = [part for part in str(text).split("'") if part.strip()]
+    return max(parts, key=len).strip() if parts else ""
+
+
 class QlikRepositoryAPI:
     """Client for Qlik Sense Repository API using httpx."""
 
@@ -200,14 +213,25 @@ class QlikRepositoryAPI:
         filters: List[str] = []
         if published is not None:
             filters.append(f"published eq {'true' if published else 'false'}")
+        # A quote never reaches the filter - QRS refuses it in every form -
+        # so the search asks about the longest quote-free part and the full
+        # name is matched below.
+        name_locally = ""
         if name:
             raw_name = name.replace('*', '')
-            safe_name = raw_name.replace("'", "''")
-            filters.append(f"name so '{safe_name}'")
+            if "'" in raw_name:
+                name_locally = raw_name
+                raw_name = _qrs_searchable(raw_name)
+            if raw_name:
+                filters.append(f"name so '{raw_name}'")
+        stream_locally = ""
         if stream:
             raw_stream = stream.replace('*', '')
-            safe_stream = raw_stream.replace("'", "''")
-            filters.append(f"stream.name so '{safe_stream}'")
+            if "'" in raw_stream:
+                stream_locally = raw_stream
+                raw_stream = _qrs_searchable(raw_stream)
+            if raw_stream:
+                filters.append(f"stream.name so '{raw_stream}'")
 
         query_filter = " and ".join(filters) if filters else None
 
@@ -233,13 +257,31 @@ class QlikRepositoryAPI:
                 ("reload_dttm", "lastReloadTime"),
             ],
             query_filter=query_filter,
-            skip=offset,
-            take=limit,
+            # When the full name is matched here rather than by QRS, the
+            # page has to be wide enough to hold every candidate: paging
+            # by the shortened filter would drop the very app being asked
+            # for.
+            skip=0 if (name_locally or stream_locally) else offset,
+            take=(min(total_found or limit, 1000)
+                  if (name_locally or stream_locally) else limit),
             sort_column="modifiedDate",
             ascending=False,
         )
         if isinstance(page, dict) and "error" in page:
             return page
+
+        # What the filter could not say, said here: the name held a quote,
+        # so QRS was asked about the part around it and the rest is matched
+        # now.
+        if name_locally or stream_locally:
+            page = [row for row in page
+                    if (not name_locally
+                        or name_locally.lower() in str(row.get("name") or "").lower())
+                    and (not stream_locally
+                         or stream_locally.lower()
+                         in str(row.get("stream") or "").lower())]
+            total_found = len(page)
+            page = page[offset:offset + limit]
 
         minimal_apps: List[Dict[str, Any]] = []
         for row in page:

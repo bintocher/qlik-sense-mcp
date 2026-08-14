@@ -718,7 +718,12 @@ class EngineConnectionMixin:
             )
 
         if "error" in response:
-            raise Exception(
+            # An answer, not a failure to get one. Engine considered the
+            # call and refused it — "Invalid parameters" for a field it
+            # does not have, for instance — and a caller asking a question
+            # of Engine needs to tell that from a dropped frame, where the
+            # question was never answered at all.
+            raise QlikEngineError(
                 f"Engine API error for method '{method}' (handle={handle}): {response['error']}"
             )
 
