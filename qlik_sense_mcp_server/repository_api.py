@@ -10,8 +10,10 @@ from .config import (
     DEFAULT_APPS_LIMIT,
     MAX_APPS_LIMIT,
     AUTH_MODE_JWT,
+    AUTH_MODE_FORM,
 )
 from .jwt_session import JwtSession, JwtBootstrapError
+from .form_session import FormSession, FormBootstrapError
 from .utils import generate_xrfkey
 from .exceptions import QlikConnectionError
 
@@ -26,15 +28,26 @@ COLD_START_TIMEOUT = 60.0
 class QlikRepositoryAPI:
     """Client for Qlik Sense Repository API using httpx."""
 
-    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None):
+    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None,
+                 form_session: Optional[FormSession] = None):
         self.config = config
         self.jwt_session = jwt_session  # required when config.auth_mode == jwt
+        self.form_session = form_session  # required when config.auth_mode == form
+        # Whichever of the two applies — both expose the same ensure() /
+        # csrf_token / invalidate() surface, so the request path below
+        # doesn't need to know which mode it's in beyond the auth_mode check.
+        self._cookie_session = jwt_session or form_session
 
-        # In JWT mode the session holder is required up front — failing here
-        # gives a clear message instead of a confusing 401 on the first call.
+        # In JWT/form mode the session holder is required up front — failing
+        # here gives a clear message instead of a confusing 401 on the first call.
         if self.config.auth_mode == AUTH_MODE_JWT and jwt_session is None:
             raise QlikConnectionError(
                 "JWT mode requires a JwtSession — pass jwt_session=... to "
+                "QlikRepositoryAPI(). See server._init_clients for the canonical wiring."
+            )
+        if self.config.auth_mode == AUTH_MODE_FORM and form_session is None:
+            raise QlikConnectionError(
+                "form mode requires a FormSession — pass form_session=... to "
                 "QlikRepositoryAPI(). See server._init_clients for the canonical wiring."
             )
 
@@ -51,11 +64,11 @@ class QlikRepositoryAPI:
         # Timeouts from env (seconds)
         timeout_val = DEFAULT_HTTP_TIMEOUT
 
-        # Build per-mode client config. JWT mode uses neither client certs
-        # nor X-Qlik-User impersonation — identity comes from the signed
-        # bearer token validated by the VP, and after the first bootstrap
-        # call the cookie jar authenticates the rest.
-        if self.config.auth_mode == AUTH_MODE_JWT:
+        # Build per-mode client config. JWT and form mode use neither client
+        # certs nor X-Qlik-User impersonation — identity comes from the
+        # bootstrapped session, and after that first bootstrap call the
+        # cookie jar authenticates the rest.
+        if self.config.auth_mode in (AUTH_MODE_JWT, AUTH_MODE_FORM):
             cert = None
             default_headers = {"Content-Type": "application/json"}
         else:
@@ -79,10 +92,10 @@ class QlikRepositoryAPI:
         Build full QRS URL for an endpoint.
 
         Certificate mode:  https://host:4242/qrs/<endpoint>      (direct QRS)
-        JWT mode:          https://host/<vp_prefix>/qrs/<endpoint> (via VP, port 443)
+        JWT/form mode:     https://host/<vp_prefix>/qrs/<endpoint> (via VP, port 443)
         """
-        if self.config.auth_mode == AUTH_MODE_JWT:
-            return f"{self.config.qlik_base_host}/{self.config.virtual_proxy_prefix}/qrs/{endpoint}"
+        if self.config.auth_mode in (AUTH_MODE_JWT, AUTH_MODE_FORM):
+            return f"{self.config.qlik_base_host}/{self.config.virtual_proxy_path_segment}qrs/{endpoint}"
         base_url = f"{self.config.qlik_base_host}:{self.config.repository_port}"
         return f"{base_url}/qrs/{endpoint}"
 
@@ -107,18 +120,18 @@ class QlikRepositoryAPI:
             headers = kwargs.get('headers') or {}
             headers['X-Qlik-Xrfkey'] = xrfkey
 
-            # JWT mode: make sure the session cookie is bootstrapped, then
-            # attach the anti-CSWSH header. Bootstrap Set-Cookie lands in
-            # self.client.cookies automatically because we pass the same
+            # JWT/form mode: make sure the session cookie is bootstrapped,
+            # then attach the anti-CSWSH header. Bootstrap Set-Cookie lands
+            # in self.client.cookies automatically because we pass the same
             # client into ensure().
-            if self.config.auth_mode == AUTH_MODE_JWT and self.jwt_session is not None:
+            if self.config.auth_mode in (AUTH_MODE_JWT, AUTH_MODE_FORM) and self._cookie_session is not None:
                 try:
-                    self.jwt_session.ensure(self.client)
-                except JwtBootstrapError as bootstrap_exc:
-                    logger.error("JWT bootstrap failed: %s", bootstrap_exc)
-                    return {"error": f"JWT bootstrap failed: {bootstrap_exc}"}
-                if self.jwt_session.csrf_token:
-                    headers["qlik-csrf-token"] = self.jwt_session.csrf_token
+                    self._cookie_session.ensure(self.client)
+                except (JwtBootstrapError, FormBootstrapError) as bootstrap_exc:
+                    logger.error("%s bootstrap failed: %s", self.config.auth_mode, bootstrap_exc)
+                    return {"error": f"{self.config.auth_mode} bootstrap failed: {bootstrap_exc}"}
+                if self._cookie_session.csrf_token:
+                    headers["qlik-csrf-token"] = self._cookie_session.csrf_token
 
             kwargs['headers'] = headers
 
@@ -149,19 +162,44 @@ class QlikRepositoryAPI:
             # If the session cookie expired mid-flight, invalidate and retry
             # once — this is cheaper than a proactive per-request check and
             # covers the case where the server killed the session early.
-            if (response.status_code == 401
-                    and self.config.auth_mode == AUTH_MODE_JWT
-                    and self.jwt_session is not None):
-                logger.info("QRS returned 401, refreshing JWT session and retrying once")
-                self.jwt_session.invalidate()
+            #
+            # A missing/invalid session on QRS does not come back as a
+            # single, predictable status — verified against a live
+            # form-mode deployment:
+            #   - no session cookie at all: 302 to the virtual proxy's
+            #     login page (QRS treats it like an unauthenticated
+            #     browser request rather than an API call, not a clean
+            #     401).
+            #   - a present but server-unrecognized cookie value (plausible
+            #     after a proxy node failover or an out-of-band session
+            #     revocation, not just outright deletion): 500 whose body
+            #     is Qlik's own "Authentication error: Restart the
+            #     browser." page.
+            # Certificate mode never reaches this branch (auth_mode check
+            # below); a 3xx has no other meaning on this JSON API, and an
+            # unrelated 500 (the vast majority of them) does not carry this
+            # exact phrase, so both checks are safe without masking real
+            # server errors.
+            looks_like_expired_session = (
+                response.status_code in (401, 302)
+                or (response.status_code == 500
+                    and "authentication error" in response.text.lower())
+            )
+            if (looks_like_expired_session
+                    and self.config.auth_mode in (AUTH_MODE_JWT, AUTH_MODE_FORM)
+                    and self._cookie_session is not None):
+                logger.info("QRS returned %d, refreshing %s session and retrying once",
+                            response.status_code, self.config.auth_mode)
+                self._cookie_session.invalidate()
                 self.client.cookies.clear()
                 try:
-                    self.jwt_session.ensure(self.client)
-                except JwtBootstrapError as bootstrap_exc:
-                    logger.error("JWT re-bootstrap after 401 failed: %s", bootstrap_exc)
-                    return {"error": f"JWT re-bootstrap failed: {bootstrap_exc}"}
-                if self.jwt_session.csrf_token:
-                    headers["qlik-csrf-token"] = self.jwt_session.csrf_token
+                    self._cookie_session.ensure(self.client)
+                except (JwtBootstrapError, FormBootstrapError) as bootstrap_exc:
+                    logger.error("%s re-bootstrap after %d failed: %s",
+                                self.config.auth_mode, response.status_code, bootstrap_exc)
+                    return {"error": f"{self.config.auth_mode} re-bootstrap failed: {bootstrap_exc}"}
+                if self._cookie_session.csrf_token:
+                    headers["qlik-csrf-token"] = self._cookie_session.csrf_token
                 response = self.client.request(method, url, **kwargs)
 
             response.raise_for_status()

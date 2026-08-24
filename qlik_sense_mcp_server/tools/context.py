@@ -42,10 +42,11 @@ except ImportError:  # mcp < 2.0
 
     MCP_SDK_MAJOR = 1
 
-from ..config import QlikSenseConfig, AUTH_MODE_JWT
+from ..config import QlikSenseConfig, AUTH_MODE_JWT, AUTH_MODE_FORM, AUTH_MODE_CERTIFICATE
 from ..repository_api import QlikRepositoryAPI
 from ..engine_api import QlikEngineAPI
 from ..jwt_session import JwtSession
+from ..form_session import FormSession
 
 # Initialize logging configuration early
 load_dotenv()
@@ -81,24 +82,36 @@ config: Optional[QlikSenseConfig] = None
 repo_api: Optional[QlikRepositoryAPI] = None
 engine_api: Optional[QlikEngineAPI] = None
 jwt_session: Optional[JwtSession] = None
+form_session: Optional[FormSession] = None
 
 
 def _init_clients():
-    global config, repo_api, engine_api, jwt_session
+    global config, repo_api, engine_api, jwt_session, form_session
     try:
         config = QlikSenseConfig.from_env()
         config.validate_runtime()
 
         if config.auth_mode == AUTH_MODE_JWT:
             jwt_session = JwtSession(config)
+            form_session = None
             repo_api = QlikRepositoryAPI(config, jwt_session=jwt_session)
             engine_api = QlikEngineAPI(config, jwt_session=jwt_session)
             logger.info(
                 "Qlik Sense API clients initialised (JWT mode via virtual proxy '/%s')",
                 config.virtual_proxy_prefix,
             )
+        elif config.auth_mode == AUTH_MODE_FORM:
+            jwt_session = None
+            form_session = FormSession(config)
+            repo_api = QlikRepositoryAPI(config, form_session=form_session)
+            engine_api = QlikEngineAPI(config, form_session=form_session)
+            logger.info(
+                "Qlik Sense API clients initialised (form mode via virtual proxy '/%s', user=%s\\%s)",
+                config.virtual_proxy_prefix, config.user_directory, config.user_id,
+            )
         else:
             jwt_session = None
+            form_session = None
             repo_api = QlikRepositoryAPI(config)
             engine_api = QlikEngineAPI(config)
             logger.info(
@@ -124,23 +137,23 @@ else:
 # The server registers the analysis tools and nothing else. Reload-task
 # administration is a separate job, done by a separate person, against QRS
 # endpoints (/qrs/reloadtask, /qrs/executionresult) that need
-# repository-admin rights — a JWT analyst reaches them through the virtual
-# proxy as an ordinary user and gets 403s.
+# repository-admin rights — a JWT or form-mode analyst reaches Qlik through
+# the virtual proxy as an ordinary user and gets 403s.
 #
 # Every tool the caller cannot use costs it something even unused: the
 # names and descriptions sit in its context, and a model that reads about
 # task administration tries it. So the fourteen task tools follow the
-# authentication that makes them work — present in certificate mode, absent
-# in JWT mode — and `QLIK_TASK_TOOLS=false` drops them from certificate
-# mode too, for an analyst who only ever reads data.
+# authentication that makes them work — present in certificate mode only —
+# and `QLIK_TASK_TOOLS=false` drops them from certificate mode too, for an
+# analyst who only ever reads data.
 _TASK_TOOLS_WANTED = os.getenv("QLIK_TASK_TOOLS", "").strip().lower() not in (
     "false", "0", "no")
-_CERT_MODE = config is None or config.auth_mode != AUTH_MODE_JWT
+_CERT_MODE = config is None or config.auth_mode == AUTH_MODE_CERTIFICATE
 _CERT_ONLY_TOOLS_ENABLED = _TASK_TOOLS_WANTED and _CERT_MODE
 if not _CERT_ONLY_TOOLS_ENABLED:
     logger.info(
         "Reload-task tools are not registered (%s).",
-        "JWT mode: QRS task administration needs certificate authentication"
+        "certificate authentication is required for QRS task administration"
         if not _CERT_MODE else "QLIK_TASK_TOOLS is off",
     )
 

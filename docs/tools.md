@@ -7,9 +7,9 @@ The server exposes up to **28** MCP tools, grouped into three areas:
 - **Task management** — reload tasks, schedules, executions, script logs.
 
 **Availability depends on the authentication mode.** Task management
-calls QRS endpoints that require repository-admin rights, which a JWT
-analyst identity does not have, so those 14 tools are registered in
-certificate mode only. `QLIK_TASK_TOOLS=false` drops them from
+calls QRS endpoints that require repository-admin rights, which a JWT or
+form-mode analyst identity does not have, so those 14 tools are registered
+in certificate mode only. `QLIK_TASK_TOOLS=false` drops them from
 certificate mode too, for an identity that only reads data:
 
 | Mode | Tools registered |
@@ -17,6 +17,7 @@ certificate mode too, for an identity that only reads data:
 | certificate | 28 — everything below |
 | certificate, `QLIK_TASK_TOOLS=false` | 14 — analysis only |
 | JWT (virtual proxy) | 14 — analysis only |
+| form (login/password via virtual proxy) | 14 — analysis only |
 
 A tool the caller cannot use is not free: its name and description sit
 in the model's context, and a model that reads about task administration
