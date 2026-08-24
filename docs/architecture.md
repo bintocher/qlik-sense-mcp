@@ -24,6 +24,7 @@ qlik-sense-mcp/
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
+│   ├── form_session.py   # Login/password session bootstrap + cache
 │   └── utils.py          # XSRF key generation, helpers
 ├── tools/
 │   └── qlik_jwt_admin.py # Admin CLI: RSA keypair + JWT issuance (since v1.5.0)
@@ -54,6 +55,18 @@ cookie and `qlik-csrf-token` header, and caches them for 25 minutes
 QRS or Engine call, both API clients invalidate the cache and trigger a
 transparent re-bootstrap. See [AUTH_JWT.md](AUTH_JWT.md) for the
 protocol-level details and the CSWSH rationale.
+
+### `FormSession` ([form_session.py](../qlik_sense_mcp_server/form_session.py))
+
+The login/password counterpart to `JwtSession`, with the same public
+surface (`ensure()`, `ensure_standalone()`, `cookie_header()`,
+`csrf_token`, `invalidate()`, `logout()`) so both API clients treat them
+interchangeably once bootstrapped. Where `JwtSession` bootstraps by
+presenting a bearer token to `/qps/csrftoken`, `FormSession` logs into the
+virtual proxy's "Form based" login page — GET the page, parse out the
+`<form>`, POST the credentials — and then hits the same `/qps/csrftoken`
+endpoint, now authenticated by the resulting cookie. See
+[AUTH_FORM.md](AUTH_FORM.md) for the full login-flow details.
 
 ### `QlikRepositoryAPI` ([repository_api.py](../qlik_sense_mcp_server/repository_api.py))
 
@@ -316,11 +329,11 @@ branch on the `error` key instead.
 
 Reload-task tools are declared with `@_cert_only_tool()` instead of
 `@mcp.tool()`. That decorator registers the function only when
-`config.auth_mode != jwt`, because QRS task administration
+`config.auth_mode == certificate`, because QRS task administration
 (`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
-requires repository-admin rights that a JWT analyst identity does not
-have. JWT sessions therefore see 12 tools instead of 24, rather than 12
-that can only return 403.
+requires repository-admin rights that a JWT or form-mode analyst identity
+does not have. JWT and form sessions therefore see 12 tools instead of 24,
+rather than 12 that can only return 403.
 
 When the configuration fails to load entirely (`config is None`) every
 tool stays registered — that path serves `--help` and the test suite.

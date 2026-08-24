@@ -163,3 +163,50 @@ class TestCertificateMode:
         tried = _connect_and_capture(self._cert_client("https://qlik.example.com"))
         headers = tried[0][1]["header"]
         assert any("X-Qlik-User: UserDirectory=QLIK1; UserId=svc" == h for h in headers)
+
+
+class _FormSessionStub:
+    """A FormSession that is already bootstrapped."""
+
+    csrf_token = "form-csrf-1"
+
+    def ensure_standalone(self):
+        pass
+
+    def cookie_header(self):
+        return "X-Qlik-Session-forms=xyz"
+
+
+def _form_client(server_url):
+    config = QlikSenseConfig(server_url=server_url, user_id="ivanov", password="s3cret")
+    return QlikEngineAPI(config, form_session=_FormSessionStub())
+
+
+class TestFormMode:
+    """Form mode shares JWT mode's VP-based connection path (see
+    engine/connection.py's `is_cookie_mode`), with one difference: it can
+    run on the central proxy, which JWT cannot — so its prefix can be
+    empty. That must not produce a stray double slash in the WS URL."""
+
+    def test_named_prefix_builds_the_vp_url(self):
+        tried = _connect_and_capture(_form_client("https://qlik.example.com/forms"))
+        assert tried[0][0].startswith("wss://qlik.example.com/forms/app/"), tried[0][0]
+
+    def test_empty_prefix_does_not_produce_a_double_slash(self):
+        tried = _connect_and_capture(_form_client("https://qlik.example.com"))
+        assert tried[0][0].startswith("wss://qlik.example.com/app/"), tried[0][0]
+
+    def test_no_client_certificate_is_loaded(self):
+        tried = _connect_and_capture(_form_client("https://qlik.example.com/forms"))
+        assert "sslopt" in tried[0][1]
+
+    def test_cookie_header_is_sent(self):
+        tried = _connect_and_capture(_form_client("https://qlik.example.com/forms"))
+        headers = tried[0][1]["header"]
+        assert "Cookie: X-Qlik-Session-forms=xyz" in headers
+
+    def test_csrf_token_travels_in_the_url_and_the_header(self):
+        tried = _connect_and_capture(_form_client("https://qlik.example.com/forms"))
+        url, kwargs = tried[0]
+        assert "qlik-csrf-token=form-csrf-1" in url
+        assert "qlik-csrf-token: form-csrf-1" in kwargs["header"]

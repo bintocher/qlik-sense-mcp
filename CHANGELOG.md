@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Login/password (form) authentication mode, selected automatically when
+  `QLIK_PASSWORD` is set. Drives a virtual proxy's "Form based" login page
+  (most commonly the in-box Windows credentials page) the way a browser
+  would: GET the entry point and follow Qlik's own redirect chain to the
+  login page — which carries a per-visit `targetId` that cannot be
+  hardcoded or guessed — parse out the form, POST the credentials, and
+  reuse the resulting session cookie exactly like JWT mode does after its
+  own bootstrap. No client certificates and no JWT signing key needed; the
+  trade-off is a plain password living in the MCP config instead. See
+  `docs/AUTH_FORM.md`.
+
+### Fixed
+
+- QRS did not always signal an expired or unrecognized session with a
+  clean 401. Verified against a live form-mode deployment: a request with
+  no session cookie at all gets a 302 redirect to the virtual proxy's
+  login page, and one with a present-but-unrecognized cookie (plausible
+  after a proxy node failover, not just outright deletion) gets a 500
+  whose body is Qlik's own "Authentication error: Restart the browser."
+  page. Both now trigger the same automatic re-login-and-retry as a 401
+  instead of surfacing as an opaque `HTTP 302` / `HTTP 500` error.
+- The Engine WebSocket upgrade has the same gap with no HTTP status to
+  catch it by: a session whose local TTL says "fresh" but that Qlik no
+  longer recognizes server-side lets the upgrade itself succeed, and
+  Engine then closes the socket without ever sending a greeting. Now
+  retried once with a refreshed session, symmetric to the existing 401/403
+  handling on the upgrade response.
+
 ## [2.0.1] - 2026-08-13
 
 ### Fixed

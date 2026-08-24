@@ -24,6 +24,7 @@ from ..config import (
     DEFAULT_WS_RETRIES,
 )
 from ..jwt_session import JwtSession
+from ..form_session import FormSession
 from .app_model import EngineAppModelMixin
 from .connection import EngineConnectionMixin
 from .expressions import EngineExpressionsMixin
@@ -48,9 +49,11 @@ class QlikEngineAPI(
 ):
     """Client for Qlik Sense Engine API using WebSocket."""
 
-    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None):
+    def __init__(self, config: QlikSenseConfig, jwt_session: Optional[JwtSession] = None,
+                 form_session: Optional[FormSession] = None):
         self.config = config
         self.jwt_session = jwt_session  # required when config.auth_mode == jwt
+        self.form_session = form_session  # required when config.auth_mode == form
         self.ws = None
         self.request_id = 0
         # Connection cache

@@ -41,6 +41,7 @@ from typing import Optional
 import httpx
 
 from .config import QlikSenseConfig
+from .utils import pick_qlik_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,6 @@ logger = logging.getLogger(__name__)
 # Qlik's default session idle timeout is 30 minutes. Refreshing at 25 leaves
 # margin so a borderline request never races the server-side eviction.
 DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
-
-# Name Qlik gives the virtual proxy session cookie. The suffix varies with
-# the proxy, so the cookie is matched by this prefix rather than in full.
-_QLIK_SESSION_COOKIE_PREFIX = "X-Qlik-Session"
 
 # The bootstrap keeps its own deadline, wider than the one ordinary calls
 # run under. A proxy that has been idle answers this first request slowly:
@@ -319,28 +316,5 @@ class JwtSession:
         )
 
     def _pick_session_cookie(self, resp: httpx.Response) -> tuple[Optional[str], Optional[str]]:
-        """
-        Extract the Qlik session cookie from a bootstrap response.
-
-        The conventional name is ``X-Qlik-Session*``, but QMC lets an admin
-        rename it per virtual proxy, and a load balancer in front of Qlik
-        adds cookies of its own. So the name is matched in three widening
-        steps rather than assumed.
-        """
-        names = list(resp.cookies.keys())
-
-        # 1. The conventional name.
-        for name in names:
-            if name.lower().startswith(_QLIK_SESSION_COOKIE_PREFIX.lower()):
-                return name, resp.cookies.get(name)
-
-        # 2. A renamed Qlik cookie still tends to say so.
-        for name in names:
-            if "qlik" in name.lower():
-                return name, resp.cookies.get(name)
-
-        # 3. Exactly one cookie — it can only be the session.
-        if len(names) == 1:
-            return names[0], resp.cookies.get(names[0])
-
-        return None, None
+        """Extract the Qlik session cookie from a bootstrap response."""
+        return pick_qlik_session_cookie(list(resp.cookies.keys()), resp.cookies.get)

@@ -58,7 +58,7 @@ def reload_server(monkeypatch):
     """Re-import the server under a given environment, then restore it."""
     def _reload(**env):
         for key in ("QLIK_SERVER_URL", "QLIK_JWT_TOKEN", "QLIK_USER_DIRECTORY",
-                    "QLIK_USER_ID", "QLIK_CLIENT_CERT_PATH",
+                    "QLIK_USER_ID", "QLIK_PASSWORD", "QLIK_CLIENT_CERT_PATH",
                     "QLIK_CLIENT_KEY_PATH", "QLIK_TASK_TOOLS"):
             monkeypatch.delenv(key, raising=False)
         for key, value in env.items():
@@ -91,6 +91,16 @@ class TestDefaultSurface:
         assert TASK_TOOLS <= names
         assert ANALYSIS_TOOLS <= names
 
+    def test_form_mode_registers_the_analysis_tools_only(self, reload_server):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/forms",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="ivanov",
+            QLIK_PASSWORD="s3cret",
+        )
+        assert module.config.auth_mode == "form"
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
+
     def test_an_unconfigured_server_shows_everything(self, reload_server):
         """`--help` and a misconfigured host must not silently lose tools."""
         names = set(reload_server().mcp._tool_manager._tools)
@@ -104,6 +114,17 @@ class TestTaskToolsSwitch:
         module = reload_server(
             QLIK_SERVER_URL="https://qlik.example.com/jwt",
             QLIK_JWT_TOKEN="header.payload.signature",
+            QLIK_TASK_TOOLS="true",
+        )
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
+
+    def test_form_mode_leaves_them_out_even_when_asked_for(self, reload_server):
+        """Same reasoning as JWT: form mode is also an ordinary VP identity."""
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/forms",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="ivanov",
+            QLIK_PASSWORD="s3cret",
             QLIK_TASK_TOOLS="true",
         )
         assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
