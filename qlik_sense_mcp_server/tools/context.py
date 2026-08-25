@@ -134,32 +134,55 @@ if MCP_SDK_MAJOR >= 2:
 else:
     mcp = _McpHost("qlik-sense-mcp-server", host=_mcp_host, port=_mcp_port)
 
-# The server registers the analysis tools and nothing else. Reload-task
-# administration is a separate job, done by a separate person, against QRS
-# endpoints (/qrs/reloadtask, /qrs/executionresult) that need
-# repository-admin rights — a JWT or form-mode analyst reaches Qlik through
-# the virtual proxy as an ordinary user and gets 403s.
+# The server registers the analysis tools and nothing else by default.
+# Reload-task administration is a separate job, done by a separate person,
+# against QRS endpoints (/qrs/reloadtask, /qrs/executionresult) that need
+# repository-admin rights. Whether those rights are available depends on
+# the QMC role granted to whatever identity ends up authenticated — QRS
+# does not care whether that happened via a client certificate, a JWT, or
+# a form login, only what role it maps to. Certificate mode almost always
+# runs as a trusted admin/service identity, so task tools default to ON
+# there; a JWT or form identity is normally an ordinary analyst without
+# those rights, so they default to OFF — but an operator who has verified
+# their identity IS privileged (see docs/AUTH_FORM.md) can opt in
+# explicitly with QLIK_TASK_TOOLS=true.
 #
 # Every tool the caller cannot use costs it something even unused: the
 # names and descriptions sit in its context, and a model that reads about
-# task administration tries it. So the fourteen task tools follow the
-# authentication that makes them work — present in certificate mode only —
-# and `QLIK_TASK_TOOLS=false` drops them from certificate mode too, for an
-# analyst who only ever reads data.
-_TASK_TOOLS_WANTED = os.getenv("QLIK_TASK_TOOLS", "").strip().lower() not in (
-    "false", "0", "no")
+# task administration tries it — which is exactly what the default-off
+# behaviour outside certificate mode avoids for the common case.
+_TASK_TOOLS_ENV = os.getenv("QLIK_TASK_TOOLS", "").strip().lower()
+_TASK_TOOLS_EXPLICITLY_OFF = _TASK_TOOLS_ENV in ("false", "0", "no")
+_TASK_TOOLS_EXPLICITLY_ON = _TASK_TOOLS_ENV in ("true", "1", "yes")
 _CERT_MODE = config is None or config.auth_mode == AUTH_MODE_CERTIFICATE
-_CERT_ONLY_TOOLS_ENABLED = _TASK_TOOLS_WANTED and _CERT_MODE
-if not _CERT_ONLY_TOOLS_ENABLED:
+
+if _TASK_TOOLS_EXPLICITLY_OFF:
+    _TASK_TOOLS_ENABLED = False
+elif _CERT_MODE:
+    _TASK_TOOLS_ENABLED = True
+else:
+    _TASK_TOOLS_ENABLED = _TASK_TOOLS_EXPLICITLY_ON
+
+if not _TASK_TOOLS_ENABLED:
     logger.info(
         "Reload-task tools are not registered (%s).",
-        "certificate authentication is required for QRS task administration"
-        if not _CERT_MODE else "QLIK_TASK_TOOLS is off",
+        "QLIK_TASK_TOOLS is off" if _TASK_TOOLS_EXPLICITLY_OFF else
+        "set QLIK_TASK_TOOLS=true if this identity has QRS admin rights",
+    )
+elif not _CERT_MODE:
+    logger.warning(
+        "Reload-task tools are registered outside certificate mode "
+        "(QLIK_TASK_TOOLS=true). Every call will fail with 403 unless the "
+        "%s identity in use has QRS admin rights (RootAdmin/ContentAdmin "
+        "or an equivalent custom role) — QRS checks the QMC role, not how "
+        "the session was authenticated.",
+        config.auth_mode,
     )
 
 
-def _cert_only_tool():
-    """Register a tool only when task administration was asked for."""
+def _task_admin_tool():
+    """Register a tool only when task administration was asked for and
+    the current mode allows it — see `_TASK_TOOLS_ENABLED` above."""
     def decorator(fn):
-        return mcp.tool()(fn) if _CERT_ONLY_TOOLS_ENABLED else fn
+        return mcp.tool()(fn) if _TASK_TOOLS_ENABLED else fn
     return decorator

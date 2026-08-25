@@ -97,7 +97,7 @@ Defaults match the standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QLIK_TASK_TOOLS` | `true` | Register the 14 reload-task tools. They need repository-admin rights, so they are registered in certificate mode only and this variable has no effect in JWT or form mode. Set to `false` to leave them out of certificate mode as well — an identity that only reads data has no use for them, and every registered tool takes up room in the model's context. |
+| `QLIK_TASK_TOOLS` | `true` in certificate mode, `false` in JWT/form mode | Register the 14 reload-task tools. They need QRS repository-admin rights — a QMC role, not a property of the authentication method — so they default to on in certificate mode (which normally runs as a trusted admin identity) and off in JWT/form mode (which normally authenticates an ordinary analyst). Set to `false` to leave them out of certificate mode too, for an identity that only reads data. Set to `true` to turn them on in JWT or form mode as well — do this only once you have verified the identity behind that JWT/password does hold QRS admin rights, since every call will otherwise fail with 403. |
 
 ## Logging
 

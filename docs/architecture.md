@@ -327,13 +327,19 @@ branch on the `error` key instead.
 
 #### Per-mode tool registration (since v1.6.0)
 
-Reload-task tools are declared with `@_cert_only_tool()` instead of
+Reload-task tools are declared with `@_task_admin_tool()` instead of
 `@mcp.tool()`. That decorator registers the function only when
-`config.auth_mode == certificate`, because QRS task administration
+`_TASK_TOOLS_ENABLED` is true, because QRS task administration
 (`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
-requires repository-admin rights that a JWT or form-mode analyst identity
-does not have. JWT and form sessions therefore see 12 tools instead of 24,
-rather than 12 that can only return 403.
+requires repository-admin rights — a QMC role, not a property of the
+authentication method itself. Certificate mode almost always runs as a
+trusted admin identity, so `_TASK_TOOLS_ENABLED` defaults to true there;
+JWT and form sessions default to false, since those normally authenticate
+an ordinary analyst who would just get 403s, and the fourteen extra tool
+descriptions are not free even unused. `QLIK_TASK_TOOLS=true` overrides
+the default in either direction — including turning task tools ON outside
+certificate mode, for the operator who has verified the JWT/form identity
+in use does hold QRS admin rights (see `docs/AUTH_FORM.md`).
 
 When the configuration fails to load entirely (`config is None`) every
 tool stays registered — that path serves `--help` and the test suite.
