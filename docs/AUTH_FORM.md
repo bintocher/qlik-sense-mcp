@@ -18,25 +18,38 @@ wire format for Qlik's form-based login — the login page is ordinary HTML
 with a `<form>`, rendered by whichever auth module the virtual proxy is
 configured with. The MCP drives it the way a browser would:
 
-1. **GET** the login page (default path
-   `internal_forms_authentication/login` under the virtual proxy —
-   override with `QLIK_FORM_LOGIN_PATH` if your deployment serves it
-   elsewhere), following redirects and keeping whatever cookies show up.
-2. **Parse** the returned HTML for the first `<form>` that contains an
-   `<input type="password">` — that is the login form. Hidden fields
-   (anti-forgery tokens, return URLs, ...) are captured and resent
+1. **GET** the entry point — the virtual proxy root by default — and
+   follow every redirect. This matters: the real login URL is not a fixed
+   path. Verified against a live deployment, Qlik's login page lives at
+   `internal_forms_authentication/?targetId=<guid>`, where `targetId` is
+   generated fresh on every visit; POSTing to the page without it fails
+   with `400 Virtual proxy not possible to determine, since neither
+   TargetId nor Virtual Proxy were specified`. A browser never hits that
+   URL directly — it starts at the hub or the proxy root and lands there
+   through Qlik's own redirect chain — so the MCP reproduces that same
+   starting point instead of guessing the login URL. Override
+   `QLIK_FORM_LOGIN_PATH` only if your deployment's login flow starts
+   somewhere other than the virtual proxy root.
+2. **Parse** the page Qlik redirected to for the first `<form>` that
+   contains an `<input type="password">` — that is the login form. Hidden
+   fields (anti-forgery tokens, return URLs, `targetId` if it lives in a
+   hidden field rather than the URL, ...) are captured and resent
    unchanged. The username field is detected as the first text/email input
    whose name suggests an identity field (`user`, `login`, `email`,
    `account`), falling back to the first text field found. Override with
    `QLIK_FORM_USERNAME_FIELD` / `QLIK_FORM_PASSWORD_FIELD` if detection
    picks the wrong field.
 3. **POST** the credentials — hidden fields plus username and password — to
-   the form's `action` URL, following redirects. The username value is
-   `QLIK_USER_DIRECTORY\QLIK_USER_ID` when a directory is set, otherwise
-   just `QLIK_USER_ID` (the conventional Windows login format).
+   the form's `action` URL, or the landed-on URL itself (`targetId`
+   included) when the form has no `action`, following redirects. The
+   username value is `QLIK_USER_DIRECTORY\QLIK_USER_ID` when a directory
+   is set, otherwise just `QLIK_USER_ID` (the conventional Windows login
+   format — verified as the exact placeholder text Qlik's own login page
+   shows).
 4. Whatever Qlik session cookie shows up afterwards (matched the same way
-   JWT mode matches it — conventionally `X-Qlik-Session-<prefix>`) is the
-   bootstrapped session.
+   JWT mode matches it — conventionally `X-Qlik-Session-<prefix>`, or
+   plain `X-Qlik-Session` on the central proxy) is the bootstrapped
+   session.
 5. **GET** `{vp}/qps/csrftoken` — the same anti-CSWSH endpoint JWT mode's
    phase 1 uses — now authenticated by the cookie instead of a bearer
    token, to obtain `qlik-csrf-token`.
@@ -44,8 +57,13 @@ configured with. The MCP drives it the way a browser would:
 From that point on, a form session behaves exactly like a JWT session after
 its own bootstrap: the session cookie and CSRF token authenticate every QRS
 call and the Engine WebSocket upgrade, and no credentials are sent again
-until the session expires (same ~25 minute TTL and 401-triggered
-re-bootstrap as JWT mode).
+until the session expires (same ~25 minute TTL as JWT mode). Re-bootstrap
+also triggers on QRS `401`, on `302` (a missing session cookie is answered
+with a redirect back to the login page rather than a clean 401), and on
+`500 Authentication error: Restart the browser.` (a present but
+server-unrecognized cookie — verified after simulating a proxy failover);
+the Engine WebSocket side retries the same way when the upgrade succeeds
+but Engine closes the socket without a greeting.
 
 Implementation: [`form_session.py`](../qlik_sense_mcp_server/form_session.py).
 
@@ -90,11 +108,36 @@ shape depends on the auth module your admin configured.
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `QLIK_FORM_LOGIN_PATH` | Path under the virtual proxy to the login page | `internal_forms_authentication/login` |
+| `QLIK_FORM_LOGIN_PATH` | Path under the virtual proxy to start the login flow from, before any redirect | the virtual proxy root |
 | `QLIK_FORM_USERNAME_FIELD` | Force the login form's username field name | auto-detected |
 | `QLIK_FORM_PASSWORD_FIELD` | Force the login form's password field name | auto-detected |
 | `QLIK_VERIFY_SSL` | `true` enables TLS verification | `false` |
 | `QLIK_CA_CERT_PATH` | Path to a corporate CA bundle | unset |
+
+---
+
+## Reload-task administration (optional)
+
+The 14 reload-task tools (`get_tasks`, `create_task`, `start_task`, ...)
+are off by default in form mode, same as in JWT mode — they need QRS
+repository-admin rights, which an ordinary analyst identity does not have.
+
+That said, QRS checks the QMC role behind the authenticated session, not
+how the session was authenticated — a form login that maps to a
+`RootAdmin`/`ContentAdmin` identity (or an equivalent custom role) has
+exactly the same QRS access a certificate-mode service account would.
+Verified directly: `reloadtask/count` and a full task listing succeeded
+against a form-mode session backed by such an identity.
+
+If you know the identity behind your `QLIK_USER_ID` has these rights, set:
+
+```
+QLIK_TASK_TOOLS=true
+```
+
+to register the task tools in form mode too. If it does not, every task
+call will fail with 403 — the server does not (and cannot) check this for
+you ahead of time.
 
 ---
 
@@ -113,9 +156,12 @@ start the same config from several clients at once.
 
 ### `could not find a login form (an <input type="password"> field) on ...`
 
-`QLIK_FORM_LOGIN_PATH` does not point at the actual login page — check what
-your browser hits when you open the virtual proxy's URL and log in
-manually, and set the path accordingly.
+The redirect chain from `QLIK_FORM_LOGIN_PATH` (the virtual proxy root by
+default) did not land on a page with a login form — most likely because
+the login flow on your deployment does not start there. Open the virtual
+proxy's URL in a browser, log in manually, and check the network tab for
+where the redirect chain actually starts; set `QLIK_FORM_LOGIN_PATH`
+to that path if it differs from the proxy root.
 
 ### `could not detect the login form's username/password field names`
 

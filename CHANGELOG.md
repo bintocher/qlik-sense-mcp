@@ -18,6 +18,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   own bootstrap. No client certificates and no JWT signing key needed; the
   trade-off is a plain password living in the MCP config instead. See
   `docs/AUTH_FORM.md`.
+- `QLIK_TASK_TOOLS=true` now works outside certificate mode too. The
+  fourteen reload-task tools need a QRS repository-admin role, which is a
+  QMC property of the authenticated identity, not of the authentication
+  method — so a JWT or form login that maps to a sufficiently privileged
+  identity has exactly the same QRS access a certificate-mode service
+  account would (verified live: a full reload-task listing against a
+  form-mode session). The default is unchanged — on in certificate mode,
+  off in JWT/form mode — this only adds the opt-in for an operator who has
+  confirmed the identity behind their JWT/password does hold those rights.
 
 ### Fixed
 

@@ -19,7 +19,7 @@ certificate auth.
 |------|-------|----------|
 | Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
 | Engine (data & script)       | `engine_query`, `engine_create_hypercube`, `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `search_app`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics` | Query data, read load script, list visualizations, inspect field values |
-| Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
+| Reload tasks *(certificate mode by default; opt-in elsewhere, see below)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
 
 Full list with descriptions: [`docs/tools.md`](docs/tools.md).
 
@@ -144,10 +144,12 @@ secrets), and login/password against a "Form based" virtual proxy
   layout.
 - **Failures name the query that failed.** Every error reply, timeouts
   included, echoes `tool` and `request` with the exact arguments sent.
-- **Fewer useless tools in JWT/form mode.** Reload-task administration
-  needs QRS admin rights, so those 14 tools are registered only in
-  certificate mode: 27 tools with a certificate, 13 with a JWT or a
-  login/password.
+- **Fewer useless tools in JWT/form mode, by default.** Reload-task
+  administration needs QRS admin rights — a QMC role, not a property of
+  the authentication method — so those 14 tools default to on in
+  certificate mode and off in JWT/form mode: 27 tools with a certificate,
+  13 with a JWT or a login/password. `QLIK_TASK_TOOLS=true` turns them on
+  in JWT/form mode too, for an identity verified to hold those rights.
 - **One Qlik session per server.** Qlik's per-user limit (5 by default)
   counts proxy sessions, and in JWT/form mode one is created by the
   session bootstrap itself — before any WebSocket. The server therefore

@@ -1,9 +1,13 @@
 """Which tools the server advertises.
 
 The default surface is the analysis tools and nothing else. Reload-task
-administration is registered only when asked for by QLIK_TASK_TOOLS, and
-only in certificate mode — those endpoints need repository-admin rights,
-and a JWT analyst reaching them through the virtual proxy gets 403s.
+administration needs QRS repository-admin rights — a QMC role, not a
+property of the authentication method — so it defaults to on in
+certificate mode (normally a trusted admin identity) and off in JWT/form
+mode (normally an ordinary analyst identity who would just get 403s).
+QLIK_TASK_TOOLS overrides the default in either direction, including
+turning task tools on outside certificate mode for an identity verified to
+hold those rights.
 
 A tool the caller cannot use is not free: its name and description sit in
 the model's context, and a model that reads about task administration
@@ -109,23 +113,59 @@ class TestDefaultSurface:
 
 
 class TestTaskToolsSwitch:
-    def test_jwt_mode_leaves_them_out_even_when_asked_for(self, reload_server):
-        """QRS task administration cannot work as a JWT analyst identity."""
+    def test_jwt_mode_leaves_them_out_by_default(self, reload_server):
+        """Most JWT identities are ordinary analysts without QRS admin
+        rights, so the default stays off without an explicit opt-in."""
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/jwt",
+            QLIK_JWT_TOKEN="header.payload.signature",
+        )
+        assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
+
+    def test_jwt_mode_turns_them_on_when_explicitly_asked_for(self, reload_server):
+        """QRS checks the QMC role behind the session, not how it was
+        authenticated — an operator who has verified the JWT identity holds
+        admin rights can opt in explicitly."""
         module = reload_server(
             QLIK_SERVER_URL="https://qlik.example.com/jwt",
             QLIK_JWT_TOKEN="header.payload.signature",
             QLIK_TASK_TOOLS="true",
         )
+        names = set(module.mcp._tool_manager._tools)
+        assert TASK_TOOLS <= names
+        assert ANALYSIS_TOOLS <= names
+
+    def test_form_mode_leaves_them_out_by_default(self, reload_server):
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/forms",
+            QLIK_USER_DIRECTORY="COMPANY",
+            QLIK_USER_ID="ivanov",
+            QLIK_PASSWORD="s3cret",
+        )
         assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
-    def test_form_mode_leaves_them_out_even_when_asked_for(self, reload_server):
-        """Same reasoning as JWT: form mode is also an ordinary VP identity."""
+    def test_form_mode_turns_them_on_when_explicitly_asked_for(self, reload_server):
+        """Same reasoning as JWT above — verified live against a form-mode
+        session backed by an identity with QRS admin rights."""
         module = reload_server(
             QLIK_SERVER_URL="https://qlik.example.com/forms",
             QLIK_USER_DIRECTORY="COMPANY",
             QLIK_USER_ID="ivanov",
             QLIK_PASSWORD="s3cret",
             QLIK_TASK_TOOLS="true",
+        )
+        names = set(module.mcp._tool_manager._tools)
+        assert TASK_TOOLS <= names
+        assert ANALYSIS_TOOLS <= names
+
+    @pytest.mark.parametrize("value", ["false", "0", "no", "FALSE"])
+    def test_turning_it_off_drops_them_from_jwt_mode_too(self, reload_server, value):
+        """QLIK_TASK_TOOLS=false is an unambiguous opt-out in every mode,
+        including the (hypothetical) case where they were already on."""
+        module = reload_server(
+            QLIK_SERVER_URL="https://qlik.example.com/jwt",
+            QLIK_JWT_TOKEN="header.payload.signature",
+            QLIK_TASK_TOOLS=value,
         )
         assert set(module.mcp._tool_manager._tools) == ANALYSIS_TOOLS
 
