@@ -91,6 +91,17 @@ DEFAULT_LOGIN_PATH = ""
 # that has been idle answers its first request slowly.
 BOOTSTRAP_TIMEOUT_SECONDS = 60.0
 
+# The login redirect chain must not run over a reused keep-alive connection.
+# Qlik's proxy closes the connection right after handing out the 302 to
+# `internal_forms_authentication/?targetId=...`, so the next hop of the same
+# chain gets written into a socket the server has already dropped and httpx
+# raises RemoteProtocolError("Server disconnected without sending a
+# response") before the login page is ever seen. Verified against Qlik Sense
+# May 2026 Patch 2: the same GET fails every time without this header and
+# succeeds every time with it. A retry does not help, because it reuses the
+# connection pool the same way, so the header is the fix, not another attempt.
+_NO_KEEPALIVE_HEADERS = {"Connection": "close"}
+
 
 class FormBootstrapError(RuntimeError):
     """Raised when the login/password bootstrap fails irrecoverably."""
@@ -314,7 +325,8 @@ class FormSession:
         logger.info("Bootstrapping form session, entry point %s", entry_url)
         try:
             page = client.get(entry_url, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                              follow_redirects=True)
+                              follow_redirects=True,
+                              headers=_NO_KEEPALIVE_HEADERS)
         except httpx.TransportError as exc:
             # One retry for a dropped connection on the very first hop of
             # the redirect chain — observed against a live deployment: the
@@ -328,7 +340,8 @@ class FormSession:
                 entry_url, type(exc).__name__, exc)
             try:
                 page = client.get(entry_url, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                                  follow_redirects=True)
+                                  follow_redirects=True,
+                                  headers=_NO_KEEPALIVE_HEADERS)
             except httpx.HTTPError as retry_exc:
                 raise FormBootstrapError(
                     f"entry point request to {entry_url} failed twice: {retry_exc}"
@@ -373,7 +386,7 @@ class FormSession:
         try:
             client.post(
                 action_url, data=body, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                follow_redirects=True,
+                follow_redirects=True, headers=_NO_KEEPALIVE_HEADERS,
             )
         except httpx.HTTPError as exc:
             raise FormBootstrapError(f"login POST to {action_url} failed: {exc}") from exc
