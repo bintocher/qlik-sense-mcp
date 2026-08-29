@@ -15,7 +15,12 @@ from ..config import (
     AUTH_MODE_JWT,
     AUTH_MODE_FORM,
 )
-from ..exceptions import QlikConnectionError, QlikEngineError, QlikSessionLimitError
+from ..exceptions import (
+    QlikConnectionError,
+    QlikEngineError,
+    QlikLicenseError,
+    QlikSessionLimitError,
+)
 from ..jwt_session import JwtBootstrapError
 from ..form_session import FormBootstrapError
 from contextlib import contextmanager
@@ -324,9 +329,12 @@ class EngineConnectionMixin:
                 # call, which says nothing about the real cause.
                 self._consume_greeting()
                 return  # Success
-            except QlikSessionLimitError:
-                # Quota, not a bad endpoint — every fallback URL would be
-                # refused the same way. Surface it as-is.
+            except (QlikSessionLimitError, QlikLicenseError):
+                # Quota or a missing license, not a bad endpoint - every
+                # fallback URL would be refused the same way, and a fresh login
+                # cannot grant a license. Surface as-is: retrying here would
+                # spend one more Qlik session on a certain failure and bring the
+                # per-user limit closer.
                 self._kill_socket()
                 raise
             except websocket.WebSocketBadStatusException as e:
@@ -453,6 +461,8 @@ class EngineConnectionMixin:
                     )
                     if method == "OnMaxParallelSessionsExceeded":
                         raise QlikSessionLimitError(message)
+                    if method == "OnLicenseAccessDenied":
+                        raise QlikLicenseError(message)
                     raise QlikConnectionError(message)
                 if method == "OnConnected":
                     return

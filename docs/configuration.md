@@ -65,7 +65,7 @@ adapt it to a non-default login page.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QLIK_PASSWORD` | unset | Password submitted to the login form. Setting this switches the server to form mode. |
-| `QLIK_FORM_LOGIN_PATH` | `internal_forms_authentication/login` | Path under the virtual proxy where the login page lives. Override if your deployment's form module serves it elsewhere. |
+| `QLIK_FORM_LOGIN_PATH` | empty (the virtual proxy root) | Where to start the login redirect chain. The login page itself carries a per-visit `targetId` that cannot be guessed, so the default is a page Qlik redirects FROM, not the login URL. Override only if the login flow starts somewhere other than the proxy root. |
 | `QLIK_FORM_USERNAME_FIELD` | auto-detected | Force the login form's username field name, if auto-detection picks the wrong `<input>`. |
 | `QLIK_FORM_PASSWORD_FIELD` | auto-detected | Force the login form's password field name (auto-detection is normally reliable here — it matches `type="password"`). |
 

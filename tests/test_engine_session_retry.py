@@ -13,9 +13,12 @@ retriable stale session exactly like a 401/403 upgrade rejection.
 """
 
 import json
+
+import pytest
 from unittest.mock import MagicMock, patch
 
 from qlik_sense_mcp_server.config import QlikSenseConfig
+from qlik_sense_mcp_server.exceptions import QlikLicenseError
 from qlik_sense_mcp_server.engine_api import QlikEngineAPI
 
 
@@ -129,3 +132,58 @@ class TestGreetinglessCloseRetry:
         # Certificate mode has no session to refresh, so every attempt is a
         # distinct fallback endpoint, not a retry of the same one.
         assert len(set(attempts)) == len(attempts)
+
+
+def _license_denied_ws():
+    """A socket Engine refuses because the identity has no license.
+
+    Authentication succeeded, so the upgrade goes through and the refusal
+    arrives as a greeting notification - the same shape as a stale-session
+    close, but nothing a fresh login can fix.
+    """
+    ws = MagicMock()
+    ws.recv.return_value = json.dumps({
+        "jsonrpc": "2.0",
+        "method": "OnLicenseAccessDenied",
+        "params": {"severity": "fatal"},
+    })
+    return ws
+
+
+class TestLicenseDenied:
+    def test_a_missing_license_is_not_retried_with_a_new_session(self):
+        """Logging in again cannot grant a license.
+
+        Retrying would spend one more of the five Qlik sessions allowed per
+        user on a certain failure, bringing the limit closer for no reason.
+        """
+        client = _client()
+        attempts = []
+
+        def create_connection(url, **kwargs):
+            attempts.append(url)
+            return _license_denied_ws()
+
+        with patch("websocket.create_connection", side_effect=create_connection):
+            with pytest.raises(QlikLicenseError) as excinfo:
+                client.connect(app_id="app-1")
+
+        assert "no license access" in str(excinfo.value)
+        assert len(attempts) == 1, "no fallback endpoint and no retry"
+        assert client.form_session.invalidate_calls == 0
+        assert client.form_session.ensure_standalone_calls == 1
+
+    def test_a_stale_session_is_still_retried(self):
+        """The neighbouring case must keep working: a greeting-less close is
+        exactly what a fresh login does fix."""
+        client = _client()
+        attempts = []
+
+        def create_connection(url, **kwargs):
+            attempts.append(url)
+            return _dead_on_arrival_ws() if len(attempts) == 1 else _connected_ws()
+
+        with patch("websocket.create_connection", side_effect=create_connection):
+            client.connect(app_id="app-1")
+
+        assert client.form_session.invalidate_calls == 1

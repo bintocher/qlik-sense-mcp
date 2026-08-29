@@ -54,6 +54,40 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   twin, and the test fixture hands it back when a run ends. Without that,
   consecutive login/password runs piled up Qlik sessions until the per-user
   limit was exhausted.
+- Re-login after the session TTL expired failed on any deployment that kept the
+  old session alive: Qlik serves the login form only to a client it does not
+  recognise, so the refresh landed on the hub and reported "could not find a
+  login form", while the request that triggered it went out on a session Qlik
+  no longer honoured. Verified live: an app listing that returns 22 apps
+  returned an error instead. The previous session cookie is now dropped before
+  logging in again (a load balancer's own cookie is left alone).
+- A session bootstrapped by the Engine path now reaches the Repository client
+  too. Previously a run that touched Engine first left the Repository client
+  with an empty jar, got a redirect on its first call and logged in a second
+  time, spending another of the five sessions Qlik allows per user. Same fix in
+  JWT mode.
+- A session is considered fresh by its cookie and age, not by the CSRF token.
+  Qlik releases before November 2024 never send one, so such a deployment never
+  had a fresh session and logged in again on every single request.
+- Wrong credentials behind a load balancer now say so. The "a single cookie can
+  only be the session" rule was being applied to the whole client jar, where the
+  balancer's own cookie can be the only one present, so a failed login looked
+  successful and surfaced as an unrelated error on the next request.
+- The login POST is retried once on a dropped connection, like the entry-point
+  GET. Both hops run through the same redirect chain and are exposed to the same
+  transport failures; the retry now lives in one place for both.
+- The first QRS call after a bootstrap survives a dropped connection: Qlik
+  closes the connection at the end of the login chain, and a read is repeated
+  once on a fresh one. Writes still report the failure, since a write that died
+  while answering may already have happened.
+- The script log and tempContent downloads go through the authorized request
+  path. They called the client directly with `follow_redirects=True`, so a
+  lapsed session turned the login page into a 200 and the HTML was stored as the
+  script log - reachable now that task tools can be enabled outside certificate
+  mode.
+- Engine tells a missing license apart from a stale session. `OnLicenseAccessDenied`
+  was treated as an expired cookie, so every such connect spent a full re-login
+  on a certain failure and brought the per-user session limit closer.
 
 ## [2.0.1] - 2026-08-13
 

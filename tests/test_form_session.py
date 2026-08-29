@@ -235,3 +235,126 @@ class TestEntryPointRetry:
         client = _FlakyEntryClient(fail_times=2)
         with pytest.raises(FormBootstrapError, match="failed twice"):
             FormSession(_config()).ensure(client)
+
+
+class _FlakyLoginClient(_FakeClient):
+    """Drops the connection on the login POST, not on the entry-point GET.
+
+    The credential POST follows the same redirect chain as the entry point and
+    is exposed to the same transport failures, so it needs the same one-off
+    retry.
+    """
+
+    def __init__(self, fail_times=1, **kwargs):
+        super().__init__(**kwargs)
+        self._fail_times = fail_times
+        self.login_posts = 0
+
+    def post(self, url, data=None, timeout=None, follow_redirects=None, headers=None):
+        self.login_posts += 1
+        if self.login_posts <= self._fail_times:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return super().post(
+            url, data=data, timeout=timeout,
+            follow_redirects=follow_redirects, headers=headers,
+        )
+
+
+class _JarClient(_FakeClient):
+    """Keeps a jar that already holds cookies before the login starts.
+
+    Stands in for Qlik behind a load balancer, which sets its own cookie on the
+    very first response, and for a re-login on a client that still carries the
+    previous Qlik session.
+    """
+
+    def __init__(self, initial=(), post_cookie=("X-Qlik-Session", "new-value"), **kwargs):
+        super().__init__(**kwargs)
+        for name, value in initial:
+            self.cookies.set(name, value)
+        self._post_cookie = post_cookie
+
+    def post(self, url, data=None, timeout=None, follow_redirects=None, headers=None):
+        self.calls.append(("POST", url, data))
+        self.headers_seen.append(("POST", url, dict(headers or {})))
+        if self._post_cookie is not None:
+            self.cookies.set(*self._post_cookie)
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+
+class TestLoginPostRetry:
+    def test_one_dropped_connection_on_the_login_post_is_retried(self):
+        client = _FlakyLoginClient(fail_times=1)
+        session = FormSession(_config())
+        session.ensure(client)  # must not raise
+        assert session.cookie_value == "abc123"
+        assert client.login_posts == 2
+
+    def test_two_dropped_connections_on_the_login_post_raise(self):
+        client = _FlakyLoginClient(fail_times=2)
+        with pytest.raises(FormBootstrapError) as excinfo:
+            FormSession(_config()).ensure(client)
+        assert "login POST" in str(excinfo.value)
+
+
+class TestReLogin:
+    def test_previous_session_cookie_is_dropped_before_logging_in_again(self):
+        """Qlik serves the login form only to a client it does not recognise.
+
+        Re-logging in with the old session cookie still in the jar gets the hub
+        back instead of the form, and the request that triggered the refresh
+        then goes out on a session Qlik no longer honours.
+        """
+        client = _JarClient(initial=[("X-Qlik-Session", "stale")])
+        session = FormSession(_config())
+        session.ensure(client)
+        assert session.cookie_value == "new-value"
+        assert client.cookies.get("X-Qlik-Session") == "new-value"
+
+    def test_a_load_balancer_cookie_survives_the_re_login(self):
+        client = _JarClient(initial=[("X-Mapping-abc", "node-2")])
+        FormSession(_config()).ensure(client)
+        assert client.cookies.get("X-Mapping-abc") == "node-2"
+
+    def test_a_foreign_cookie_is_not_mistaken_for_a_session(self):
+        """Wrong password behind a load balancer must still say so.
+
+        The jar then holds exactly one cookie - the balancer's - and the "a
+        single cookie can only be the session" rule would accept it, so the
+        operator would get an unrelated error on the next request instead of
+        "check the credentials".
+        """
+        client = _JarClient(initial=[("X-Mapping-abc", "node-2")], post_cookie=None)
+        with pytest.raises(FormBootstrapError) as excinfo:
+            FormSession(_config()).ensure(client)
+        assert "session cookie" in str(excinfo.value)
+
+
+class TestSessionReuse:
+    def test_a_session_bootstrapped_elsewhere_reaches_another_client(self):
+        """Engine logs in on its own client; the QRS client must get that cookie.
+
+        Otherwise the first Repository call after an Engine call goes out with
+        an empty jar, gets a redirect to the login page and logs in a second
+        time, spending another of the five sessions Qlik allows per user.
+        """
+        session = FormSession(_config())
+        session.ensure(_FakeClient())
+        other = _FakeClient()
+        session.ensure(other)
+        assert other.cookies.get("X-Qlik-Session-jwt") == "abc123"
+        assert other.calls == []  # no second login
+
+    def test_a_session_without_a_csrf_token_still_counts_as_fresh(self):
+        """Qlik before November 2024 never sends the token.
+
+        Treating such a session as stale meant every request logged in again.
+        """
+        client = _FakeClient()
+        client.get = lambda url, headers=None, timeout=None, follow_redirects=None: (
+            httpx.Response(200, text=LOGIN_HTML, request=httpx.Request("GET", url))
+        )
+        session = FormSession(_config())
+        session.ensure(client)
+        assert session.csrf_token is None
+        assert session._is_fresh()

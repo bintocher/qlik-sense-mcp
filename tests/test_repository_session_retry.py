@@ -209,3 +209,41 @@ class TestSessionExpiryRetry:
 
         result = repo.get_about()
         assert result == {"buildVersion": "31.60"}
+
+
+class _DroppingClient:
+    """Drops the connection on the first request, answers the second.
+
+    Qlik closes the connection at the end of the login redirect chain, so the
+    first QRS call after a bootstrap can land in a socket the server has
+    already dropped.
+    """
+
+    def __init__(self):
+        self.cookies = httpx.Cookies()
+        self.calls = 0
+
+    def request(self, method, url, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(
+            200, json=[{"id": "app-1"}],
+            headers={"content-type": "application/json"},
+            request=httpx.Request(method, url),
+        )
+
+
+class TestDroppedConnectionRetry:
+    def test_a_dropped_read_is_retried_once(self):
+        api = QlikRepositoryAPI(_form_config(), form_session=_StubCookieSession())
+        api.client = _DroppingClient()
+        assert api._make_request("GET", "app/full") == [{"id": "app-1"}]
+        assert api.client.calls == 2
+
+    def test_a_dropped_write_is_reported_not_repeated(self):
+        api = QlikRepositoryAPI(_form_config(), form_session=_StubCookieSession())
+        api.client = _DroppingClient()
+        result = api._make_request("POST", "reloadtask")
+        assert "error" in result
+        assert api.client.calls == 1

@@ -178,12 +178,18 @@ class JwtSession:
         """
         Guarantee a valid bootstrapped session, using the given ``httpx.Client``.
 
-        Safe to call on every request — returns fast if the session is still
+        Safe to call on every request - returns fast if the session is still
         fresh (within TTL). The passed-in client keeps the cookie jar so the
         bootstrapped session cookie is reused for subsequent QRS calls
         automatically (httpx persists cookies per-client).
+
+        A session bootstrapped on another client (the Engine path uses a
+        throwaway one) is copied in here as well: otherwise the Repository
+        client starts with an empty jar, gets a 302 on its first call and logs
+        in again, spending a second Qlik session for nothing.
         """
         if self._is_fresh():
+            self._apply_cookie_to(http_client)
             return
         with self._lock:
             if self._is_fresh():  # re-check under lock
@@ -212,8 +218,27 @@ class JwtSession:
 
     # ─── internals ─────────────────────────────────────────────────────
 
+    def _apply_cookie_to(self, client: httpx.Client) -> None:
+        """Put the bootstrapped session cookie into the client's jar."""
+        if not (self._cookie_name and self._cookie_value):
+            return
+        if client.cookies.get(self._cookie_name) == self._cookie_value:
+            return
+        client.cookies.set(self._cookie_name, self._cookie_value)
+
     def _is_fresh(self) -> bool:
-        if not (self._cookie_value and self._csrf_token):
+        """True while the bootstrapped session can still be used as is.
+
+        Freshness is the session cookie plus its age, not the CSRF token: Qlik
+        releases before November 2024 never send `qlik-csrf-token`, and the code
+        that fetches it says so itself. Requiring it here meant such a
+        deployment never had a fresh session, so every single request logged in
+        again and burned through the five sessions Qlik allows per user. Where
+        the token does exist it is sent (both callers check it for truthiness),
+        and a session that loses it gets a 403 that the existing re-login path
+        already handles.
+        """
+        if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
 
