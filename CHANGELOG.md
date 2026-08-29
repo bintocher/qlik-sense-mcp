@@ -44,8 +44,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Engine then closes the socket without ever sending a greeting. Now
   retried once with a refreshed session, symmetric to the existing 401/403
   handling on the upgrade response.
+- Form login no longer fails on the redirect chain to the login page. Qlik's
+  proxy closes the connection right after the 302, so following the redirect
+  on the pooled keep-alive connection wrote into a dead socket and raised
+  `RemoteProtocolError` before the login page was ever fetched; both hops of
+  the credential exchange now ask for a fresh connection. Verified against
+  Qlik Sense May 2026 Patch 2, where the login failed every time without it.
+- A live form session is now reachable as `server.form_session`, like its JWT
+  twin, and the test fixture hands it back when a run ends. Without that,
+  consecutive login/password runs piled up Qlik sessions until the per-user
+  limit was exhausted.
 
 ## [2.0.1] - 2026-08-13
+
 
 ### Fixed
 
