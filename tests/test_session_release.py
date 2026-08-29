@@ -58,7 +58,7 @@ class TestTtlOnTheSocketUrl:
 
         def fake_connect(url, **kwargs):
             captured.setdefault("urls", []).append(url)
-            raise OSError("не подключаемся — нужен только адрес")
+            raise OSError("not connecting - only the URL is needed here")
 
         # The placeholder certificate files are not real PEM, and loading
         # them raises before a single URL is built.
@@ -81,6 +81,6 @@ class TestTtlOnTheSocketUrl:
             QLIK_CLIENT_KEY_PATH=str(tmp_path / "client_key.pem"),
             QLIK_CA_CERT_PATH=str(tmp_path / "root.pem"),
             QLIK_USER_DIRECTORY="DIR", QLIK_USER_ID="user")
-        assert urls, "ни одного адреса не построено"
+        assert urls, "no URL was built at all"
         assert all(f"/ttl/{WS_SESSION_TTL_SECONDS}" in url for url in urls)
 

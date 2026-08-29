@@ -91,7 +91,7 @@ class TestStartupWiring:
         monkeypatch.setattr(context, "engine_api", None)
         context._init_clients()
         assert context.engine_api is not None, (
-            "клиенты не поднялись — смотри предупреждение в журнале")
+            "clients did not come up - check the warning in the log")
         assert context.config.auth_mode == "jwt"
 
     def test_the_server_initialises_its_clients_in_form_mode(self, form_env, monkeypatch):
@@ -102,7 +102,7 @@ class TestStartupWiring:
         monkeypatch.setattr(context, "form_session", None)
         context._init_clients()
         assert context.engine_api is not None, (
-            "клиенты не поднялись — смотри предупреждение в журнале")
+            "clients did not come up - check the warning in the log")
         assert context.config.auth_mode == "form"
         assert context.form_session is not None
         assert context.jwt_session is None

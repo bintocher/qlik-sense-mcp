@@ -537,8 +537,8 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             "columns": WIDE_MODEL_COLUMNS,
             "rows": [[field.get(key) for key in WIDE_MODEL_COLUMNS]
                      for field in fields],
-            "note": ("Модель широкая, поэтому поля отданы таблицей: "
-                     "columns задаёт порядок значений в каждой строке rows."),
+            "note": ("Wide model, so fields come back as a table: "
+                     "columns gives the order of values in every rows entry."),
         }
         result.setdefault("warnings", []).append(
             f"{len(fields)} fields — listed as columns+rows to keep the reply "
