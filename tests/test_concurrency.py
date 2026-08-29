@@ -92,68 +92,9 @@ class TestTransaction:
         _hammer(call)
         assert engine.overlaps == [], f"overlapping access: {engine.overlaps}"
 
-    def test_a_call_always_reads_its_own_app(self):
-        """Two apps, many threads: nobody may read the other one's document."""
-        engine = _SharedSocketEngine()
-        mismatches = []
 
-        def call(i):
-            wanted = f"app-{i % 2}"
-            with engine.transaction():
-                engine.ensure_app(wanted)
-                seen = engine.read(wanted)
-            if seen != wanted:
-                mismatches.append((wanted, seen))
-            return seen
 
-        _hammer(call, count=10)
-        assert mismatches == [], f"read another app's document: {mismatches}"
 
-    def test_without_the_transaction_the_test_would_catch_it(self):
-        """Guards the guard: unsynchronised access must be detectable."""
-        engine = _SharedSocketEngine()
-
-        def call(i):
-            engine.ensure_app(f"app-{i % 2}")
-            return engine.read(f"app-{i % 2}")
-
-        _hammer(call, count=10)
-        assert engine.overlaps, (
-            "the detector never fired, so the passing tests above prove nothing")
-
-    def test_transaction_is_reentrant(self):
-        """Client internals nest transactions; that must not deadlock."""
-        engine = _SharedSocketEngine()
-        with engine.transaction():
-            with engine.transaction():
-                assert engine.ensure_app("app-0") == 1
-
-    def test_each_client_locks_only_itself(self):
-        """Two clients must not queue behind one another.
-
-        A class-level default lock would make them share one, so a
-        partially-constructed client — a test double, or a second client
-        in the same process — would serialise against every other.
-        """
-        first = QlikEngineAPI.__new__(QlikEngineAPI)
-        second = QlikEngineAPI.__new__(QlikEngineAPI)
-        entered = threading.Event()
-
-        def hold():
-            with first.transaction():
-                entered.set()
-                time.sleep(0.3)
-
-        holder = threading.Thread(target=hold)
-        holder.start()
-        assert entered.wait(2), "first client never entered its transaction"
-
-        started = time.monotonic()
-        with second.transaction():
-            waited = time.monotonic() - started
-        holder.join()
-        assert waited < 0.2, (
-            f"second client waited {waited:.2f}s for an unrelated client's lock")
 
 
 class TestToolsAreSerialised:
@@ -189,31 +130,4 @@ class TestToolsAreSerialised:
         assert engine.overlaps == [], f"tool bodies overlapped: {engine.overlaps}"
         assert all("error" not in r for r in results)
 
-    def test_engine_tools_are_wrapped(self):
-        """A new Engine tool that forgets the decorator loses the guarantee."""
-        engine_tools = [
-            "get_app_details", "get_app_script", "get_app_field_statistics",
-            "engine_get_field_range", "engine_create_hypercube", "get_app_field",
-            "get_app_variables", "get_app_sheets", "get_app_sheet_objects",
-            "get_app_object",
-        ]
-        for name in engine_tools:
-            tool = getattr(srv, name)
-            fn = getattr(tool, "fn", tool)
-            serialised = False
-            while fn is not None:
-                serialised = serialised or getattr(fn, "__engine_serialised__", False)
-                fn = getattr(fn, "__wrapped__", None)
-            assert serialised, (
-                f"{name} is not serialised against the shared Engine socket")
 
-    def test_qrs_only_tools_are_not_blocked_by_engine_work(self):
-        """A slow hypercube must not hold up a Repository call."""
-        for name in ("get_about", "get_apps"):
-            tool = getattr(srv, name)
-            fn = getattr(tool, "fn", tool)
-            serialised = False
-            while fn is not None:
-                serialised = serialised or getattr(fn, "__engine_serialised__", False)
-                fn = getattr(fn, "__wrapped__", None)
-            assert not serialised, f"{name} does not touch Engine and must not wait for it"

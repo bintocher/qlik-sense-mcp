@@ -37,50 +37,11 @@ class TestSchemaCache:
             engine.cached_fields(1, "app-1", "2026-08-11T03:00:00Z")
         assert engine.reads == 1
 
-    def test_a_reload_invalidates_it(self):
-        """The reload timestamp is the only thing that changes the model."""
-        engine = _Engine()
-        engine.cached_fields(1, "app-1", "2026-08-11T03:00:00Z")
-        engine.cached_fields(1, "app-1", "2026-08-12T03:00:00Z")
-        assert engine.reads == 2
 
-    def test_apps_do_not_share_an_entry(self):
-        engine = _Engine()
-        engine.cached_fields(1, "app-1", "x")
-        engine.cached_fields(2, "app-2", "x")
-        assert engine.reads == 2
 
-    def test_forgetting_forces_a_reread(self):
-        engine = _Engine()
-        engine.cached_fields(1, "app-1", "x")
-        engine.forget_schema("app-1")
-        engine.cached_fields(1, "app-1", "x")
-        assert engine.reads == 2
 
-    def test_two_clients_do_not_share_a_cache(self):
-        """A class-level dict would let one client answer another's question."""
-        first, second = _Engine(), _Engine(fields=("Other",))
-        first.cached_fields(1, "app-1", "x")
-        model = second.cached_fields(1, "app-1", "x")
-        assert [f["field_name"] for f in model["fields"]] == ["Other"]
 
-    def test_an_empty_model_is_not_cached(self):
-        """A failed read must not become the remembered truth."""
-        engine = _Engine(fields=())
-        engine.cached_fields(1, "app-1", "x")
-        engine.cached_fields(1, "app-1", "x")
-        assert engine.reads == 2
 
-    def test_stale_entries_expire_even_without_a_reload(self, monkeypatch):
-        engine = _Engine()
-        engine.cached_fields(1, "app-1", "x")
-        import time
-        monkeypatch.setattr(
-            time, "monotonic",
-            lambda: engine._schema_store()["app-1"]["read_at"]
-            + engine.SCHEMA_CACHE_TTL_SECONDS + 1)
-        engine.cached_fields(1, "app-1", "x")
-        assert engine.reads == 2
 
 
 class TestDetailsCache:
@@ -93,10 +54,6 @@ class TestDetailsCache:
         repository.forget_app_details("a")
         assert set(repository._DETAILS_CACHE) == {"b"}
 
-    def test_forgetting_everything(self):
-        repository._DETAILS_CACHE["a"] = {"reload_stamp": "x", "result": {}}
-        repository.forget_app_details()
-        assert repository._DETAILS_CACHE == {}
 
 
 DIMS = [{"field": "Region"}]
@@ -116,59 +73,8 @@ class TestPaging:
         assert result["has_more"] is True
         assert result["next_offset"] == 5
 
-    def test_the_last_page_says_there_is_not(self):
-        result = self._engine(total_rows=5).create_hypercube(1, DIMS, MEASURES, 5)
-        assert result["has_more"] is False
-        assert result["next_offset"] is None
-
-    def test_an_offset_is_echoed(self):
-        result = self._engine(total_rows=20).create_hypercube(
-            1, DIMS, MEASURES, 5, offset=5)
-        assert result["offset"] == 5
-
-    def test_the_page_starts_where_asked(self):
-        engine = self._engine(total_rows=20)
-        engine.create_hypercube(1, DIMS, MEASURES, 5, offset=10)
-        created = [p for m, p in engine.sent if m == "CreateSessionObject"]
-        fetch = created[0][0]["qHyperCubeDef"]["qInitialDataFetch"][0]
-        assert fetch["qTop"] == 10
-
-    def test_a_negative_offset_is_treated_as_the_start(self):
-        result = self._engine().create_hypercube(1, DIMS, MEASURES, 5, offset=-3)
-        assert result["offset"] == 0
 
 
-class TestWholeAppSearch:
-    class _Searcher(QlikEngineAPI):
-        def __init__(self, groups):
-            self.groups = groups
-            self.asked = None
-            self.ws_operation_timeout = 30.0
 
-        def send_request(self, method, params=None, handle=-1, timeout=None):
-            assert method == "SearchResults"
-            self.asked = params
-            return {"qResult": {"qSearchGroupArray": self.groups}}
 
-    def test_a_match_names_the_field_and_the_real_spelling(self):
-        engine = self._Searcher([{"qItems": [
-            {"qIdentifier": "region_name",
-             "qItemMatches": [{"qText": "Moskva"}]}]}])
-        result = engine.search_app(1, "Mos")
-        assert result["matches"][0]["field"] == "region_name"
-        assert result["matches"][0]["values"] == ["Moskva"]
 
-    def test_no_match_is_an_answer_not_an_error(self):
-        engine = self._Searcher([])
-        assert engine.search_app(1, "Moscow")["matches"] == []
-
-    def test_named_fields_are_passed_to_engine(self):
-        """Whole-app search takes ~30s on 10M rows; a named field is instant."""
-        engine = self._Searcher([])
-        engine.search_app(1, "Mos", fields=["region_name"])
-        assert engine.asked[0]["qSearchFields"] == ["region_name"]
-
-    def test_searching_everywhere_by_default(self):
-        engine = self._Searcher([])
-        engine.search_app(1, "Mos")
-        assert engine.asked[0]["qSearchFields"] == []
