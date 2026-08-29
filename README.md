@@ -9,8 +9,11 @@
 Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
 (WebSocket) APIs as **28 MCP tools** so an LLM client can discover apps,
 inspect data models, query data, and manage reload tasks through a
-single uniform interface. In JWT mode the 14 reload-task tools are
-hidden, since QRS task administration needs certificate auth.
+single uniform interface. In JWT and form (login/password) mode the 14
+reload-task tools are hidden by default: QRS task administration needs an
+admin role in the QMC, which a JWT analyst or a form login usually does
+not hold. That is a property of the identity, not of how it authenticated,
+so `QLIK_TASK_TOOLS=true` turns them on for an identity that does hold it.
 
 ## What's in the box
 
@@ -18,7 +21,7 @@ hidden, since QRS task administration needs certificate auth.
 |------|-------|----------|
 | Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
 | Engine (data & script)       | `engine_query`, `engine_create_hypercube`, `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `search_app`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics` | Query data, read load script, list visualizations, inspect field values |
-| Reload tasks *(certificate mode only)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
+| Reload tasks *(certificate mode by default; opt-in elsewhere, see below)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
 
 Full list with descriptions: [`docs/tools.md`](docs/tools.md).
 
@@ -57,9 +60,12 @@ variables — see [`docs/configuration.md`](docs/configuration.md).
 
 For stdio mode (legacy MCP transport), pass `--stdio`.
 
-Two authentication modes are supported: client certificate (legacy,
-full QRS access) and JWT via virtual proxy (per-analyst, no on-disk
-secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
+Three authentication modes are supported: client certificate (legacy,
+full QRS access), JWT via virtual proxy (per-analyst, no on-disk
+secrets), and login/password against a "Form based" virtual proxy
+(e.g. the in-box Windows credentials login page). See
+[`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) and
+[`docs/AUTH_FORM.md`](docs/AUTH_FORM.md) for setup.
 
 ## Documentation
 
@@ -68,6 +74,7 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
 | [`docs/installation.md`](docs/installation.md) | Requirements, install via `uvx` / `pip` / source, certificate setup |
 | [`docs/configuration.md`](docs/configuration.md) | All `QLIK_*` environment variables, sample `.env`, MCP client config snippet |
 | [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) | JWT authentication via virtual proxy: key generation, virtual proxy setup, `QLIK_JWT_TOKEN` usage |
+| [`docs/AUTH_FORM.md`](docs/AUTH_FORM.md) | Login/password authentication via a "Form based" virtual proxy: how the login flow works, `QLIK_PASSWORD` usage, overrides for non-default login pages |
 | [`docs/usage.md`](docs/usage.md) | Transports, server start commands, recommended call order, hard limits enforced by this server |
 | [`docs/tools.md`](docs/tools.md) | Inventory of all 27 tools, response/error envelope, error categories |
 | [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
@@ -139,12 +146,15 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
   layout.
 - **Failures name the query that failed.** Every error reply, timeouts
   included, echoes `tool` and `request` with the exact arguments sent.
-- **Fewer useless tools in JWT mode.** Reload-task administration needs
-  QRS admin rights, so those 14 tools are registered only in
-  certificate mode: 27 tools with a certificate, 13 with a JWT.
+- **Fewer useless tools in JWT/form mode, by default.** Reload-task
+  administration needs QRS admin rights — a QMC role, not a property of
+  the authentication method — so those 14 tools default to on in
+  certificate mode and off in JWT/form mode: 28 tools with a certificate,
+  14 with a JWT or a login/password. `QLIK_TASK_TOOLS=true` turns them on
+  in JWT/form mode too, for an identity verified to hold those rights.
 - **One Qlik session per server.** Qlik's per-user limit (5 by default)
-  counts proxy sessions, and in JWT mode one is created by the session
-  bootstrap itself — before any WebSocket. The server therefore
+  counts proxy sessions, and in JWT/form mode one is created by the
+  session bootstrap itself — before any WebSocket. The server therefore
   bootstraps once and reuses that session for every call; restarting it
   in a loop is what exhausts the quota, not the number of queries.
 - **JWT authentication via virtual proxy.** Set `QLIK_JWT_TOKEN`
@@ -153,6 +163,12 @@ secrets). See [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) for the JWT setup.
   certificates or private keys live on the host. The legacy
   certificate mode is unchanged and still required for full QRS access.
   Setup guide: [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md).
+- **Login/password authentication via a "Form based" virtual proxy.**
+  Set `QLIK_PASSWORD` (plus `QLIK_USER_ID` and optionally
+  `QLIK_USER_DIRECTORY`) instead of a certificate or a JWT and the
+  server logs into the proxy's login page the way a browser would, then
+  reuses the resulting session cookie exactly like JWT mode does after
+  its own bootstrap. Setup guide: [`docs/AUTH_FORM.md`](docs/AUTH_FORM.md).
 - **Cached Engine WebSocket connections.** Once an app is opened, every
   subsequent tool call against the same `app_id` reuses the same
   WebSocket and the same open document. Switching `app_id` closes the

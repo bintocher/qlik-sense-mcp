@@ -2,7 +2,7 @@
 
 ## Connection problems
 
-These apply to certificate auth mode. For JWT mode see [JWT authentication problems](#jwt-authentication-problems) below.
+These apply to certificate auth mode. For JWT mode see [JWT authentication problems](#jwt-authentication-problems) below, and for login/password mode see [`AUTH_FORM.md` → Troubleshooting](AUTH_FORM.md#troubleshooting).
 
 ### `SSL: CERTIFICATE_VERIFY_FAILED`
 
@@ -66,6 +66,12 @@ For JWT-specific debug logging (bootstrap URL, auto-detected session
 cookie name, CSRF token presence) see the "Everything looks right but
 requests still fail" entry in `docs/AUTH_JWT.md`.
 
+## Login/password (form) authentication problems
+
+Form mode (selected when `QLIK_PASSWORD` is set) has its own failure
+profile — see [`AUTH_FORM.md` → Troubleshooting](AUTH_FORM.md#troubleshooting)
+for the login-page-detection and session-cookie failures specific to it.
+
 ## Hypercube errors
 
 ### `WebSocket recv() timed out after 180.0s waiting for response to Engine method 'GetLayout'`
@@ -123,7 +129,8 @@ field. Common causes:
 
 Field names below mirror `qlik_sense_mcp_server/config.py`
 (`QlikSenseConfig`). The `auth_mode` property resolves to `"jwt"` when
-`QLIK_JWT_TOKEN` is set, otherwise `"certificate"`.
+`QLIK_JWT_TOKEN` is set, `"form"` when `QLIK_PASSWORD` is set (and JWT is
+not), otherwise `"certificate"`.
 
 ```bash
 python -c "
@@ -144,17 +151,18 @@ print('proxy_port            =', cfg.proxy_port)
 print('engine_port           =', cfg.engine_port)
 print('http_port             =', cfg.http_port)
 print('jwt_token_set         =', bool(cfg.jwt_token))
-print('auth_mode             =', cfg.auth_mode)
-print('virtual_proxy_prefix  =', cfg.virtual_proxy_prefix)
+print('password_set          =', bool(cfg.password))
 "
 ```
 
-In JWT mode the runtime values that matter most (auto-detected session
-cookie name, bootstrap URL, CSRF token presence) are not in the config
-object — they are produced during bootstrap. Run the server with
+In JWT/form mode the runtime values that matter most (auto-detected
+session cookie name, bootstrap URL, CSRF token presence) are not in the
+config object — they are produced during bootstrap. Run the server with
 `LOG_LEVEL=DEBUG` to see them on the first tool call (see "Verbose
-logging" below and the JWT-specific debug guidance in
-[`AUTH_JWT.md`](AUTH_JWT.md#everything-looks-right-but-requests-still-fail)).
+logging" below, the JWT-specific debug guidance in
+[`AUTH_JWT.md`](AUTH_JWT.md#everything-looks-right-but-requests-still-fail),
+and the form-mode equivalent in
+[`AUTH_FORM.md`](AUTH_FORM.md#everything-looks-right-but-requests-still-fail)).
 
 ## Verbose logging
 

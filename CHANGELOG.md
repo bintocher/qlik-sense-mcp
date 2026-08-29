@@ -4,7 +4,95 @@ All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project adheres to Semantic Versioning.
 
+## [Unreleased]
+
+## [2.1.0] - 2026-08-29
+
+### Added
+
+- Login/password (form) authentication mode, selected automatically when
+  `QLIK_PASSWORD` is set. Drives a virtual proxy's "Form based" login page
+  (most commonly the in-box Windows credentials page) the way a browser
+  would: GET the entry point and follow Qlik's own redirect chain to the
+  login page — which carries a per-visit `targetId` that cannot be
+  hardcoded or guessed — parse out the form, POST the credentials, and
+  reuse the resulting session cookie exactly like JWT mode does after its
+  own bootstrap. No client certificates and no JWT signing key needed; the
+  trade-off is a plain password living in the MCP config instead. See
+  `docs/AUTH_FORM.md`.
+- `QLIK_TASK_TOOLS=true` now works outside certificate mode too. The
+  fourteen reload-task tools need a QRS repository-admin role, which is a
+  QMC property of the authenticated identity, not of the authentication
+  method — so a JWT or form login that maps to a sufficiently privileged
+  identity has exactly the same QRS access a certificate-mode service
+  account would (verified live: a full reload-task listing against a
+  form-mode session). The default is unchanged — on in certificate mode,
+  off in JWT/form mode — this only adds the opt-in for an operator who has
+  confirmed the identity behind their JWT/password does hold those rights.
+
+### Fixed
+
+- QRS did not always signal an expired or unrecognized session with a
+  clean 401. Verified against a live form-mode deployment: a request with
+  no session cookie at all gets a 302 redirect to the virtual proxy's
+  login page, and one with a present-but-unrecognized cookie (plausible
+  after a proxy node failover, not just outright deletion) gets a 500
+  whose body is Qlik's own "Authentication error: Restart the browser."
+  page. Both now trigger the same automatic re-login-and-retry as a 401
+  instead of surfacing as an opaque `HTTP 302` / `HTTP 500` error.
+- The Engine WebSocket upgrade has the same gap with no HTTP status to
+  catch it by: a session whose local TTL says "fresh" but that Qlik no
+  longer recognizes server-side lets the upgrade itself succeed, and
+  Engine then closes the socket without ever sending a greeting. Now
+  retried once with a refreshed session, symmetric to the existing 401/403
+  handling on the upgrade response.
+- Form login no longer fails on the redirect chain to the login page. Qlik's
+  proxy closes the connection right after the 302, so following the redirect
+  on the pooled keep-alive connection wrote into a dead socket and raised
+  `RemoteProtocolError` before the login page was ever fetched; both hops of
+  the credential exchange now ask for a fresh connection. Verified against
+  Qlik Sense May 2026 Patch 2, where the login failed every time without it.
+- A live form session is now reachable as `server.form_session`, like its JWT
+  twin, and the test fixture hands it back when a run ends. Without that,
+  consecutive login/password runs piled up Qlik sessions until the per-user
+  limit was exhausted.
+- Re-login after the session TTL expired failed on any deployment that kept the
+  old session alive: Qlik serves the login form only to a client it does not
+  recognise, so the refresh landed on the hub and reported "could not find a
+  login form", while the request that triggered it went out on a session Qlik
+  no longer honoured. Verified live: an app listing that returns 22 apps
+  returned an error instead. The previous session cookie is now dropped before
+  logging in again (a load balancer's own cookie is left alone).
+- A session bootstrapped by the Engine path now reaches the Repository client
+  too. Previously a run that touched Engine first left the Repository client
+  with an empty jar, got a redirect on its first call and logged in a second
+  time, spending another of the five sessions Qlik allows per user. Same fix in
+  JWT mode.
+- A session is considered fresh by its cookie and age, not by the CSRF token.
+  Qlik releases before November 2024 never send one, so such a deployment never
+  had a fresh session and logged in again on every single request.
+- Wrong credentials behind a load balancer now say so. The "a single cookie can
+  only be the session" rule was being applied to the whole client jar, where the
+  balancer's own cookie can be the only one present, so a failed login looked
+  successful and surfaced as an unrelated error on the next request.
+- The login POST is retried once on a dropped connection, like the entry-point
+  GET. Both hops run through the same redirect chain and are exposed to the same
+  transport failures; the retry now lives in one place for both.
+- The first QRS call after a bootstrap survives a dropped connection: Qlik
+  closes the connection at the end of the login chain, and a read is repeated
+  once on a fresh one. Writes still report the failure, since a write that died
+  while answering may already have happened.
+- The script log and tempContent downloads go through the authorized request
+  path. They called the client directly with `follow_redirects=True`, so a
+  lapsed session turned the login page into a 200 and the HTML was stored as the
+  script log - reachable now that task tools can be enabled outside certificate
+  mode.
+- Engine tells a missing license apart from a stale session. `OnLicenseAccessDenied`
+  was treated as an expired cookie, so every such connect spent a full re-login
+  on a certain failure and brought the per-user session limit closer.
+
 ## [2.0.1] - 2026-08-13
+
 
 ### Fixed
 
@@ -798,6 +886,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[2.1.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v2.0.1...v2.1.0
 [1.4.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.3...v1.3.4

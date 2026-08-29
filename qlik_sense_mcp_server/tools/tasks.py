@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from . import context
-from .context import _cert_only_tool
+from .context import _task_admin_tool
 from .helpers import (
     _check,
     _err,
@@ -19,7 +19,7 @@ from .helpers import (
 )
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_tasks(
     status_filter: Optional[str] = None,
@@ -105,7 +105,7 @@ def get_tasks(
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_task_details(task_id: str) -> str:
     """
@@ -135,7 +135,7 @@ def get_task_details(task_id: str) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def start_task(task_id: str) -> str:
     """
@@ -166,7 +166,7 @@ def start_task(task_id: str) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def create_task(app_id: str, task_name: str, enabled: bool = True) -> str:
     """
@@ -200,7 +200,7 @@ def create_task(app_id: str, task_name: str, enabled: bool = True) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def update_task(task_id: str, name: Optional[str] = None, enabled: Optional[bool] = None) -> str:
     """
@@ -232,7 +232,7 @@ def update_task(task_id: str, name: Optional[str] = None, enabled: Optional[bool
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def delete_task(task_id: str) -> str:
     """
@@ -256,7 +256,7 @@ def delete_task(task_id: str) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_task_schedule(task_id: str) -> str:
     """
@@ -294,7 +294,7 @@ def get_task_schedule(task_id: str) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def create_task_schedule(
     task_id: str,
@@ -385,7 +385,7 @@ def create_task_schedule(
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_task_executions(task_id: str, top: int = 10) -> str:
     """
@@ -439,7 +439,7 @@ def get_task_executions(task_id: str, top: int = 10) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_task_script_log(task_id: str) -> str:
     """
@@ -470,7 +470,7 @@ def get_task_script_log(task_id: str) -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_failed_tasks_with_logs() -> str:
     """
@@ -525,7 +525,7 @@ def get_failed_tasks_with_logs() -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
     """
@@ -620,7 +620,7 @@ def get_task_dependencies(task_id: str, direction: str = "downstream") -> str:
 
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def update_task_schedule(
     trigger_id: str,
@@ -724,7 +724,7 @@ def update_task_schedule(
     return _ok(result)
 
 
-@_cert_only_tool()
+@_task_admin_tool()
 @_timed
 def delete_task_schedule(trigger_id: str) -> str:
     """

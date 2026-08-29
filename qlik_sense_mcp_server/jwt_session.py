@@ -41,6 +41,7 @@ from typing import Optional
 import httpx
 
 from .config import QlikSenseConfig
+from .utils import pick_qlik_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,6 @@ logger = logging.getLogger(__name__)
 # Qlik's default session idle timeout is 30 minutes. Refreshing at 25 leaves
 # margin so a borderline request never races the server-side eviction.
 DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
-
-# Name Qlik gives the virtual proxy session cookie. The suffix varies with
-# the proxy, so the cookie is matched by this prefix rather than in full.
-_QLIK_SESSION_COOKIE_PREFIX = "X-Qlik-Session"
 
 # The bootstrap keeps its own deadline, wider than the one ordinary calls
 # run under. A proxy that has been idle answers this first request slowly:
@@ -181,12 +178,18 @@ class JwtSession:
         """
         Guarantee a valid bootstrapped session, using the given ``httpx.Client``.
 
-        Safe to call on every request — returns fast if the session is still
+        Safe to call on every request - returns fast if the session is still
         fresh (within TTL). The passed-in client keeps the cookie jar so the
         bootstrapped session cookie is reused for subsequent QRS calls
         automatically (httpx persists cookies per-client).
+
+        A session bootstrapped on another client (the Engine path uses a
+        throwaway one) is copied in here as well: otherwise the Repository
+        client starts with an empty jar, gets a 302 on its first call and logs
+        in again, spending a second Qlik session for nothing.
         """
         if self._is_fresh():
+            self._apply_cookie_to(http_client)
             return
         with self._lock:
             if self._is_fresh():  # re-check under lock
@@ -215,8 +218,27 @@ class JwtSession:
 
     # ─── internals ─────────────────────────────────────────────────────
 
+    def _apply_cookie_to(self, client: httpx.Client) -> None:
+        """Put the bootstrapped session cookie into the client's jar."""
+        if not (self._cookie_name and self._cookie_value):
+            return
+        if client.cookies.get(self._cookie_name) == self._cookie_value:
+            return
+        client.cookies.set(self._cookie_name, self._cookie_value)
+
     def _is_fresh(self) -> bool:
-        if not (self._cookie_value and self._csrf_token):
+        """True while the bootstrapped session can still be used as is.
+
+        Freshness is the session cookie plus its age, not the CSRF token: Qlik
+        releases before November 2024 never send `qlik-csrf-token`, and the code
+        that fetches it says so itself. Requiring it here meant such a
+        deployment never had a fresh session, so every single request logged in
+        again and burned through the five sessions Qlik allows per user. Where
+        the token does exist it is sent (both callers check it for truthiness),
+        and a session that loses it gets a 403 that the existing re-login path
+        already handles.
+        """
+        if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
 
@@ -319,28 +341,5 @@ class JwtSession:
         )
 
     def _pick_session_cookie(self, resp: httpx.Response) -> tuple[Optional[str], Optional[str]]:
-        """
-        Extract the Qlik session cookie from a bootstrap response.
-
-        The conventional name is ``X-Qlik-Session*``, but QMC lets an admin
-        rename it per virtual proxy, and a load balancer in front of Qlik
-        adds cookies of its own. So the name is matched in three widening
-        steps rather than assumed.
-        """
-        names = list(resp.cookies.keys())
-
-        # 1. The conventional name.
-        for name in names:
-            if name.lower().startswith(_QLIK_SESSION_COOKIE_PREFIX.lower()):
-                return name, resp.cookies.get(name)
-
-        # 2. A renamed Qlik cookie still tends to say so.
-        for name in names:
-            if "qlik" in name.lower():
-                return name, resp.cookies.get(name)
-
-        # 3. Exactly one cookie — it can only be the session.
-        if len(names) == 1:
-            return names[0], resp.cookies.get(names[0])
-
-        return None, None
+        """Extract the Qlik session cookie from a bootstrap response."""
+        return pick_qlik_session_cookie(list(resp.cookies.keys()), resp.cookies.get)

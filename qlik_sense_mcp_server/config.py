@@ -62,14 +62,15 @@ MAX_TABLES = 50
 # Authentication modes
 AUTH_MODE_CERTIFICATE = "certificate"
 AUTH_MODE_JWT = "jwt"
+AUTH_MODE_FORM = "form"
 
 
 class QlikSenseConfig(BaseModel):
     """
     Configuration model for Qlik Sense Enterprise server connection.
 
-    Supports two authentication modes, selected automatically based on which
-    environment variables are provided:
+    Supports three authentication modes, selected automatically based on
+    which environment variables are provided:
 
     1. ``certificate`` (default, legacy) — client certificate + X-Qlik-User
        header impersonation directly against ports 4242 (QRS) and 4747
@@ -80,18 +81,29 @@ class QlikSenseConfig(BaseModel):
        receives only a long-lived token and talks to Qlik via the VP
        (standard HTTPS/WSS on 443). Recommended for end users.
 
-    The mode is selected by presence of QLIK_JWT_TOKEN in the environment:
+    3. ``form`` — plain login/password against a virtual proxy configured
+       with a "Form based" authentication module (e.g. the in-box Windows
+       credentials login page). The MCP drives the login page the way a
+       browser would and keeps the resulting session cookie, same as JWT
+       mode after its bootstrap. See ``form_session.py``.
 
-        QLIK_JWT_TOKEN set  → jwt mode
-        otherwise           → certificate mode
+    The mode is selected by presence of QLIK_JWT_TOKEN / QLIK_PASSWORD in
+    the environment — there is no standalone QLIK_AUTH_MODE switch:
+
+        QLIK_JWT_TOKEN set   → jwt mode
+        QLIK_PASSWORD set    → form mode
+        otherwise             → certificate mode
     """
 
     # Common
-    server_url: str = Field(..., description="Qlik Sense server URL. In JWT mode include the "
-                                             "virtual proxy prefix as URL path, e.g. "
+    server_url: str = Field(..., description="Qlik Sense server URL. In JWT/form mode include "
+                                             "the virtual proxy prefix as URL path, e.g. "
                                              "'https://qlik.company.com/jwt'.")
-    user_directory: str = Field("", description="User directory for X-Qlik-User (certificate mode)")
-    user_id: str = Field("", description="User ID for X-Qlik-User (certificate mode)")
+    user_directory: str = Field("", description="User directory for X-Qlik-User (certificate "
+                                                "mode) or the domain part of the login submitted "
+                                                "in form mode.")
+    user_id: str = Field("", description="User ID for X-Qlik-User (certificate mode) or the "
+                                         "username submitted in form mode.")
     verify_ssl: bool = Field(False, description="Verify TLS certificates. Off by default: a "
                                                 "Qlik Sense Enterprise deployment normally serves "
                                                 "its own self-signed certificate, so verification "
@@ -110,16 +122,24 @@ class QlikSenseConfig(BaseModel):
     # JWT mode
     jwt_token: Optional[str] = Field(None, description="Signed JWT bearer (jwt mode)")
 
+    # Form mode
+    password: Optional[str] = Field(None, description="Password submitted to the virtual "
+                                                       "proxy's login form (form mode)")
+
     @property
     def auth_mode(self) -> str:
         """
-        Resolve authentication mode from the presence of a JWT token.
+        Resolve authentication mode from which credentials are present.
 
-        The presence of ``jwt_token`` is the single source of truth — there
-        is no standalone ``QLIK_AUTH_MODE`` switch to keep the user-facing
-        surface minimal (one less env var to get wrong).
+        JWT takes priority over form, which takes priority over certificate
+        — there is no standalone ``QLIK_AUTH_MODE`` switch to keep the
+        user-facing surface minimal (one less env var to get wrong).
         """
-        return AUTH_MODE_JWT if self.jwt_token else AUTH_MODE_CERTIFICATE
+        if self.jwt_token:
+            return AUTH_MODE_JWT
+        if self.password:
+            return AUTH_MODE_FORM
+        return AUTH_MODE_CERTIFICATE
 
     @property
     def qlik_base_host(self) -> str:
@@ -161,6 +181,21 @@ class QlikSenseConfig(BaseModel):
         """
         parsed = urlparse(self.server_url)
         return (parsed.path or "").strip("/")
+
+    @property
+    def virtual_proxy_path_segment(self) -> str:
+        """
+        ``virtual_proxy_prefix`` followed by a slash, or "" when unset.
+
+        JWT mode always has a non-empty prefix (Qlik does not allow JWT auth
+        on the central proxy), so ``f"{prefix}/"`` was safe to inline there.
+        Form mode can legitimately run on the central proxy with no prefix,
+        where that would produce a stray double slash — this collapses to
+        the empty string instead so URL builders can write
+        ``f"{base}/{cfg.virtual_proxy_path_segment}qrs/..."`` unconditionally.
+        """
+        prefix = self.virtual_proxy_prefix
+        return f"{prefix}/" if prefix else ""
 
     def validate_runtime(self) -> None:
         """
@@ -219,6 +254,14 @@ class QlikSenseConfig(BaseModel):
                 raise ValueError("JWT mode requires QLIK_JWT_TOKEN")
             # user_directory / user_id are intentionally NOT required in JWT
             # mode — Qlik extracts the identity from the JWT payload itself.
+        elif self.auth_mode == AUTH_MODE_FORM:
+            if not self.user_id:
+                raise ValueError("form mode requires QLIK_USER_ID")
+            if not self.password:
+                raise ValueError("form mode requires QLIK_PASSWORD")
+            # No virtual-proxy-prefix requirement, unlike JWT mode: a
+            # form-based auth module can be attached to the central proxy
+            # (empty prefix) as well as to a named one.
         else:
             if not (self.user_directory and self.user_id):
                 raise ValueError(
@@ -249,4 +292,5 @@ class QlikSenseConfig(BaseModel):
             http_port=int(os.getenv("QLIK_HTTP_PORT")) if os.getenv("QLIK_HTTP_PORT") else None,
             verify_ssl=os.getenv("QLIK_VERIFY_SSL", "false").lower() == "true",
             jwt_token=os.getenv("QLIK_JWT_TOKEN") or None,
+            password=os.getenv("QLIK_PASSWORD") or None,
         )

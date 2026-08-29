@@ -9,19 +9,22 @@ server, or pass them via your MCP client's `env` block.
 
 Note: `QLIK_USER_DIRECTORY` and `QLIK_USER_ID` are NOT used in JWT mode —
 the user identity travels in the JWT payload. See
-[JWT authentication](#jwt-authentication) below.
+[JWT authentication](#jwt-authentication) below. In form mode they carry
+the login credentials instead of an `X-Qlik-User` header — see
+[Form (login/password) authentication](#form-loginpassword-authentication).
 
 | Variable | Description |
 |----------|-------------|
-| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
-| `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode only. |
-| `QLIK_USER_ID` | User ID used for authentication. Cert mode only. |
+| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT/form mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
+| `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode: sent as `X-Qlik-User`. Form mode: the domain part of the login (optional — see below). Unused in JWT mode. |
+| `QLIK_USER_ID` | User ID used for authentication. Cert mode: sent as `X-Qlik-User`. Form mode: the username submitted to the login form (required). Unused in JWT mode. |
 
 ## Certificate configuration
 
 This section applies to **cert mode only**. For the JWT alternative see
-[JWT authentication](#jwt-authentication) below and
-[AUTH_JWT.md](AUTH_JWT.md) for the full QMC virtual proxy setup.
+[JWT authentication](#jwt-authentication), for the login/password
+alternative see [Form authentication](#form-loginpassword-authentication)
+below, and [AUTH_JWT.md](AUTH_JWT.md) for the full QMC virtual proxy setup.
 
 Required for production. If `QLIK_CA_CERT_PATH` is not set, SSL
 verification is disabled automatically.
@@ -49,6 +52,29 @@ URL path (e.g. `https://qlik.company.com/jwt`). `QLIK_USER_DIRECTORY`
 and `QLIK_USER_ID` are ignored — Qlik extracts the identity from the
 JWT payload itself.
 
+## Form (login/password) authentication
+
+Form mode is selected automatically when `QLIK_PASSWORD` is set (and
+`QLIK_JWT_TOKEN` is not — JWT takes priority). The MCP logs into a virtual
+proxy's "Form based" login page the way a browser would — most commonly
+the in-box Windows credentials login page — and then reuses the resulting
+session cookie exactly like JWT mode does after its own bootstrap. See
+[AUTH_FORM.md](AUTH_FORM.md) for how the login flow works and how to
+adapt it to a non-default login page.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QLIK_PASSWORD` | unset | Password submitted to the login form. Setting this switches the server to form mode. |
+| `QLIK_FORM_LOGIN_PATH` | empty (the virtual proxy root) | Where to start the login redirect chain. The login page itself carries a per-visit `targetId` that cannot be guessed, so the default is a page Qlik redirects FROM, not the login URL. Override only if the login flow starts somewhere other than the proxy root. |
+| `QLIK_FORM_USERNAME_FIELD` | auto-detected | Force the login form's username field name, if auto-detection picks the wrong `<input>`. |
+| `QLIK_FORM_PASSWORD_FIELD` | auto-detected | Force the login form's password field name (auto-detection is normally reliable here — it matches `type="password"`). |
+
+Unlike JWT mode, `QLIK_SERVER_URL` does not need a virtual proxy prefix —
+a form-based auth module can be attached to the central proxy as well as
+to a named one. The username submitted is
+`QLIK_USER_DIRECTORY\QLIK_USER_ID` when a directory is set, otherwise just
+`QLIK_USER_ID`.
+
 ## Network configuration
 
 Defaults match the standard
@@ -71,7 +97,7 @@ Defaults match the standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QLIK_TASK_TOOLS` | `true` | Register the 14 reload-task tools. They need repository-admin rights, so they are registered in certificate mode only and this variable has no effect in JWT mode. Set to `false` to leave them out of certificate mode as well — an identity that only reads data has no use for them, and every registered tool takes up room in the model's context. |
+| `QLIK_TASK_TOOLS` | `true` in certificate mode, `false` in JWT/form mode | Register the 14 reload-task tools. They need QRS repository-admin rights — a QMC role, not a property of the authentication method — so they default to on in certificate mode (which normally runs as a trusted admin identity) and off in JWT/form mode (which normally authenticates an ordinary analyst). Set to `false` to leave them out of certificate mode too, for an identity that only reads data. Set to `true` to turn them on in JWT or form mode as well — do this only once you have verified the identity behind that JWT/password does hold QRS admin rights, since every call will otherwise fail with 403. |
 
 ## Logging
 
@@ -146,6 +172,28 @@ overrides.
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
         "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
+      }
+    }
+  }
+}
+```
+
+### Form (login/password) mode
+
+See [AUTH_FORM.md](AUTH_FORM.md) for how the login flow works and the
+overrides available for non-default login pages.
+
+```jsonc
+{
+  "mcpServers": {
+    "qlik-sense": {
+      "command": "uvx",
+      "args": ["qlik-sense-mcp-server"],
+      "env": {
+        "QLIK_SERVER_URL": "https://qlik.company.com/forms",
+        "QLIK_USER_DIRECTORY": "COMPANY",
+        "QLIK_USER_ID": "your-username",
+        "QLIK_PASSWORD": "your-password"
       }
     }
   }

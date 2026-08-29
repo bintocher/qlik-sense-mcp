@@ -17,8 +17,8 @@ from . import __version__
 from .tools import context
 from .tools.context import (  # noqa: F401  (public surface of this module)
     MCP_SDK_MAJOR,
-    _cert_only_tool,
-    _CERT_ONLY_TOOLS_ENABLED,
+    _task_admin_tool,
+    _TASK_TOOLS_ENABLED,
     _init_clients,
     _mcp_host,
     _mcp_port,
@@ -74,13 +74,13 @@ from .tools.tasks import (  # noqa: F401
 def __getattr__(name):
     """Expose the live clients as attributes of this module.
 
-    `config`, `repo_api`, `engine_api` and `jwt_session` are rebuilt by
-    `_init_clients()`, so binding them once at import time would hand out
-    stale objects. Reading them from the context on each access keeps
-    every consumer — including a test that re-imports this module —
-    looking at what the server is actually using.
+    `config`, `repo_api`, `engine_api`, `jwt_session` and `form_session`
+    are rebuilt by `_init_clients()`, so binding them once at import time
+    would hand out stale objects. Reading them from the context on each
+    access keeps every consumer, including a test that re-imports this
+    module, looking at what the server is actually using.
     """
-    if name in ("config", "repo_api", "engine_api", "jwt_session"):
+    if name in ("config", "repo_api", "engine_api", "jwt_session", "form_session"):
         return getattr(context, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -124,6 +124,16 @@ def main():
 
 
 def _print_help():
+    if _TASK_TOOLS_ENABLED:
+        tasks_section = """    Tasks:      get_tasks, get_task_details, get_task_dependencies, start_task,
+                create_task, update_task, delete_task, get_task_schedule,
+                create_task_schedule, update_task_schedule, delete_task_schedule,
+                get_task_executions, get_task_script_log, get_failed_tasks_with_logs"""
+    else:
+        tasks_section = """    Tasks:      not registered — need QRS repository-admin rights, on by
+                default in certificate mode; set QLIK_TASK_TOOLS=true to
+                register them in JWT/form mode too, for an identity
+                verified to hold those rights"""
     sys.stderr.write(f"""
 Qlik Sense MCP Server v{__version__} — Model Context Protocol server for Qlik Sense Enterprise APIs
 
@@ -139,12 +149,7 @@ TOOLS ({len(mcp._tool_manager._tools)} registered in the current auth mode):
                 engine_create_hypercube, get_app_field, get_app_variables,
                 get_app_sheets, get_app_sheet_objects, get_app_object,
                 search_app
-    Tasks:      get_tasks, get_task_details, get_task_dependencies, start_task,
-                create_task, update_task, delete_task, get_task_schedule,
-                create_task_schedule, update_task_schedule, delete_task_schedule,
-                get_task_executions, get_task_script_log, get_failed_tasks_with_logs
-                (certificate mode only — QRS task administration is not
-                 available to a JWT analyst identity)
+{tasks_section}
 
 GitHub: https://github.com/bintocher/qlik-sense-mcp
 """)
