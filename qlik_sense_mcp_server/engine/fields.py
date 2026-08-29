@@ -1,13 +1,28 @@
 """Field-level reads: values, ranges, statistics, descriptions."""
 
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import logging
 
 from ..exceptions import QlikEngineError
 import uuid
 
 logger = logging.getLogger(__name__)
+
+
+def _bad_offset(offset: Any) -> Optional[Dict[str, Any]]:
+    """The refusal a page number earns, or nothing.
+
+    A page before the first is a request nobody can answer, and answering
+    the first page instead returns data for a different question.
+    """
+    if offset is None:
+        return None
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return {"error": f"offset={offset!r} is not a row number.",
+                "error_category": "invalid_argument",
+                "hint": "Pass 0 or a positive integer, or omit it."}
+    return None
 
 
 class EngineFieldsMixin:
@@ -233,7 +248,9 @@ class EngineFieldsMixin:
             },
         }
 
-        offset = max(0, offset)
+        refusal = _bad_offset(offset)
+        if refusal:
+            return refusal
         limit = max(1, limit)
 
         with self.session_object(app_handle, definition) as cube_handle:
@@ -340,7 +357,7 @@ class EngineFieldsMixin:
                     ],
                 },
                 "qInitialDataFetch": [
-                    {"qTop": max(0, offset), "qLeft": 0,
+                    {"qTop": offset, "qLeft": 0,
                      "qHeight": max_values, "qWidth": 1}
                 ],
             },
@@ -379,7 +396,7 @@ class EngineFieldsMixin:
                     # ListObject path; a single-dimension hypercube still
                     # materialises the values.
                     fallback = self._get_field_values_via_hypercube(
-                        app_handle, field_name, max_values)
+                        app_handle, field_name, max_values, offset=offset)
                     if fallback.get("values"):
                         fallback["fallback_used"] = "hypercube"
                         return fallback
@@ -559,7 +576,8 @@ class EngineFieldsMixin:
         return edges
 
     def _get_field_values_via_hypercube(
-        self, app_handle: int, field_name: str, max_values: int = 100
+        self, app_handle: int, field_name: str, max_values: int = 100,
+        offset: int = 0
     ) -> Dict[str, Any]:
         """
         Fallback for `get_field_values`: build a one-dimension hypercube
@@ -591,7 +609,10 @@ class EngineFieldsMixin:
                     {"qDef": {"qDef": f"Count([{field_name}])", "qLabel": "cnt"}}
                 ],
                 "qInitialDataFetch": [
-                    {"qTop": 0, "qLeft": 0, "qHeight": max_values, "qWidth": 2}
+                    # The page top, so the second page of a high-cardinality
+                    # field is the second page and not the first one again.
+                    {"qTop": max(0, offset or 0), "qLeft": 0,
+                     "qHeight": max_values, "qWidth": 2}
                 ],
                 "qSuppressZero": False,
                 "qSuppressMissing": False,
@@ -690,11 +711,17 @@ class EngineFieldsMixin:
                         for i, cell in enumerate(row):
                             if i < len(exprs):
                                 label = exprs[i][1]
+                                # A cell of a hypercube carries no
+                                # `qIsNumeric` - that key belongs to a
+                                # single evaluated expression - so the
+                                # flag was always false, even beside a
+                                # number. Read from the number instead.
+                                number = (cell.get("qNum")
+                                          if cell.get("qNum") != "NaN" else None)
                                 stats[label] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (cell.get("qNum", None)
-                                                if cell.get("qNum") != "NaN" else None),
-                                    "is_numeric": cell.get("qIsNumeric", False),
+                                    "numeric": number,
+                                    "is_numeric": number is not None,
                                 }
                 return stats
         except Exception as e:
@@ -790,11 +817,16 @@ class EngineFieldsMixin:
                     for row in page.get("qMatrix", []):
                         for i, cell in enumerate(row):
                             if i < len(stats_labels):
+                                # A cell of a hypercube carries no
+                                # `qIsNumeric` - that key belongs to a
+                                # single evaluated expression - so the flag
+                                # was always false, even beside a number.
+                                number = (cell.get("qNum")
+                                          if cell.get("qNum") != "NaN" else None)
                                 statistics[stats_labels[i]] = {
                                     "text": cell.get("qText", ""),
-                                    "numeric": (cell.get("qNum")
-                                                if cell.get("qNum") != "NaN" else None),
-                                    "is_numeric": cell.get("qIsNumeric", False),
+                                    "numeric": number,
+                                    "is_numeric": number is not None,
                                 }
 
                 def _numeric(key):

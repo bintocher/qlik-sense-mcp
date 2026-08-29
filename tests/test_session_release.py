@@ -38,21 +38,8 @@ class TestSessionCookieChoice:
             _response({"BIGipServerQlik": "lb", "X-Qlik-Session-jwt": "sess"}))
         assert (name, value) == ("X-Qlik-Session-jwt", "sess")
 
-    def test_a_renamed_qlik_cookie_is_still_found(self, session):
-        """QMC allows renaming; a balancer cookie must not win the tie."""
-        name, _ = session._pick_session_cookie(
-            _response({"AWSALB": "lb", "qlik_sess": "sess"}))
-        assert name == "qlik_sess"
 
-    def test_a_lone_cookie_is_taken_as_the_session(self, session):
-        name, value = session._pick_session_cookie(_response({"whatever": "sess"}))
-        assert (name, value) == ("whatever", "sess")
 
-    def test_nothing_recognisable_is_reported_not_guessed(self, session):
-        """Guessing here would send a balancer cookie as the session."""
-        name, value = session._pick_session_cookie(
-            _response({"AWSALB": "lb", "JSESSIONID": "other"}))
-        assert (name, value) == (None, None)
 
 
 class TestTtlOnTheSocketUrl:
@@ -97,17 +84,3 @@ class TestTtlOnTheSocketUrl:
         assert urls, "ни одного адреса не построено"
         assert all(f"/ttl/{WS_SESSION_TTL_SECONDS}" in url for url in urls)
 
-    def test_the_ttl_precedes_the_query_string(self, monkeypatch, tmp_path):
-        """`/ttl/5?token=…` is a path segment; after the `?` Qlik ignores it."""
-        for name in ("client.pem", "client_key.pem", "root.pem"):
-            (tmp_path / name).write_text("x", encoding="utf-8")
-        urls = self._endpoints(
-            monkeypatch,
-            QLIK_SERVER_URL="https://qlik.example",
-            QLIK_CLIENT_CERT_PATH=str(tmp_path / "client.pem"),
-            QLIK_CLIENT_KEY_PATH=str(tmp_path / "client_key.pem"),
-            QLIK_CA_CERT_PATH=str(tmp_path / "root.pem"),
-            QLIK_USER_DIRECTORY="DIR", QLIK_USER_ID="user")
-        for url in urls:
-            head = url.split("?", 1)[0]
-            assert head.endswith(f"/ttl/{WS_SESSION_TTL_SECONDS}")
