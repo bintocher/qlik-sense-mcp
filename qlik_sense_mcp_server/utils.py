@@ -268,6 +268,19 @@ def generate_xrfkey() -> str:
 QLIK_SESSION_COOKIE_PREFIX = "X-Qlik-Session"
 
 
+def looks_like_qlik_session_name(name: str) -> bool:
+    """True when a cookie name itself identifies it as Qlik's session cookie.
+
+    Only the two naming rules, without the "a single cookie can only be the
+    session" fallback: that fallback is safe for one response's Set-Cookie
+    header, but not for a client's jar, where a load balancer's own cookie can
+    be the only one present.
+    """
+    lowered = name.lower()
+    return (lowered.startswith(QLIK_SESSION_COOKIE_PREFIX.lower())
+            or "qlik" in lowered)
+
+
 def pick_qlik_session_cookie(cookie_names: List[str], get_value) -> "tuple[Union[str, None], Union[str, None]]":
     """
     Pick the Qlik virtual-proxy session cookie out of a jar's cookie names.

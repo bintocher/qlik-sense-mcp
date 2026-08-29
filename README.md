@@ -10,8 +10,10 @@ Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
 (WebSocket) APIs as **28 MCP tools** so an LLM client can discover apps,
 inspect data models, query data, and manage reload tasks through a
 single uniform interface. In JWT and form (login/password) mode the 14
-reload-task tools are hidden, since QRS task administration needs
-certificate auth.
+reload-task tools are hidden by default: QRS task administration needs an
+admin role in the QMC, which a JWT analyst or a form login usually does
+not hold. That is a property of the identity, not of how it authenticated,
+so `QLIK_TASK_TOOLS=true` turns them on for an identity that does hold it.
 
 ## What's in the box
 
@@ -147,8 +149,8 @@ secrets), and login/password against a "Form based" virtual proxy
 - **Fewer useless tools in JWT/form mode, by default.** Reload-task
   administration needs QRS admin rights — a QMC role, not a property of
   the authentication method — so those 14 tools default to on in
-  certificate mode and off in JWT/form mode: 27 tools with a certificate,
-  13 with a JWT or a login/password. `QLIK_TASK_TOOLS=true` turns them on
+  certificate mode and off in JWT/form mode: 28 tools with a certificate,
+  14 with a JWT or a login/password. `QLIK_TASK_TOOLS=true` turns them on
   in JWT/form mode too, for an identity verified to hold those rights.
 - **One Qlik session per server.** Qlik's per-user limit (5 by default)
   counts proxy sessions, and in JWT/form mode one is created by the

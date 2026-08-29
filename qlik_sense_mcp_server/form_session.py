@@ -73,7 +73,7 @@ from urllib.parse import urljoin
 import httpx
 
 from .config import QlikSenseConfig
-from .utils import pick_qlik_session_cookie
+from .utils import looks_like_qlik_session_name, pick_qlik_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -264,11 +264,19 @@ class FormSession:
     def ensure(self, http_client: httpx.Client) -> None:
         """Guarantee a valid bootstrapped session, using the given client.
 
-        Safe to call on every request — returns fast if still fresh. The
+        Safe to call on every request - returns fast if still fresh. The
         login GET/POST dance runs on the passed-in client, so the resulting
         session cookie lands in its cookie jar automatically.
+
+        A session bootstrapped elsewhere still has to reach this client: the
+        Engine path logs in on a throwaway client (`ensure_standalone`), so a
+        run that touches Engine first would leave the Repository client with an
+        empty jar, get a 302 on its first call and log in a second time -
+        burning another of the five sessions Qlik allows per user. Hence the
+        cookie is copied in on the fast path too.
         """
         if self._is_fresh():
+            self._apply_cookie_to(http_client)
             return
         with self._lock:
             if self._is_fresh():
@@ -293,8 +301,27 @@ class FormSession:
 
     # ─── internals ─────────────────────────────────────────────────────
 
+    def _apply_cookie_to(self, client: httpx.Client) -> None:
+        """Put the bootstrapped session cookie into the client's jar."""
+        if not (self._cookie_name and self._cookie_value):
+            return
+        if client.cookies.get(self._cookie_name) == self._cookie_value:
+            return
+        client.cookies.set(self._cookie_name, self._cookie_value)
+
     def _is_fresh(self) -> bool:
-        if not (self._cookie_value and self._csrf_token):
+        """True while the bootstrapped session can still be used as is.
+
+        Freshness is the session cookie plus its age, not the CSRF token: Qlik
+        releases before November 2024 never send `qlik-csrf-token`, and the code
+        that fetches it says so itself. Requiring it here meant such a
+        deployment never had a fresh session, so every single request logged in
+        again and burned through the five sessions Qlik allows per user. Where
+        the token does exist it is sent (both callers check it for truthiness),
+        and a session that loses it gets a 403 that the existing re-login path
+        already handles.
+        """
+        if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
 
@@ -308,12 +335,67 @@ class FormSession:
             verify = False
         return httpx.Client(verify=verify, timeout=30.0)
 
+    @staticmethod
+    def _drop_session_cookies(client: httpx.Client) -> None:
+        """Remove the Qlik session cookie before logging in again.
+
+        The login page is only served to a client Qlik does not recognise. A
+        re-login on the same client, with the previous session cookie still in
+        its jar, is answered with the hub instead of the form, so the bootstrap
+        fails with "could not find a login form" and the request that triggered
+        it goes out on a session Qlik no longer treats as fully authenticated -
+        verified live: after the TTL expired that way, a listing that returns 22
+        apps returned 1. Only the Qlik session cookie is dropped; anything a load
+        balancer put in the jar stays, since affinity has to survive the
+        re-login.
+        """
+        for name in list(client.cookies.keys()):
+            if looks_like_qlik_session_name(name):
+                client.cookies.delete(name)
+
+    @staticmethod
+    def _one_retry(
+        client: httpx.Client, method: str, url: str, what: str, **kwargs
+    ) -> httpx.Response:
+        """Run one hop of the login exchange, retrying a dropped connection once.
+
+        Both hops go through Qlik's redirect chain and are exposed to the same
+        transport failures: a proxy that resets the connection before answering,
+        or a TLS connection dropped with no response at all. Retrying once
+        covers the transient case; a second failure is real and is reported with
+        the step that failed, so the message says which hop died.
+
+        `Connection: close` is sent on both hops for a different reason: Qlik
+        closes the connection right after the redirect to the login page, so a
+        pooled connection would be reused after the server dropped it.
+        """
+        request = client.get if method == "GET" else client.post
+        last_error: httpx.HTTPError | None = None
+        for attempt in (1, 2):
+            try:
+                return request(
+                    url, timeout=BOOTSTRAP_TIMEOUT_SECONDS, follow_redirects=True,
+                    headers=_NO_KEEPALIVE_HEADERS, **kwargs
+                )
+            except httpx.TransportError as exc:
+                last_error = exc
+                if attempt == 1:
+                    logger.warning(
+                        "%s failed (%s), retrying once: %s",
+                        what, type(exc).__name__, exc)
+                    continue
+                raise FormBootstrapError(f"{what} failed twice: {exc}") from exc
+            except httpx.HTTPError as exc:
+                raise FormBootstrapError(f"{what} failed: {exc}") from exc
+        raise FormBootstrapError(f"{what} failed: {last_error}")
+
     def _bootstrap(self, client: httpx.Client) -> None:
         """Log in via the form and store cookie + csrf token on success.
 
         Must be called with `self._lock` held.
         """
         cfg = self._config
+        self._drop_session_cookies(client)
         if not cfg.user_id:
             raise FormBootstrapError("user_id is empty — cannot bootstrap form login")
         if not cfg.password:
@@ -323,33 +405,9 @@ class FormSession:
         entry_url = f"{cfg.qlik_base_host}/{cfg.virtual_proxy_path_segment}{entry_path}"
 
         logger.info("Bootstrapping form session, entry point %s", entry_url)
-        try:
-            page = client.get(entry_url, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                              follow_redirects=True,
-                              headers=_NO_KEEPALIVE_HEADERS)
-        except httpx.TransportError as exc:
-            # One retry for a dropped connection on the very first hop of
-            # the redirect chain — observed against a live deployment: the
-            # TLS connection was reset with no response before any
-            # Qlik-specific request even happened, then succeeded
-            # immediately on retry. Not a Qlik failure mode, just the kind
-            # of transient network blip repository_api.py already retries
-            # once for on a cold QRS (see COLD_START_TIMEOUT).
-            logger.warning(
-                "Entry point request to %s failed (%s), retrying once: %s",
-                entry_url, type(exc).__name__, exc)
-            try:
-                page = client.get(entry_url, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                                  follow_redirects=True,
-                                  headers=_NO_KEEPALIVE_HEADERS)
-            except httpx.HTTPError as retry_exc:
-                raise FormBootstrapError(
-                    f"entry point request to {entry_url} failed twice: {retry_exc}"
-                ) from retry_exc
-        except httpx.HTTPError as exc:
-            raise FormBootstrapError(
-                f"entry point request to {entry_url} failed: {exc}"
-            ) from exc
+        page = self._one_retry(
+            client, "GET", entry_url, f"entry point request to {entry_url}"
+        )
         if page.status_code >= 400:
             raise FormBootstrapError(
                 f"login page (reached via {entry_url}, landed on {page.url}) "
@@ -382,17 +440,34 @@ class FormSession:
         body[password_field] = cfg.password
 
         action_url = urljoin(str(page.url), form.action) if form.action else str(page.url)
+        names_before = set(client.cookies.keys())
 
-        try:
-            client.post(
-                action_url, data=body, timeout=BOOTSTRAP_TIMEOUT_SECONDS,
-                follow_redirects=True, headers=_NO_KEEPALIVE_HEADERS,
-            )
-        except httpx.HTTPError as exc:
-            raise FormBootstrapError(f"login POST to {action_url} failed: {exc}") from exc
+        self._one_retry(
+            client, "POST", action_url, f"login POST to {action_url}", data=body
+        )
 
-        cookie_name, cookie_value = pick_qlik_session_cookie(
-            list(client.cookies.keys()), client.cookies.get)
+        # Только то, что появилось в банке после отправки учётных данных:
+        # применять правило "единственный cookie и есть сессия" ко всей банке
+        # нельзя - у Qlik за балансировщиком там с первого же запроса лежит
+        # чужой cookie, и при неверном пароле он был бы принят за сессию, а
+        # человек вместо "проверьте учётные данные" получал бы невнятный отказ
+        # на следующем запросе.
+        fresh_names = [
+            name for name in client.cookies.keys() if name not in names_before
+        ]
+        if fresh_names:
+            cookie_name, cookie_value = pick_qlik_session_cookie(
+                fresh_names, client.cookies.get)
+        else:
+            # Логин не поставил ни одного нового cookie. Сессия может быть
+            # только тем, что само называет себя сессией Qlik: правило
+            # "единственный cookie" здесь дало бы чужой cookie балансировщика.
+            named = [
+                name for name in client.cookies.keys()
+                if looks_like_qlik_session_name(name)
+            ]
+            cookie_name = named[0] if named else None
+            cookie_value = client.cookies.get(cookie_name) if cookie_name else None
         if not cookie_value:
             raise FormBootstrapError(
                 "login did not produce a Qlik session cookie — check the "

@@ -99,6 +99,52 @@ class QlikRepositoryAPI:
         base_url = f"{self.config.qlik_base_host}:{self.config.repository_port}"
         return f"{base_url}/qrs/{endpoint}"
 
+    def _authorized_get(self, endpoint: str, params: Dict[str, Any]) -> httpx.Response:
+        """GET a QRS endpoint that answers with a file, not JSON.
+
+        The script log and tempContent downloads used to call the client
+        directly, outside `_make_request`. That was harmless while task
+        administration was certificate-only, but a cookie session can lapse:
+        QRS then answers with a redirect to the login page, and with
+        `follow_redirects=True` the caller stored the login HTML as the script
+        log. Here the session is ensured up front, redirects are not followed,
+        and one lapsed-session retry mirrors `_make_request`.
+        """
+        url = self._get_api_url(endpoint)
+        xrfkey = generate_xrfkey()
+        request_params = dict(params)
+        request_params["xrfkey"] = xrfkey
+        headers = {"X-Qlik-Xrfkey": xrfkey}
+        cookie_mode = (
+            self.config.auth_mode in (AUTH_MODE_JWT, AUTH_MODE_FORM)
+            and self._cookie_session is not None
+        )
+        if cookie_mode:
+            self._cookie_session.ensure(self.client)
+            if self._cookie_session.csrf_token:
+                headers["qlik-csrf-token"] = self._cookie_session.csrf_token
+        response = self.client.get(
+            url, params=request_params, headers=headers, follow_redirects=False
+        )
+        expired = (
+            response.status_code in (401, 302)
+            or (response.status_code == 500
+                and "authentication error" in response.text.lower())
+        )
+        if expired and cookie_mode:
+            logger.info(
+                "QRS returned %d for %s, refreshing %s session and retrying once",
+                response.status_code, endpoint, self.config.auth_mode)
+            self._cookie_session.invalidate()
+            self.client.cookies.clear()
+            self._cookie_session.ensure(self.client)
+            if self._cookie_session.csrf_token:
+                headers["qlik-csrf-token"] = self._cookie_session.csrf_token
+            response = self.client.get(
+                url, params=request_params, headers=headers, follow_redirects=False
+            )
+        return response
+
     def _make_request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
         """Make HTTP request to Repository API."""
         try:
@@ -158,6 +204,22 @@ class QlikRepositoryAPI:
                     COLD_START_TIMEOUT)
                 response = self.client.request(
                     method, url, timeout=COLD_START_TIMEOUT, **kwargs)
+            except httpx.TransportError as transport_exc:
+                # Qlik closes the connection at the end of the login redirect
+                # chain, so the first QRS call after a bootstrap can be written
+                # into a socket the server has already dropped and come back as
+                # "Server disconnected without sending a response" - seen once
+                # against a live deployment right after a form login. The same
+                # applies to any transient reset. Read-only calls are repeated
+                # once on a fresh connection; anything else reports the failure,
+                # because a write that died while answering may already have
+                # happened (same reasoning as the timeout branch above).
+                if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+                    raise
+                logger.info(
+                    "QRS connection dropped on %s (%s), retrying once",
+                    endpoint, type(transport_exc).__name__)
+                response = self.client.request(method, url, **kwargs)
 
             # If the session cookie expired mid-flight, invalidate and retry
             # once — this is cheaper than a proactive per-request check and
@@ -786,13 +848,9 @@ class QlikRepositoryAPI:
             # --- Approach 1: QRS scriptlog + tempContent ---
             if file_ref_id and file_ref_id != null_ref:
                 try:
-                    url = self._get_api_url(f"reloadtask/{task_id}/scriptlog")
-                    xrfkey = generate_xrfkey()
-                    resp = self.client.get(
-                        url,
-                        params={"xrfkey": xrfkey, "fileReferenceId": file_ref_id},
-                        headers={"X-Qlik-Xrfkey": xrfkey},
-                        follow_redirects=True,
+                    resp = self._authorized_get(
+                        f"reloadtask/{task_id}/scriptlog",
+                        {"fileReferenceId": file_ref_id},
                     )
                     if resp.status_code == 200:
                         ct = resp.headers.get("content-type", "")
@@ -861,14 +919,7 @@ class QlikRepositoryAPI:
     def _download_temp_content(self, temp_id: str) -> Optional[str]:
         """Download content from QRS tempContent by ID."""
         try:
-            xrfkey = generate_xrfkey()
-            url = self._get_api_url(f"tempContent/{temp_id}")
-            resp = self.client.get(
-                url,
-                params={"xrfkey": xrfkey},
-                headers={"X-Qlik-Xrfkey": xrfkey},
-                follow_redirects=True,
-            )
+            resp = self._authorized_get(f"tempContent/{temp_id}", {})
             if resp.status_code == 200:
                 ct = resp.headers.get("content-type", "")
                 if "json" not in ct and len(resp.text) > 50:
