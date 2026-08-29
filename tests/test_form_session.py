@@ -61,11 +61,13 @@ class _FakeClient:
     def __init__(self, login_html=LOGIN_HTML, post_sets_cookie=True):
         self.cookies = httpx.Cookies()
         self.calls = []
+        self.headers_seen = []
         self._login_html = login_html
         self._post_sets_cookie = post_sets_cookie
 
     def get(self, url, headers=None, timeout=None, follow_redirects=None):
         self.calls.append(("GET", url))
+        self.headers_seen.append(("GET", url, dict(headers or {})))
         if url.endswith("qps/csrftoken"):
             return httpx.Response(
                 200, headers=[("qlik-csrf-token", "csrf-value")],
@@ -74,6 +76,7 @@ class _FakeClient:
 
     def post(self, url, data=None, timeout=None, follow_redirects=None, headers=None):
         self.calls.append(("POST", url, data))
+        self.headers_seen.append(("POST", url, dict(headers or {})))
         if self._post_sets_cookie:
             self.cookies.set("X-Qlik-Session-jwt", "abc123")
         return httpx.Response(200, request=httpx.Request("POST", url))
@@ -105,6 +108,22 @@ class TestFormBootstrap:
         _, _, data = client.calls[1]
         assert data["username"] == "COMPANY\\ivanov"
         assert data["pwd"] == "s3cret"
+
+    def test_login_chain_does_not_reuse_a_keep_alive_connection(self):
+        """Qlik drops the connection right after the login redirect.
+
+        Its proxy answers the entry point with a 302 to the login page and
+        closes the socket; a client that follows the redirect on the pooled
+        connection writes into a dead socket and gets RemoteProtocolError
+        instead of the login page. Both hops of the credential exchange must
+        therefore ask for a fresh connection.
+        """
+        client = _FakeClient()
+        FormSession(_config()).ensure(client)
+        entry = next(h for m, _, h in client.headers_seen if m == "GET")
+        login_post = next(h for m, _, h in client.headers_seen if m == "POST")
+        assert entry.get("Connection") == "close"
+        assert login_post.get("Connection") == "close"
 
     def test_carries_hidden_fields_through_unchanged(self):
         client = _FakeClient()

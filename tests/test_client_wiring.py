@@ -115,3 +115,21 @@ class TestStartupWiring:
         assert context.config.auth_mode == "form"
         assert context.form_session is not None
         assert context.jwt_session is None
+
+    def test_server_module_exposes_the_live_form_session(self, form_env, monkeypatch):
+        """`server.form_session` must follow the context like its JWT twin.
+
+        Consumers reach the live session through the server module: the
+        test fixture hands the Qlik session back that way after a live run,
+        and without the re-export it silently could not, so form logins
+        piled up until Qlik refused new sessions.
+        """
+        import qlik_sense_mcp_server.server as server
+        from qlik_sense_mcp_server.tools import context
+
+        monkeypatch.setattr(context, "config", None)
+        monkeypatch.setattr(context, "engine_api", None)
+        monkeypatch.setattr(context, "form_session", None)
+        context._init_clients()
+        assert server.form_session is context.form_session
+        assert server.form_session is not None

@@ -146,6 +146,14 @@ def live(request):
             module.jwt_session.logout()
     except Exception:
         pass
+    # Same for a form session: it is a Qlik session like any other, and a
+    # login/password run that does not hand it back hits the per-user
+    # session limit after a few consecutive runs.
+    try:
+        if module.form_session is not None:
+            module.form_session.logout()
+    except Exception:
+        pass
     for key, value in saved.items():
         if value is None:
             os.environ.pop(key, None)

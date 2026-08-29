@@ -74,13 +74,13 @@ from .tools.tasks import (  # noqa: F401
 def __getattr__(name):
     """Expose the live clients as attributes of this module.
 
-    `config`, `repo_api`, `engine_api` and `jwt_session` are rebuilt by
-    `_init_clients()`, so binding them once at import time would hand out
-    stale objects. Reading them from the context on each access keeps
-    every consumer — including a test that re-imports this module —
-    looking at what the server is actually using.
+    `config`, `repo_api`, `engine_api`, `jwt_session` and `form_session`
+    are rebuilt by `_init_clients()`, so binding them once at import time
+    would hand out stale objects. Reading them from the context on each
+    access keeps every consumer, including a test that re-imports this
+    module, looking at what the server is actually using.
     """
-    if name in ("config", "repo_api", "engine_api", "jwt_session"):
+    if name in ("config", "repo_api", "engine_api", "jwt_session", "form_session"):
         return getattr(context, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
