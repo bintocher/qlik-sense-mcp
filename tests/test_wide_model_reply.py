@@ -110,6 +110,6 @@ class TestTheTableIsActuallySmaller:
         per_row = as_table / (WIDE_MODEL_FIELDS + 1)
 
         assert per_row < per_object, (
-            f"таблица дороже списка: {per_row:.0f} против {per_object:.0f} "
-            "знаков на поле")
+            f"the table costs more than the list: {per_row:.0f} against "
+            f"{per_object:.0f} characters per field")
 
