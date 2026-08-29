@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-29
+
 ### Added
 
 - Login/password (form) authentication mode, selected automatically when
@@ -884,6 +886,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Updated `README.md` with API Reference for new tools and optional environment variables
 - Updated `mcp.json.example` autoApprove list to include new tools
 
+[2.1.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v2.0.1...v2.1.0
 [1.4.1]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/bintocher/qlik-sense-mcp/compare/v1.3.3...v1.3.4
