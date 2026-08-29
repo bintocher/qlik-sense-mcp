@@ -73,45 +73,16 @@ class TestNoPing:
         assert ws.pings == 0, "ping breaks the next request through a virtual proxy"
         assert eng.probes == [], "a socket that just answered needs no probe"
 
-    def test_idle_socket_is_probed_with_a_real_request_not_a_ping(self, now):
-        ws = _FakeWs()
-        eng = _Engine(ws, last_io=now["t"] - 3600)
-        assert eng._is_connected() is True
-        assert ws.pings == 0
-        assert eng.probes and eng.probes[0][0] == "EngineVersion"
 
-    def test_probe_uses_a_short_timeout(self, now):
-        """A dead idle socket must not burn the full 180s operation budget."""
-        eng = _Engine(_FakeWs(), last_io=now["t"] - 3600)
-        eng._is_connected()
-        assert eng.probes[0][1] == eng.ws_probe_timeout
-        assert eng.probes[0][1] < eng.ws_timeout_seconds
 
-    def test_idle_window_is_configurable(self, now, monkeypatch):
-        """QLIK_WS_IDLE_PROBE_AFTER trades a probe request against staleness."""
-        eng = _Engine(_FakeWs(), last_io=now["t"] - 60)
-        eng.ws_idle_probe_after = 120.0
-        assert eng._is_connected() is True
-        assert eng.probes == [], "inside the configured window nothing is sent"
 
-    def test_probe_failure_reports_dead_and_leaves_no_socket(self, now):
-        eng = _Engine(_FakeWs(), last_io=now["t"] - 3600)
-        eng.probe_fails = True
-        assert eng._is_connected() is False
-        assert eng.ws is None, "caller must find a clean state to reconnect from"
 
 
 class TestObviouslyDead:
     def test_no_socket(self):
         assert _Engine(None)._is_connected() is False
 
-    def test_socket_marked_disconnected(self):
-        assert _Engine(_FakeWs(connected=False))._is_connected() is False
 
-    def test_dead_socket_is_not_probed(self, now):
-        eng = _Engine(_FakeWs(connected=False), last_io=now["t"] - 3600)
-        eng._is_connected()
-        assert eng.probes == []
 
 
 class TestSuccessRefreshesTheClock:

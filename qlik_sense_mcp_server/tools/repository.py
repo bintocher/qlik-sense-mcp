@@ -10,6 +10,7 @@ from . import context
 from .context import mcp
 from .helpers import (
     _check,
+    _err,
     _engine_serialised,
     _ok,
     _timed,
@@ -163,6 +164,10 @@ def get_about() -> str:
         list apps or read a data model.
 
     Returns:
+        `library` - the measures and dimensions this app defines, with
+        their expressions and descriptions. Reach for them before
+        assembling an aggregation by hand: `engine_query` takes
+        {"measures": [{"master": "<name>"}]}.
         `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
         `sharedPersistence`, `requiresBootstrap`.
 
@@ -221,7 +226,25 @@ def get_apps(
     if e:
         return e
     lim = min(max(limit or DEFAULT_APPS_LIMIT, 1), MAX_APPS_LIMIT)
-    off = max(offset or 0, 0)
+    if offset is not None and (isinstance(offset, bool)
+                               or not isinstance(offset, int) or offset < 0):
+        return _err(
+            f"offset={offset!r} is not a row number.",
+            error_category="invalid_argument",
+            hint="Pass 0 or a positive integer, or omit it.",
+        )
+    off = offset or 0
+    # An unrecognised value used to answer exactly like the correct one:
+    # `published="all"` fell through to "no filter", which is what "both"
+    # means, so a typo looked like it worked.
+    if published is not None and str(published).strip().lower() not in (
+            "true", "1", "yes", "y", "false", "0", "no", "n", "both"):
+        return _err(
+            f"published={published!r} is not one of the values this filter "
+            f"takes.",
+            error_category="invalid_argument",
+            allowed_values=["true", "false", "both"],
+        )
     return _ok(context.repo_api.get_comprehensive_apps(lim, off, name, stream,
                                                _to_tribool(published)))
 
@@ -460,6 +483,32 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
               "actually selected."
         )
 
+    # The app's own library of measures and dimensions: what the author of
+    # this dashboard calls revenue, and how it is actually computed. Read
+    # once with the model and cached with it - a caller that assembles the
+    # aggregation itself may pick a neighbouring field and answer with a
+    # number nobody here would recognise.
+    library = {"measures": [], "dimensions": []}
+    try:
+        read_library = getattr(context.engine_api, "get_master_items", None)
+        if read_library is not None:
+            library = read_library(app_handle)
+    except Exception as ex:
+        logger.debug("Could not read the library of %s: %s", aid, ex)
+
+    # The named sets this app holds. Without them a caller asking for a
+    # bookmark by name has nowhere to read the right spelling.
+    named_sets = {}
+    try:
+        read_sets = getattr(context.engine_api, "_known_sets", None)
+        if read_sets is not None:
+            known = read_sets(app_handle) or {}
+            named_sets = {key: sorted(known.get(key) or ())
+                          for key in ("bookmarks", "states")
+                          if known.get(key)}
+    except Exception as ex:
+        logger.debug("Could not read the named sets of %s: %s", aid, ex)
+
     result = {
         "metainfo": {
             "app_id": aid,
@@ -470,6 +519,9 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             "reload_dttm": resolved.get("reload_dttm", ""),
         },
         "warnings": warnings,
+        **({"library": library}
+           if library.get("measures") or library.get("dimensions") else {}),
+        **({"named_sets": named_sets} if named_sets else {}),
         "tables": tables,
         "fields": fields,
         "tables_count": len(tables),

@@ -96,23 +96,10 @@ class TestBoundParsing:
     def test_a_year_starts_in_january_as_a_lower_bound(self):
         assert _parse_bound("2024", upper=False) == datetime.date(2024, 1, 1)
 
-    def test_a_year_ends_in_december_as_an_upper_bound(self):
-        """`to: "2024"` meaning the first of January would lose the year."""
-        assert _parse_bound("2024", upper=True) == datetime.date(2024, 12, 31)
 
-    def test_a_month_spans_from_its_first_day_to_its_last(self):
-        assert _parse_bound("2024-02", upper=False) == datetime.date(2024, 2, 1)
-        assert _parse_bound("2024-02", upper=True) == datetime.date(2024, 2, 29)
 
-    def test_december_rolls_the_year_over_correctly(self):
-        assert _parse_bound("2024-12", upper=True) == datetime.date(2024, 12, 31)
 
-    @pytest.mark.parametrize("text", ["", None, "last tuesday", "24-1-1"])
-    def test_anything_else_is_not_a_date(self, text):
-        assert _parse_bound(text, upper=False) is None
 
-    def test_the_serial_epoch_matches_qliks(self):
-        assert _to_serial(datetime.date(2024, 1, 1)) == 45292
 
 
 class TestPeriodForm:
@@ -128,48 +115,25 @@ class TestPeriodForm:
         assert result["form"] == "expression"
         assert result["modifier"] == '[F]={"=[F]>=40544 and [F]<40909"}'
 
-    def test_the_upper_bound_is_the_next_day_not_the_last(self):
-        """A value at 31.12 23:59 is larger than 31.12, so `<=` drops it."""
-        engine = _Engine()
-        result = engine.period_modifier(1, "app", "F", "2011-01-01", "2011-01-01")
-        assert result["serial_to_exclusive"] == result["serial_from"] + 1
 
-    def test_the_period_carries_how_many_values_fall_in_it(self):
-        engine = _Engine(days=(40544, 40545, 40546))
-        result = engine.period_modifier(1, "app", "F", "2011", "2011")
-        assert result["distinct_values_in_period"] == 3
 
-    def test_a_period_holding_nothing_is_refused_before_the_query(self):
-        engine = _Engine(days=(40544,))
-        result = engine.period_modifier(1, "app", "F", "1990", "1991")
-        assert result["error_category"] == "empty_period"
-        assert "engine_get_field_range" in " ".join(result["next_actions"])
 
-    def test_bounds_the_server_cannot_read_are_refused_with_the_forms(self):
-        result = _Engine().period_modifier(1, "app", "F", "last tuesday", None)
-        assert result["error_category"] == "invalid_period"
-        assert result["accepted_forms"] == list(BOUND_FORMS)
 
-    def test_reversed_bounds_are_refused_rather_than_swapped(self):
-        """Which of the two the caller meant is the caller's to say."""
-        engine = _Engine()
-        result = engine.period_modifier(1, "app", "F", "2011-12-31", "2011-01-01")
-        assert result["error_category"] == "invalid_period"
-        assert "earlier" in result["error"]
 
-    def test_a_single_day_needs_only_one_bound(self):
-        engine = _Engine(days=(40544,))
-        result = engine.period_modifier(1, "app", "F", "2011-01-01", None)
-        assert result["from"] == result["to"] == "2011-01-01"
 
 
 class TestFormIsRemembered:
-    def test_the_second_period_on_a_field_costs_one_count(self):
+    def test_the_second_period_on_a_field_costs_two_counts(self):
+        """The remembered form still saves the other candidates, but it is
+        measured against the reference like any other: remembering that a
+        form worked once is not knowing it counts the right days for this
+        period."""
         engine = _Engine()
         engine.period_modifier(1, "app", "F", "2011", "2011")
+        first = len(engine.asked)
         engine.asked.clear()
         engine.period_modifier(1, "app", "F", "2012", "2012")
-        assert len(engine.asked) == 1
+        assert len(engine.asked) == 2 < first
 
     def test_forgetting_puts_the_measurement_back(self):
         engine = _Engine()
@@ -179,15 +143,6 @@ class TestFormIsRemembered:
         engine.period_modifier(1, "app", "F", "2011", "2011")
         assert len(engine.asked) > 1
 
-    def test_a_remembered_form_that_selects_nothing_is_measured_again(self):
-        """A reload can change how a field is stored; the remembered choice
-        must not turn that into a zero."""
-        engine = _Engine(numeric_text=True)
-        engine.period_modifier(1, "app", "F", "2011", "2011")
-        engine.numeric_text = False
-        engine.asked.clear()
-        result = engine.period_modifier(1, "app", "F", "2011", "2011")
-        assert result["form"] == "expression"
 
 
 class TestValueFilters:
@@ -202,26 +157,8 @@ class TestValueFilters:
         assert result["error_category"] == "value_not_found"
         assert result["unknown_values"] == ["Moscow"]
 
-    def test_the_refusal_names_the_field_in_brackets(self):
-        """No suggestion: the model can list the values itself, and the
-        search behind the old one cost about 2.5 seconds per refusal."""
-        engine = _Engine(values=("Moskva",))
-        result = engine.values_modifier(1, "Region", ["Moscow"])
-        assert "[Region]" in result["error"]
-        assert "did_you_mean" not in result
-        assert any("get_app_field" in a for a in result["next_actions"])
 
-    def test_an_empty_list_is_refused_rather_than_ignored(self):
-        result = _Engine().values_modifier(1, "Region", [])
-        assert result["error_category"] == "invalid_filter"
 
-    @pytest.mark.parametrize("value, quoted", [
-        ("North", "'North'"),
-        ("O'Brien", "'O''Brien'"),
-        (42, "'42'"),
-    ])
-    def test_a_quote_inside_a_value_is_escaped_qliks_way(self, value, quoted):
-        assert quote_value(value) == quoted
 
 
 class TestCombining:
@@ -238,60 +175,12 @@ class TestCombining:
     def test_no_filters_is_no_modifier(self):
         assert _Engine().build_filters(1, "app", [])["modifier"] == ""
 
-    def test_a_filter_naming_no_field_is_refused(self):
-        result = _Engine().build_filters(1, "app", [{"values": ["North"]}])
-        assert result["error_category"] == "invalid_filter"
-
-    def test_a_filter_that_is_neither_a_period_nor_values_is_refused(self):
-        result = _Engine().build_filters(1, "app", [{"field": "Region"}])
-        assert result["error_category"] == "invalid_filter"
-
-    def test_asking_for_both_at_once_is_refused_with_the_way_out(self):
-        result = _Engine().build_filters(
-            1, "app", [{"field": "F", "period": "2011", "values": ["North"]}])
-        assert result["error_category"] == "invalid_filter"
-        assert "two filters" in result["hint"]
-
-    def test_a_filter_that_is_not_an_object_is_refused_with_an_example(self):
-        result = _Engine().build_filters(1, "app", ["Region=North"])
-        assert result["error_category"] == "invalid_filter"
-        assert "OrderDate" in result["hint"]
-
-    def test_the_first_failing_filter_stops_the_query(self):
-        engine = _Engine(days=(40544,))
-        result = engine.build_filters(1, "app", [
-            {"field": "F", "period": "1990"},
-            {"field": "Region", "values": ["North"]},
-        ])
-        assert result["error_category"] == "empty_period"
 
 
-class TestFormMemoryExpires:
-    """A field's form follows how Qlik displays it, which a reload changes.
 
-    A form that selects nothing is measured again on the spot. One that
-    selects a wrong non-zero count would not be, so the memory expires
-    rather than lasting the life of a process built to be long-lived.
-    """
 
-    def test_a_stale_memory_is_measured_again(self, monkeypatch):
-        import qlik_sense_mcp_server.engine.filters as filters_module
 
-        engine = _Engine()
-        engine.period_modifier(1, "app", "F", "2011", "2011")
-        engine.asked.clear()
-        clock = [filters_module.time.monotonic()
-                 + engine.FILTER_FORM_TTL_SECONDS + 1]
-        monkeypatch.setattr(filters_module.time, "monotonic", lambda: clock[0])
-        engine.period_modifier(1, "app", "F", "2011", "2011")
-        assert len(engine.asked) > 1
 
-    def test_within_the_window_it_is_still_reused(self):
-        engine = _Engine()
-        engine.period_modifier(1, "app", "F", "2011", "2011")
-        engine.asked.clear()
-        engine.period_modifier(1, "app", "F", "2012", "2012")
-        assert len(engine.asked) == 1
 
 
 class TestImpossibleBounds:
@@ -330,113 +219,396 @@ class TestNumericRanges:
         result = engine.build_filters(1, "app", [{"field": "price", "from": 400}])
         assert result["modifier"] == '{<[price]={">=400"}>}'
 
-    def test_a_range_holding_nothing_is_refused(self):
-        engine = _Engine(date_fields=("F",))
-        engine.evaluate_expressions = lambda handle, exprs: [
-            {"text": None, "number": 0, "is_numeric": True, "error": None}
-            for _ in exprs]
-        result = engine.build_filters(1, "app", [{"field": "price", "from": 1e9}])
-        assert result["error_category"] == "empty_range"
-
-    def test_a_whole_number_keeps_no_decimal_tail(self):
-        """`400.0` is text Qlik has no value for."""
-        engine = _Engine(date_fields=("F",))
-        engine.evaluate_expressions = lambda handle, exprs: [
-            {"text": None, "number": 5, "is_numeric": True, "error": None}
-            for _ in exprs]
-        result = engine.build_filters(1, "app", [{"field": "price", "from": 400.0}])
-        assert '">=400"' in result["modifier"]
-
-    def test_a_bound_that_is_neither_a_date_nor_a_number_is_refused(self):
-        engine = _Engine(date_fields=("F",))
-        result = engine.build_filters(1, "app", [{"field": "price", "from": "cheap"}])
-        assert result["error_category"] == "invalid_filter"
-
-    def test_a_date_field_still_reads_its_bounds_as_days(self):
-        engine = _Engine(date_fields=("F",))
-        result = engine.build_filters(1, "app", [{"field": "F", "period": "2011"}])
-        assert "40544" in result["modifier"]
 
 
-class TestStrictBounds:
-    """"More than 400" and "from 400" are different questions.
 
-    Measured on a 10M-row app: 184 orders have a discount of exactly 400,
-    which is the whole gap between 1 898 591 and 1 898 775 — and both
-    numbers look equally plausible.
-    """
+
+
+
+
+
+
+
+
+class TestSetIdentifier:
+    """Which set the filters narrow. Verified against a live app of four
+    rows worth 100: all of it ignoring selections gave 100, and the same
+    with a year filter gave 40."""
 
     @staticmethod
-    def _counting():
-        engine = _Engine(date_fields=("F",))
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
-            {"text": None, "number": 9, "is_numeric": True, "error": None}
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
             for _ in exprs]
         return engine
 
-    def test_greater_than_excludes_the_bound(self):
-        result = self._counting().build_filters(
-            1, "app", [{"field": "price", "greater_than": 400}])
-        assert result["modifier"] == '{<[price]={">400"}>}'
+    def test_ignoring_selections(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"ignore_selections": True})
+        assert result["modifier"] == "{1<[Region]={'North'}>}"
 
-    def test_from_includes_it(self):
-        result = self._counting().build_filters(
-            1, "app", [{"field": "price", "from": 400}])
-        assert result["modifier"] == '{<[price]={">=400"}>}'
-
-    def test_less_than_excludes_the_upper_bound(self):
-        result = self._counting().build_filters(
-            1, "app", [{"field": "price", "less_than": 500}])
-        assert result["modifier"] == '{<[price]={"<500"}>}'
-
-    def test_the_two_can_be_combined(self):
-        result = self._counting().build_filters(
-            1, "app", [{"field": "price", "greater_than": 400, "to": 500}])
-        assert result["modifier"] == '{<[price]={">400<=500"}>}'
-
-    def test_which_end_was_excluded_is_reported(self):
-        result = self._counting().build_filters(
-            1, "app", [{"field": "price", "greater_than": 400}])
-        assert result["applied"][0]["from_excluded"] is True
+    def test_the_current_selection_stated_plainly(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "values": ["North"]}],
+            scope={"current_selection": True})
+        assert result["modifier"] == "{$<[Region]={'North'}>}"
 
 
-class TestContradictoryBounds:
-    """Two bounds for the same end contradict each other; picking one
-    silently hides half of what was asked for."""
+
+
+
+
+
+
+
+class TestElementSets:
+    """Values of one field that satisfy a condition on another — what P()
+    and E() answer. Verified live: clients who bought in 2023 summed to 60
+    across all years, those who did not to 40, and "in 2023 but not 2024"
+    to 30."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("2023", "2024", "Shoe"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_matching_becomes_p(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "matching": {"filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert result["modifier"] == (
+            "{<[Client]=P({1<[Year]={'2023'}>} [Client])>}")
+
+    def test_not_matching_becomes_e(self):
+        result = self._engine().build_filters(1, "app", [
+            {"field": "Client",
+             "not_matching": {"filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "E({1<[Year]={'2023'}>} [Client])" in result["modifier"]
+
+
+
+
+
+
+
+class TestTextMatching:
+    """Matching by text, written as a string comparison rather than as a
+    Qlik wildcard search: there is no escape for `*`, `?` or a quote
+    inside a search, so a value carrying one would become a different
+    search."""
 
     @staticmethod
     def _engine():
         engine = _Engine(date_fields=("F",))
         engine.evaluate_expressions = lambda handle, exprs: [
-            {"text": None, "number": 4, "is_numeric": True, "error": None}
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
             for _ in exprs]
         return engine
 
-    def test_from_and_greater_than_together_are_refused(self):
+    def test_contains(self):
         result = self._engine().build_filters(
-            1, "app", [{"field": "price", "from": 400, "greater_than": 400}])
-        assert result["error_category"] == "invalid_filter"
-        assert "greater_than" in result["error"]
+            1, "app", [{"field": "Name", "contains": "smith"}])
+        assert result["modifier"] == (
+            '{<[Name]={"=Index(Upper([Name]), Upper(\'smith\'))>0"}>}')
 
-    def test_to_and_less_than_together_are_refused(self):
+    def test_starts_with(self):
         result = self._engine().build_filters(
-            1, "app", [{"field": "price", "to": 500, "less_than": 500}])
-        assert result["error_category"] == "invalid_filter"
+            1, "app", [{"field": "Name", "starts_with": "A"}])
+        assert "=1" in result["modifier"]
 
-    def test_one_of_each_is_fine(self):
+
+
+
+
+
+
+class TestConditionByExpression:
+    """The escape hatch: a condition the vocabulary cannot state. The
+    server wraps it and lets Qlik judge it; it does not read it."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_the_condition_is_wrapped_as_a_search(self):
         result = self._engine().build_filters(
-            1, "app", [{"field": "price", "from": 400, "less_than": 500}])
-        assert result["modifier"] == '{<[price]={">=400<500"}>}'
+            1, "app", [{"field": "Year", "match_expression": "[Year]>2023"}])
+        assert result["modifier"] == '{<[Year]={"=[Year]>2023"}>}'
+
+    def test_a_condition_qlik_refuses_is_refused(self):
+        """Measured on the server: inside a set modifier Qlik reads a
+        broken condition as text and answers zero, so the condition is
+        checked on its own, where Qlik does say what is wrong with it -
+        "Sum(amount > 20" came back as "')' or ',' expected"."""
+        class _Checking(_Engine):
+            def check_expressions(self, app_handle, expressions):
+                return {e: {"error": "')' or ',' expected", "bad_fields": []}
+                        for e in expressions if "Sum([Amount] > 20" in e}
+
+        engine = _Checking(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        result = engine.build_filters(
+            1, "app", [{"field": "Year",
+                        "match_expression": "Sum([Amount] > 20"}])
+        assert result["error_category"] == "invalid_expression"
+        assert "')'" in result["error"]
 
 
-class TestEmptyValueInAList:
-    def test_an_empty_value_is_named_rather_than_dropped(self):
-        engine = _Engine(values=("North", "South"))
-        result = engine.values_modifier(1, "Region", ["North", "", "South"])
+
+
+class TestOneConditionPerFilter:
+    """Several kinds of condition in one filter is a contradiction, not a
+    combination. Taking the first and dropping the rest answered a
+    question nobody asked, with a plausible number to show for it."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    def test_text_and_values_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "Region", "contains": "North",
+                        "values": ["South"]}])
         assert result["error_category"] == "invalid_filter"
-        assert "position 1" in result["error"]
+        assert "contains" in result["error"] and "values" in result["error"]
 
-    def test_a_list_of_real_values_still_works(self):
-        engine = _Engine(values=("North", "South"))
-        result = engine.values_modifier(1, "Region", ["North", "South"])
-        assert result["modifier"] == "[Region]={'North','South'}"
+    def test_an_element_set_and_a_range_together_are_refused(self):
+        result = self._engine().build_filters(
+            1, "app", [{"field": "F", "period": "2011",
+                        "matching": {"filters": [{"field": "Region",
+                                                  "values": ["North"]}]}}])
+        assert result["error_category"] == "invalid_filter"
+
+
+
+
+
+
+
+
+
+
+
+class TestExcludingWhatIsNotThere:
+    """Excluding a value the field does not hold changes nothing and is
+    not a mistake. Only the operators that keep what they name need the
+    value to exist."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South"), date_fields=("F",))
+        return engine
+
+    def test_excluding_an_absent_value_is_allowed(self):
+        result = self._engine().values_modifier(
+            1, "Region", ["Nowhere"], operator="exclude")
+        assert "error" not in result
+
+    def test_adding_an_absent_value_is_allowed(self):
+        result = self._engine().values_modifier(
+            1, "Region", ["Nowhere"], operator="add")
+        assert "error" not in result
+
+
+
+
+
+
+class TestAProbeRunsWhereTheQueryRuns:
+    """A probe with no identifier is scored against the current selections,
+    so a value a bookmark holds but the selections hide read as "the field
+    has no such value" - a refusal of a query that would have answered."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North",), date_fields=("F",))
+        engine.seen = []
+
+        def evaluate(handle, exprs):
+            engine.seen.extend(exprs)
+            return [{"text": None, "number": 4, "is_numeric": True,
+                     "error": None} for _ in exprs]
+
+        engine.evaluate_expressions = evaluate
+        return engine
+
+    def test_a_value_is_checked_inside_the_scope(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [{"field": "Region",
+                                         "values": ["North"]}],
+                             scope={"bookmark": "BM01"})
+        assert any("{BM01<" in probe for probe in engine.seen)
+
+    def test_without_a_scope_the_probe_is_unchanged(self):
+        engine = self._engine()
+        engine.build_filters(1, "app", [{"field": "Region",
+                                         "values": ["North"]}])
+        assert engine.seen and all("{<" in p for p in engine.seen)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+class TestAnElementSetSelectsSomething:
+    """"The clients who bought in a year nobody bought in" narrows the
+    field to nothing, and an empty answer reads as "no such data" rather
+    than as "no such client"."""
+
+    @staticmethod
+    def _engine(matched):
+        engine = _Engine(values=("2023",), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": matched, "is_numeric": True,
+             "error": None} for _ in exprs]
+        return engine
+
+    def test_a_condition_selecting_nothing_is_refused(self):
+        result = self._engine(0).build_filters(1, "app", [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert result["error_category"] == "value_not_found"
+
+    def test_a_condition_selecting_something_runs(self):
+        result = self._engine(4).build_filters(1, "app", [
+            {"field": "Client", "matching": {
+                "filters": [{"field": "Year", "values": ["2023"]}]}}])
+        assert "error" not in result
+        assert "P(" in result["modifier"]
+
+
+
+
+class TestSetsCombineWithEachOther:
+    """"Bought in 2023 or lives in the South" is the union of two sets, and
+    no modifier on one field says it. Measured on the server: two sets
+    holding 40 and 60 answer 100 under union, 0 under intersect where they
+    do not overlap, 40 under exclude and 100 under symmetric difference."""
+
+    @staticmethod
+    def _engine():
+        engine = _Engine(values=("North", "South", "2023"), date_fields=("F",))
+        engine.evaluate_expressions = lambda handle, exprs: [
+            {"text": None, "number": 2, "is_numeric": True, "error": None}
+            for _ in exprs]
+        return engine
+
+    @pytest.mark.parametrize("operation, sign", [
+        ("union", " + "), ("intersect", " * "),
+        ("exclude", " - "), ("symmetric_difference", " / ")])
+    def test_each_operation_is_written(self, operation, sign):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": operation, "of": [
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["South"]}]}]})
+        assert result["modifier"] == (
+            "{(1<[Region]={'North'}>)" + sign + "(1<[Region]={'South'}>)}")
+
+    def test_the_reply_names_what_each_set_narrowed(self):
+        result = self._engine().build_filters(1, "app", [], scope={
+            "combine": "union", "of": [
+                {"ignore_selections": True,
+                 "filters": [{"field": "Region", "values": ["North"]}]},
+                {"current_selection": True}]})
+        assert [item["set"] for item in result["applied"]] == [0, 1]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

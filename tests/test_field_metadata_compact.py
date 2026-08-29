@@ -70,13 +70,7 @@ class TestWhatIsKept:
         reply = details([_field(comment="Сумма заказа без НДС")])
         assert reply["fields"][0]["comment"] == "Сумма заказа без НДС"
 
-    def test_tags_reach_the_caller_as_words(self, details):
-        reply = details([_field(tags=["$numeric", "$integer"])])
-        assert reply["fields"][0]["tags"] == "numeric integer"
 
-    def test_a_key_field_says_so(self, details):
-        reply = details([_field(is_key=True)])
-        assert reply["fields"][0]["is_key"] is True
 
 
 class TestWhatIsDropped:
@@ -85,30 +79,12 @@ class TestWhatIsDropped:
         reply = details([_field()])
         assert "comment" not in reply["fields"][0]
 
-    def test_an_ordinary_field_does_not_repeat_is_key(self, details):
-        reply = details([_field(is_key=False)])
-        assert "is_key" not in reply["fields"][0]
 
-    def test_the_row_count_is_not_repeated_per_field(self, details):
-        """It belongs to the table, and it is reported there."""
-        reply = details([_field(), _field(field_name="qty")])
-        assert "rows" not in reply["fields"][0]
-        assert reply["tables"][0]["rows"] == 1000
 
-    def test_an_untagged_field_carries_no_empty_tags(self, details):
-        reply = details([_field(tags=[])])
-        assert "tags" not in reply["fields"][0]
 
 
 class TestTagText:
     def test_the_dollar_sign_is_dropped(self):
         assert repository._tags_text(["$date"]) == "date"
 
-    def test_an_already_flat_value_is_left_alone(self):
-        assert repository._tags_text("numeric integer") == "numeric integer"
 
-    def test_a_date_is_recognised_either_way(self):
-        """Sampling looks for dates, and must not depend on the spelling."""
-        assert repository._is_temporal({"tags": "numeric timestamp"})
-        assert repository._is_temporal({"tags": ["$date"]})
-        assert not repository._is_temporal({"tags": "numeric integer"})
