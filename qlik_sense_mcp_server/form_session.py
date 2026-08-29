@@ -446,12 +446,12 @@ class FormSession:
             client, "POST", action_url, f"login POST to {action_url}", data=body
         )
 
-        # Только то, что появилось в банке после отправки учётных данных:
-        # применять правило "единственный cookie и есть сессия" ко всей банке
-        # нельзя - у Qlik за балансировщиком там с первого же запроса лежит
-        # чужой cookie, и при неверном пароле он был бы принят за сессию, а
-        # человек вместо "проверьте учётные данные" получал бы невнятный отказ
-        # на следующем запросе.
+        # Only what the credential POST added to the jar. Applying the "a
+        # single cookie can only be the session" rule to the whole jar is wrong
+        # here: behind a load balancer Qlik's very first response already leaves
+        # a foreign cookie there, so a wrong password would look like a
+        # successful login and the operator would get an unrelated failure on
+        # the next request instead of "check the credentials".
         fresh_names = [
             name for name in client.cookies.keys() if name not in names_before
         ]
@@ -459,9 +459,9 @@ class FormSession:
             cookie_name, cookie_value = pick_qlik_session_cookie(
                 fresh_names, client.cookies.get)
         else:
-            # Логин не поставил ни одного нового cookie. Сессия может быть
-            # только тем, что само называет себя сессией Qlik: правило
-            # "единственный cookie" здесь дало бы чужой cookie балансировщика.
+            # The login set no new cookie at all. Only a name that says it
+            # is Qlik's session can be one: the "single cookie" rule would
+            # hand back the load balancer's cookie instead.
             named = [
                 name for name in client.cookies.keys()
                 if looks_like_qlik_session_name(name)
