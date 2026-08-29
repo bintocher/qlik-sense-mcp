@@ -185,6 +185,17 @@ Most common causes:
    after a partial failure needs a fresh bootstrap (`invalidate()` handles
    this automatically on the next call).
 
+### `entry point request to ... failed: Server disconnected without sending a response`
+
+Qlik's proxy closes the TCP connection right after redirecting to the login
+page, so a client that follows the redirect over the same pooled connection
+writes into a socket the server has already dropped. The MCP asks for a
+fresh connection on both hops of the login exchange (`Connection: close`),
+so this should not surface. If a proxy in front of Qlik (a reverse proxy,
+a corporate TLS inspector) still breaks the chain, check it first: the
+same request run twice by hand, each on its own connection, will succeed
+where the pooled one fails.
+
 ### Everything looks right but requests still fail
 
 Turn on debug logging:
