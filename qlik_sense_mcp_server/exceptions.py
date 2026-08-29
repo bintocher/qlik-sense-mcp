@@ -23,6 +23,15 @@ class QlikSessionLimitError(QlikConnectionError):
     """
 
 
+class QlikLicenseError(QlikConnectionError):
+    """Raised when Engine refuses the socket with OnLicenseAccessDenied.
+
+    The identity authenticated fine, it simply has no license to use Qlik.
+    Logging in again cannot change that, so this is kept apart from the
+    session errors that a fresh login does fix.
+    """
+
+
 class QlikEngineError(QlikError):
     """Raised when Engine API returns an error."""
 

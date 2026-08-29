@@ -24,6 +24,7 @@ qlik-sense-mcp/
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
+│   ├── form_session.py   # Login/password session bootstrap + cache
 │   └── utils.py          # XSRF key generation, helpers
 ├── tools/
 │   └── qlik_jwt_admin.py # Admin CLI: RSA keypair + JWT issuance (since v1.5.0)
@@ -54,6 +55,18 @@ cookie and `qlik-csrf-token` header, and caches them for 25 minutes
 QRS or Engine call, both API clients invalidate the cache and trigger a
 transparent re-bootstrap. See [AUTH_JWT.md](AUTH_JWT.md) for the
 protocol-level details and the CSWSH rationale.
+
+### `FormSession` ([form_session.py](../qlik_sense_mcp_server/form_session.py))
+
+The login/password counterpart to `JwtSession`, with the same public
+surface (`ensure()`, `ensure_standalone()`, `cookie_header()`,
+`csrf_token`, `invalidate()`, `logout()`) so both API clients treat them
+interchangeably once bootstrapped. Where `JwtSession` bootstraps by
+presenting a bearer token to `/qps/csrftoken`, `FormSession` logs into the
+virtual proxy's "Form based" login page — GET the page, parse out the
+`<form>`, POST the credentials — and then hits the same `/qps/csrftoken`
+endpoint, now authenticated by the resulting cookie. See
+[AUTH_FORM.md](AUTH_FORM.md) for the full login-flow details.
 
 ### `QlikRepositoryAPI` ([repository_api.py](../qlik_sense_mcp_server/repository_api.py))
 
@@ -314,13 +327,19 @@ branch on the `error` key instead.
 
 #### Per-mode tool registration (since v1.6.0)
 
-Reload-task tools are declared with `@_cert_only_tool()` instead of
+Reload-task tools are declared with `@_task_admin_tool()` instead of
 `@mcp.tool()`. That decorator registers the function only when
-`config.auth_mode != jwt`, because QRS task administration
+`_TASK_TOOLS_ENABLED` is true, because QRS task administration
 (`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
-requires repository-admin rights that a JWT analyst identity does not
-have. JWT sessions therefore see 12 tools instead of 24, rather than 12
-that can only return 403.
+requires repository-admin rights — a QMC role, not a property of the
+authentication method itself. Certificate mode almost always runs as a
+trusted admin identity, so `_TASK_TOOLS_ENABLED` defaults to true there;
+JWT and form sessions default to false, since those normally authenticate
+an ordinary analyst who would just get 403s, and the fourteen extra tool
+descriptions are not free even unused. `QLIK_TASK_TOOLS=true` overrides
+the default in either direction — including turning task tools ON outside
+certificate mode, for the operator who has verified the JWT/form identity
+in use does hold QRS admin rights (see `docs/AUTH_FORM.md`).
 
 When the configuration fails to load entirely (`config is None`) every
 tool stays registered — that path serves `--help` and the test suite.

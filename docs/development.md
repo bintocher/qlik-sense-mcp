@@ -103,10 +103,11 @@ The PyPI package version is read from `pyproject.toml`.
    ```
 3. The decorators are not optional:
    - `@mcp.tool()` registers the function with the MCP host. Use
-     `@_cert_only_tool()` instead if the tool needs QRS admin rights
-     (reload-task administration) — it registers the tool in
-     certificate mode only, so JWT analysts are not offered calls that
-     can only return 403.
+     `@_task_admin_tool()` instead if the tool needs QRS admin rights
+     (reload-task administration) — it registers the tool by default in
+     certificate mode only (`QLIK_TASK_TOOLS=true` can turn it on in JWT
+     or form mode too, for an identity verified to have those rights), so
+     an ordinary analyst is not offered calls that can only return 403.
    - `@_timed` wraps the response with `tool_call_seconds` and a
      structured error envelope, and echoes the failing `request` back
      to the caller. You get both for free; do not hand-roll them.

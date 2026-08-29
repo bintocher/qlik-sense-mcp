@@ -54,10 +54,12 @@ in editable mode together with the optional `dev` extras
 
 ## Setup
 
-Two auth modes are supported. Cert mode (covered below) gives full QRS
+Three auth modes are supported. Cert mode (covered below) gives full QRS
 access and is required for admins. JWT mode is recommended for individual
 analysts — see [AUTH_JWT.md](AUTH_JWT.md) for the full setup, then come
-back here only for the install command (Step 1 above).
+back here only for the install command (Step 1 above). Login/password
+(form) mode is an alternative for deployments with a "Form based" virtual
+proxy — see [AUTH_FORM.md](AUTH_FORM.md).
 
 1. Place certificates somewhere outside the repository:
    ```
