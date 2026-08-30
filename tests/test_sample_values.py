@@ -14,7 +14,7 @@ and shows a few dates in their display format. Cost on a 10M-row app:
 
 import pytest
 
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 from qlik_sense_mcp_server.tools import repository
 
 

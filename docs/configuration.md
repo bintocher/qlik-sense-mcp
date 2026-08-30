@@ -15,7 +15,7 @@ the login credentials instead of an `X-Qlik-User` header — see
 
 | Variable | Description |
 |----------|-------------|
-| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT/form mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
+| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode the virtual proxy prefix is required as URL path, e.g. `https://qlik.company.com/jwt`; in form mode it is optional, since a form-based auth module can sit on the central proxy. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
 | `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode: sent as `X-Qlik-User`. Form mode: the domain part of the login (optional — see below). Unused in JWT mode. |
 | `QLIK_USER_ID` | User ID used for authentication. Cert mode: sent as `X-Qlik-User`. Form mode: the username submitted to the login form (required). Unused in JWT mode. |
 
@@ -26,8 +26,11 @@ This section applies to **cert mode only**. For the JWT alternative see
 alternative see [Form authentication](#form-loginpassword-authentication)
 below, and [AUTH_JWT.md](AUTH_JWT.md) for the full QMC virtual proxy setup.
 
-Required for production. If `QLIK_CA_CERT_PATH` is not set, SSL
-verification is disabled automatically.
+Required for production. `QLIK_CA_CERT_PATH` does not switch TLS
+verification on or off - that is `QLIK_VERIFY_SSL` alone (off by default).
+With verification on and no CA path set, the system trust store decides,
+which a self-signed Qlik certificate will not pass; point
+`QLIK_CA_CERT_PATH` at the signing CA to have it trusted.
 
 | Variable | Description |
 |----------|-------------|
@@ -83,9 +86,11 @@ Defaults match the standard
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QLIK_REPOSITORY_PORT` | `4242` | Repository (QRS) API port |
-| `QLIK_PROXY_PORT` | `4243` | Proxy (QPS) API port — used for ticket auth |
 | `QLIK_ENGINE_PORT` | `4747` | Engine API WebSocket port |
-| `QLIK_HTTP_PORT` | unset | Optional HTTP port for the metadata endpoint `/api/v1/apps/{id}/data/metadata` |
+
+Both ports apply to certificate mode, which talks to Qlik directly. JWT
+and form mode go through the virtual proxy on the port in
+`QLIK_SERVER_URL`, so neither variable has any effect there.
 
 ## SSL
 
@@ -103,20 +108,27 @@ Defaults match the standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | Root log level (`DEBUG`, `INFO`, `WARNING`, ...). |
-| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go — stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+| `LOG_LEVEL` | `INFO` | Root log level: one of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` is very verbose - it logs every Engine API frame, which is what you need to troubleshoot hypercube performance. |
+| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go - stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+| `QLIK_LOG_REPLIES` | `false` | Set to `true` to log what a tool returned as well as the call it answered, truncated to 4000 characters. This is the tool's own payload, logged before the envelope adds `tool_call_seconds`, `tool` and `request`; a call that raised is reported by the exception log instead and writes no reply line. Off by default: replies carry data, and data does not belong in a log unless someone asked for it. |
 
-## Timeouts and retries
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to BOTH the WS handshake AND every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
-
-## Logging
+## Timeouts
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` is very verbose — it logs every Engine API frame, useful for troubleshooting hypercube performance. |
+| `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to both the WS handshake and every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
+
+There are no retry-count or HTTP-timeout variables: the connection cache
+decides on its own when to re-check a socket (it trusts one that answered
+less than 30 seconds ago, and probes an older one with a bounded
+`EngineVersion` request), and those thresholds are constants rather than
+configuration.
+
+## Transport
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_PORT` | `8000` | Port the Streamable HTTP transport listens on. The bind address is always `127.0.0.1`, so the server is reachable from the local machine only. Ignored in stdio mode (`--stdio`). |
 
 ## Sample `.env`
 
@@ -125,8 +137,29 @@ See [`.env.example`](../.env.example) at the repository root for a copy-pasteabl
 ## MCP client configuration
 
 The blocks below are complete examples of registering the server in an
-MCP client config. The examples use Streamable HTTP (the default), so the
-client connects to the long-lived server process you start manually.
+MCP client config. They use the `command` form, in which the client
+spawns the server itself and talks to it over stdio - hence the `--stdio`
+argument. Without it the process starts in Streamable HTTP mode and the
+client never sees a reply.
+
+To use the default Streamable HTTP transport instead, start the server
+yourself (`uvx qlik-sense-mcp-server`, with the `QLIK_*` variables in the
+environment or in a `.env` file beside it) and point the client at the
+running process rather than spawning one:
+
+```jsonc
+{
+  "mcpServers": {
+    "qlik-sense": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+The exact key for an HTTP server varies by client (`type`, `transport`,
+or a bare `url`); check your client's documentation.
 
 ### Cert mode
 
@@ -135,7 +168,7 @@ client connects to the long-lived server process you start manually.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com",
         "QLIK_USER_DIRECTORY": "COMPANY",
@@ -144,7 +177,6 @@ client connects to the long-lived server process you start manually.
         "QLIK_CLIENT_KEY_PATH": "/etc/qlik/certs/client_key.pem",
         "QLIK_CA_CERT_PATH": "/etc/qlik/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
-        "QLIK_PROXY_PORT": "4243",
         "QLIK_ENGINE_PORT": "4747",
         "QLIK_VERIFY_SSL": "false",
         "QLIK_WS_TIMEOUT": "180.0",
@@ -168,7 +200,7 @@ overrides.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
         "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
@@ -188,7 +220,7 @@ overrides available for non-default login pages.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/forms",
         "QLIK_USER_DIRECTORY": "COMPANY",

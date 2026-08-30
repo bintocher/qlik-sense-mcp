@@ -11,7 +11,7 @@ behind a plausible number.
 import pytest
 
 from qlik_sense_mcp_server.engine.queries import AGGREGATIONS
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 # Names Qlik knows as functions rather than as fields. The double has to

@@ -12,7 +12,7 @@ and walk the same wiring the server uses at startup.
 import pytest
 
 from qlik_sense_mcp_server.config import QlikSenseConfig
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 from qlik_sense_mcp_server.jwt_session import JwtSession
 from qlik_sense_mcp_server.form_session import FormSession
 from qlik_sense_mcp_server.repository_api import QlikRepositoryAPI

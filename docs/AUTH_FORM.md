@@ -78,7 +78,7 @@ Minimal config:
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/forms",
         "QLIK_USER_DIRECTORY": "COMPANY",
@@ -89,6 +89,12 @@ Minimal config:
   }
 }
 ```
+
+`--stdio` is required in this form: the client spawns the server and talks
+to it over stdio, while the process defaults to Streamable HTTP when
+started without that flag. To use the HTTP transport instead, start the
+server yourself and point the client at `http://127.0.0.1:8000/mcp` - see
+[configuration.md](configuration.md#mcp-client-configuration).
 
 - **`QLIK_SERVER_URL`** — the Qlik hostname, optionally with the virtual
   proxy prefix as URL path. Unlike JWT, form mode does **not** require a

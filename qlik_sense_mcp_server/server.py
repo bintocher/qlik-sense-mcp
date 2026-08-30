@@ -145,10 +145,10 @@ USAGE:
 
 TOOLS ({len(mcp._tool_manager._tools)} registered in the current auth mode):
     Repository: get_about, get_apps, get_app_details
-    Engine:     get_app_script, get_app_field_statistics, engine_get_field_range,
-                engine_create_hypercube, get_app_field, get_app_variables,
-                get_app_sheets, get_app_sheet_objects, get_app_object,
-                search_app
+    Engine:     engine_query, engine_create_hypercube, engine_get_field_range,
+                get_app_script, get_app_field_statistics, get_app_field,
+                get_app_variables, get_app_sheets, get_app_sheet_objects,
+                get_app_object, search_app
 {tasks_section}
 
 GitHub: https://github.com/bintocher/qlik-sense-mcp

@@ -182,9 +182,6 @@ config.local.py
 .kiro
 .cursor
 
-# Bump2version
-.bumpversion.cfg.bak
-
 .claude
 claude.md
 

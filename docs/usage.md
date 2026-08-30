@@ -15,14 +15,25 @@ The server speaks the two transports defined by the
 
 ## Authentication mode
 
-The server can connect to Qlik Sense Enterprise in one of two mutually
-exclusive modes: **certificate** (default — exported client certificate
-+ key on port 4242 / 4747) or **JWT** (single bearer token issued
-through a JWT virtual proxy, no client certificate required). The mode
-is chosen by the env vars in your MCP client config; everything else —
-the tool surface, the Streamable HTTP transport, the connection cache —
-behaves identically. See [AUTH_JWT.md](AUTH_JWT.md) for the JWT setup,
-admin CLI and security model.
+The server can connect to Qlik Sense Enterprise in one of three
+mutually exclusive modes:
+
+- **certificate** (default): exported client certificate + key on port
+  4242 / 4747.
+- **JWT**: a single bearer token issued through a JWT virtual proxy, no
+  client certificate required. Selected when `QLIK_JWT_TOKEN` is set.
+- **form (login/password)**: username and password submitted to a "Form
+  based" virtual proxy's login page. Selected when `QLIK_PASSWORD` is set
+  and `QLIK_JWT_TOKEN` is not.
+
+The mode is chosen by the env vars in your MCP client config. Everything
+else behaves identically: the Streamable HTTP transport and the
+connection cache are the same in all three, and the tool surface differs
+only in whether the reload-task tools are registered, which is a matter
+of `QLIK_TASK_TOOLS` rather than of the mode itself.
+
+See [AUTH_JWT.md](AUTH_JWT.md) for the JWT setup, admin CLI and security
+model, and [AUTH_FORM.md](AUTH_FORM.md) for the login/password flow.
 
 ## Starting the server
 
@@ -145,7 +156,7 @@ SLICE-BY-CATEGORY pattern.
 
 ## Tool list
 
-See [tools.md](tools.md) for the full inventory of all 24 MCP tools, the
+See [tools.md](tools.md) for the full inventory of all 28 MCP tools, the
 transport (Repository / Engine / Tasks) each one uses, and a short
 description of when to call it. Detailed parameter docs live in the
 Python docstrings — every tool returns its full docstring via the

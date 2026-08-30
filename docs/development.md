@@ -17,7 +17,7 @@ make build
 ```
 
 The `dev` extras (defined in [`pyproject.toml`](../pyproject.toml))
-include `build`, `twine`, `bump2version`, `pytest` and
+include `build`, `twine`, `bump-my-version`, `pytest` and
 `pytest-asyncio`.
 
 ## Tests
@@ -54,15 +54,22 @@ was found by talking to Qlik.
 
 ## Versioning
 
-The project uses [bump2version](https://pypi.org/project/bump2version/)
+The project uses [bump-my-version](https://pypi.org/project/bump-my-version/)
 through `make` targets. Each target bumps the version, commits the
 change and opens a pull request:
 
 ```bash
-make version-patch    # 1.5.0 -> 1.5.1
-make version-minor    # 1.5.0 -> 1.6.0
-make version-major    # 1.5.0 -> 2.0.0
+make version-patch    # 2.2.0 -> 2.2.1
+make version-minor    # 2.2.0 -> 2.3.0
+make version-major    # 2.2.0 -> 3.0.0
 ```
+
+Its configuration lives in `[tool.bumpversion]` in
+[`pyproject.toml`](../pyproject.toml), beside the version it bumps: the
+current version, the two files carrying it (`pyproject.toml` and
+`qlik_sense_mcp_server/__init__.py`), and the commit-but-do-not-tag
+policy. `bump-my-version show-bump` prints what each level would produce
+without touching anything.
 
 The PyPI package version is read from `pyproject.toml`.
 

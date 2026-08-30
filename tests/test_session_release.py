@@ -51,7 +51,7 @@ class TestTtlOnTheSocketUrl:
 
         for key, value in env.items():
             monkeypatch.setenv(key, value)
-        from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+        from qlik_sense_mcp_server.engine import QlikEngineAPI
 
         api = QlikEngineAPI(QlikSenseConfig.from_env())
         captured = {}

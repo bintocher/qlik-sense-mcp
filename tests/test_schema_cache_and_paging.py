@@ -13,7 +13,7 @@ is the one thing a caller cannot work out on its own.
 
 import pytest
 
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 from qlik_sense_mcp_server.tools import repository
 
 
