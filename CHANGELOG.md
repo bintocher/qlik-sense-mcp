@@ -29,6 +29,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   code with no mention anywhere. `.env.example` no longer describes an
   HTTP timeout and a retry count that are not settings, and now covers
   JWT mode, form-mode overrides and `QLIK_TASK_TOOLS`.
+- Three statements that would have misconfigured a working deployment.
+  The virtual proxy prefix in `QLIK_SERVER_URL` was described as required
+  in form mode as well as JWT; it is required only in JWT mode, and a
+  form-based auth module can sit on the central proxy. A missing
+  `QLIK_CA_CERT_PATH` was said to disable TLS verification; verification
+  is governed by `QLIK_VERIFY_SSL` alone, and the CA path only adds a
+  private CA to the trust store. Certificate paths, user directory and
+  user id were listed as requirements for everyone; each is now tied to
+  the mode that needs it.
+- `QLIK_PROXY_PORT` and `QLIK_HTTP_PORT` are marked reserved and unused.
+  Both are read into the configuration, but nothing builds a request from
+  them: ticket authentication and the metadata endpoint they were meant
+  for do not exist in this server. They are out of the client config
+  examples for the same reason.
+- The `--help` tool list was missing `engine_query`, the main analysis
+  tool, while the count printed beside it came from the live registry and
+  said 28. The list names all eleven Engine tools now. `mcp.json.example`
+  likewise pre-approves `engine_query`, `engine_get_field_range`,
+  `search_app` and `get_about`, which it had left out.
 
 ## [2.2.0] - 2026-08-29
 

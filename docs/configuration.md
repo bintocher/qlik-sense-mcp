@@ -15,7 +15,7 @@ the login credentials instead of an `X-Qlik-User` header — see
 
 | Variable | Description |
 |----------|-------------|
-| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT/form mode include the virtual proxy prefix as URL path, e.g. `https://qlik.company.com/jwt`. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
+| `QLIK_SERVER_URL` | Qlik Sense server URL, including scheme. Example: `https://qlik.company.com`. In JWT mode the virtual proxy prefix is required as URL path, e.g. `https://qlik.company.com/jwt`; in form mode it is optional, since a form-based auth module can sit on the central proxy. The scheme is honoured everywhere, including the Engine WebSocket: `https` connects with `wss://`, `http` with `ws://`. Use `http` only on a trusted network — the token and session cookie are then unencrypted. |
 | `QLIK_USER_DIRECTORY` | User directory used for authentication (e.g. `COMPANY`). Cert mode: sent as `X-Qlik-User`. Form mode: the domain part of the login (optional — see below). Unused in JWT mode. |
 | `QLIK_USER_ID` | User ID used for authentication. Cert mode: sent as `X-Qlik-User`. Form mode: the username submitted to the login form (required). Unused in JWT mode. |
 
@@ -26,8 +26,11 @@ This section applies to **cert mode only**. For the JWT alternative see
 alternative see [Form authentication](#form-loginpassword-authentication)
 below, and [AUTH_JWT.md](AUTH_JWT.md) for the full QMC virtual proxy setup.
 
-Required for production. If `QLIK_CA_CERT_PATH` is not set, SSL
-verification is disabled automatically.
+Required for production. `QLIK_CA_CERT_PATH` does not switch TLS
+verification on or off - that is `QLIK_VERIFY_SSL` alone (off by default).
+With verification on and no CA path set, the system trust store decides,
+which a self-signed Qlik certificate will not pass; point
+`QLIK_CA_CERT_PATH` at the signing CA to have it trusted.
 
 | Variable | Description |
 |----------|-------------|
@@ -83,9 +86,9 @@ Defaults match the standard
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QLIK_REPOSITORY_PORT` | `4242` | Repository (QRS) API port |
-| `QLIK_PROXY_PORT` | `4243` | Proxy (QPS) API port — used for ticket auth |
 | `QLIK_ENGINE_PORT` | `4747` | Engine API WebSocket port |
-| `QLIK_HTTP_PORT` | unset | Optional HTTP port for the metadata endpoint `/api/v1/apps/{id}/data/metadata` |
+| `QLIK_PROXY_PORT` | `4243` | Reserved. Read into the configuration and currently unused: no code path builds a URL from it (ticket authentication is not implemented). |
+| `QLIK_HTTP_PORT` | unset | Reserved. Read into the configuration and currently unused: the metadata endpoint it was meant for is not implemented. |
 
 ## SSL
 
@@ -105,7 +108,7 @@ Defaults match the standard
 |----------|---------|-------------|
 | `LOG_LEVEL` | `INFO` | Root log level: one of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` is very verbose - it logs every Engine API frame, which is what you need to troubleshoot hypercube performance. |
 | `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go - stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
-| `QLIK_LOG_REPLIES` | `false` | Set to `true` to log the body of each reply as well as the call (truncated to 4000 characters). Off by default: replies carry data, and data does not belong in a log unless someone asked for it. Turn it on to audit what a model was actually shown. |
+| `QLIK_LOG_REPLIES` | `false` | Set to `true` to log what a tool returned as well as the call it answered, truncated to 4000 characters. This is the tool's own payload, logged before the envelope adds `tool_call_seconds`, `tool` and `request`; a call that raised is reported by the exception log instead and writes no reply line. Off by default: replies carry data, and data does not belong in a log unless someone asked for it. |
 
 ## Timeouts
 
@@ -172,7 +175,6 @@ or a bare `url`); check your client's documentation.
         "QLIK_CLIENT_KEY_PATH": "/etc/qlik/certs/client_key.pem",
         "QLIK_CA_CERT_PATH": "/etc/qlik/certs/root.pem",
         "QLIK_REPOSITORY_PORT": "4242",
-        "QLIK_PROXY_PORT": "4243",
         "QLIK_ENGINE_PORT": "4747",
         "QLIK_VERIFY_SSL": "false",
         "QLIK_WS_TIMEOUT": "180.0",

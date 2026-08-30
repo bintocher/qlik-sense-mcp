@@ -8,7 +8,7 @@
   detects which one is present at import time.
 - Qlik Sense Enterprise with Repository API on port 4242 and Engine API on port 4747 (the [standard Qlik Sense Enterprise port allocation](https://help.qlik.com/en-US/sense-admin/Subsystems/DeployAdministerQSE/Content/Sense_DeployAdminister/QSEoW/Deploy_QSEoW/Ports.htm))
 - Network access from the host running the MCP server to those Qlik ports
-- Client certificate (`.pem`) and matching private key issued by the Qlik Sense node, plus the root CA certificate
+- Client certificate (`.pem`) and matching private key issued by the Qlik Sense node, plus the root CA certificate - certificate mode only. JWT mode needs a token and form mode a username and password; neither puts anything else on disk.
 
 The MCP client that talks to this server must be able to handle large JSON
 responses — keep `limit` and `max_rows` small while testing.
