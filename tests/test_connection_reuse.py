@@ -14,7 +14,7 @@ import socket
 
 import pytest
 
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 class _FakeWs:

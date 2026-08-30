@@ -22,7 +22,7 @@ from qlik_sense_mcp_server.engine.filters import (
     _to_serial,
     quote_value,
 )
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 class _Engine(QlikEngineAPI):

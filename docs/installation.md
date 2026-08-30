@@ -52,7 +52,7 @@ make dev
 
 `make dev` creates a virtual environment via `uv`, installs the package
 in editable mode together with the optional `dev` extras
-(`build`, `twine`, `bump2version`, `pytest`, `pytest-asyncio`).
+(`build`, `twine`, `bump-my-version`, `pytest`, `pytest-asyncio`).
 
 ## Setup
 

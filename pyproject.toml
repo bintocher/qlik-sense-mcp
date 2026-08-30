@@ -27,22 +27,27 @@ dependencies = [
     # transport — first appears there (1.7.x has FastMCP but no HTTP runner,
     # and 1.1 has no FastMCP at all).
     "mcp>=1.8.0,<3.0.0",
-    "httpx>=0.25.0",
-    "pydantic>=2.0.0",
-    "python-dotenv>=1.0.0",
-    "websocket-client>=1.6.0",
-    "PyJWT[crypto]>=2.8.0",
-    "cryptography>=41.0.0"
+    # Floors track the lines this release is developed and tested against.
+    # They are minor-level, not pinned patches: a newer patch is always
+    # welcome, an older minor is not what anyone ran.
+    "httpx>=0.28",
+    "pydantic>=2.13",
+    "python-dotenv>=1.2",
+    "websocket-client>=1.9",
+    "PyJWT[crypto]>=2.13",
+    "cryptography>=50.0"
 ]
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
 dev = [
-    "build>=0.10.0",
-    "twine>=4.0.0",
-    "bump2version>=1.0.0",
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0"
+    "build>=1.6",
+    "twine>=7.0",
+    # bump-my-version, not bump2version: the latter has had no release
+    # since 2020 and its configuration format is frozen with it.
+    "bump-my-version>=1.5",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.4"
 ]
 
 [project.urls]
@@ -52,6 +57,23 @@ Issues = "https://github.com/bintocher/qlik-sense-mcp/issues"
 
 [project.scripts]
 qlik-sense-mcp-server = "qlik_sense_mcp_server.server:main"
+
+[tool.bumpversion]
+current_version = "2.2.0"
+parse = '(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
+serialize = ["{major}.{minor}.{patch}"]
+commit = true
+tag = false
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'
+
+[[tool.bumpversion.files]]
+filename = "qlik_sense_mcp_server/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -183,7 +183,7 @@ config.local.py
 .cursor
 
 # Bump2version
-.bumpversion.cfg.bak
+.bumpversion.toml.bak
 
 .claude
 claude.md

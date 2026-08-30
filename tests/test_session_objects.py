@@ -12,7 +12,7 @@ and "the call failed", so a broken Engine looked like a tidy, empty app.
 
 import pytest
 
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 from qlik_sense_mcp_server.exceptions import QlikEngineError
 
 

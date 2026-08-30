@@ -6,6 +6,46 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Dependency floors moved up to the lines this release is developed and
+  tested against: `httpx>=0.28`, `pydantic>=2.13`, `python-dotenv>=1.2`,
+  `websocket-client>=1.9`, `PyJWT>=2.13`, `cryptography>=50.0`, and for
+  development `build>=1.6`, `twine>=7.0`, `pytest>=9.0`,
+  `pytest-asyncio>=1.4`. They are minor-level, so a newer patch is always
+  welcome. The MCP SDK range is unchanged at `>=1.8.0,<3.0.0` - both SDK
+  lines stay supported.
+- Version bumping moved from bump2version, which has had no release since
+  2020, to [bump-my-version](https://pypi.org/project/bump-my-version/).
+  Its configuration lives in `[tool.bumpversion]` in `pyproject.toml`
+  beside the version it bumps, and `.bumpversion.cfg` is gone. That file
+  had also gone stale: it still said `current_version = 2.0.2`, so the
+  next `make version-patch` would have produced 2.0.3 rather than 2.2.1.
+
+### Removed
+
+- Configuration that reached nothing: `QLIK_PROXY_PORT` and
+  `QLIK_HTTP_PORT` were read into the config object, and no code path
+  built a request from either - ticket authentication and the metadata
+  endpoint they were meant for do not exist in this server. With them go
+  the `proxy_port` / `http_port` fields and the `DEFAULT_PROXY_PORT`,
+  `DEFAULT_TICKET_TIMEOUT`, `DEFAULT_FIELD_FETCH_SIZE`,
+  `MAX_FIELD_FETCH_SIZE`, `MAX_TABLES` and `MAX_TABLES_AND_KEYS_DIM`
+  constants, none of which had a reader.
+- Seventeen unused helpers in `utils.py` (`format_bytes`,
+  `format_number`, `format_duration_ms`, `truncate_text`, `safe_divide`,
+  `validate_app_id` and the rest of that layer) and four exception classes
+  nothing raised (`QlikAuthError`, `QlikRepositoryError`,
+  `QlikAppNotFoundError`, `QlikConfigError`). What remains in `utils.py` is
+  what the server calls: field-name writing, the XSRF key, and picking
+  Qlik's session cookie out of a jar. Their tests were rewritten to cover
+  those instead of the deleted formatters.
+- The `qlik_sense_mcp_server/engine_api.py` back-compat shim. The client
+  has lived in `engine/` since 2.0.0; the twenty places still importing
+  through the old path now import `qlik_sense_mcp_server.engine`.
+- The `git-clean` make target, which deleted `.git` and re-initialised the
+  repository.
+
 ### Fixed
 
 - Documentation consistency pass across the whole doc set. The tool count
@@ -48,6 +88,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   said 28. The list names all eleven Engine tools now. `mcp.json.example`
   likewise pre-approves `engine_query`, `engine_get_field_range`,
   `search_app` and `get_about`, which it had left out.
+- CI never ran on a pull request into `dev`: `test.yml` triggered on
+  `main` only, so a branch merged the way this project merges was tested
+  after the fact rather than before. Both `main` and `dev` trigger it now.
+- The 1.x leg of the SDK matrix installed `mcp>=1.1.0,<2.0.0`, below the
+  floor the package itself declares; it pins `>=1.8.0,<2.0.0` now.
 
 ## [2.2.0] - 2026-08-29
 

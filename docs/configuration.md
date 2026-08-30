@@ -87,8 +87,10 @@ Defaults match the standard
 |----------|---------|-------------|
 | `QLIK_REPOSITORY_PORT` | `4242` | Repository (QRS) API port |
 | `QLIK_ENGINE_PORT` | `4747` | Engine API WebSocket port |
-| `QLIK_PROXY_PORT` | `4243` | Reserved. Read into the configuration and currently unused: no code path builds a URL from it (ticket authentication is not implemented). |
-| `QLIK_HTTP_PORT` | unset | Reserved. Read into the configuration and currently unused: the metadata endpoint it was meant for is not implemented. |
+
+Both ports apply to certificate mode, which talks to Qlik directly. JWT
+and form mode go through the virtual proxy on the port in
+`QLIK_SERVER_URL`, so neither variable has any effect there.
 
 ## SSL
 

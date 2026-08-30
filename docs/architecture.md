@@ -25,7 +25,6 @@ qlik-sense-mcp/
 │   │   ├── fields.py     #   Values, ranges, statistics, descriptions
 │   │   ├── sheets.py     #   Sheets and their objects
 │   │   └── app_model.py  #   Data model, master items, variables
-│   ├── engine_api.py     # Back-compat import path for QlikEngineAPI
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── exceptions.py     # Error types carried into the response envelope
 │   ├── repository_api.py # Repository (HTTP/QRS) client
@@ -83,7 +82,7 @@ endpoints used by the Repository / task tools. Accepts an optional
 plus `qlik-csrf-token` header on every request instead of presenting a
 client certificate.
 
-### `QlikEngineAPI` ([engine_api.py](../qlik_sense_mcp_server/engine_api.py))
+### `QlikEngineAPI` ([engine/api.py](../qlik_sense_mcp_server/engine/api.py))
 
 WebSocket client for the Engine API. Speaks JSON-RPC 2.0. Hosts every
 data-side tool: hypercubes, fields, sheets, objects, script. Accepts

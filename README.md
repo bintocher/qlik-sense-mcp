@@ -203,7 +203,7 @@ secrets), and login/password against a "Form based" virtual proxy
   WebSocket and the same open document. Switching `app_id` closes the
   old document and opens the new one on the same socket. Dropped
   connections are reopened transparently. Implementation:
-  [`engine_api.py`](qlik_sense_mcp_server/engine_api.py) and
+  [`engine/connection.py`](qlik_sense_mcp_server/engine/connection.py) and
   [`docs/architecture.md`](docs/architecture.md).
 - **Streamable HTTP transport by default.** The server is a long-lived
   process; multiple MCP clients can talk to it in parallel. The legacy

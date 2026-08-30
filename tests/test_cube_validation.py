@@ -27,7 +27,7 @@ import re
 
 import pytest
 
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 _MODIFIER = re.compile(r"\{<.*?>\}", re.S)
 _NAME = re.compile(r"\[([^\]]+)\]|([A-Za-z_][A-Za-z_0-9]*)")

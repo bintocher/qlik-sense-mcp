@@ -1,4 +1,4 @@
-.PHONY: help install dev clean build test version-patch version-minor version-major publish create-pr git-clean
+.PHONY: help install dev clean build test version-patch version-minor version-major publish create-pr
 
 # Default target
 help:
@@ -13,7 +13,6 @@ help:
 	@echo "  version-major  - Bump major version and create PR"
 	@echo "  publish        - Publish to PyPI (automated via GitHub Actions)"
 	@echo "  create-pr      - Create pull request for current changes"
-	@echo "  git-clean      - Clean git history (DESTRUCTIVE)"
 
 # Development setup
 install:
@@ -41,17 +40,17 @@ test:
 # Version bumping with PR creation
 version-patch:
 	@echo "Bumping patch version..."
-	uv run bump2version patch
+	uv run bump-my-version bump patch
 	$(MAKE) create-pr
 
 version-minor:
 	@echo "Bumping minor version..."
-	uv run bump2version minor
+	uv run bump-my-version bump minor
 	$(MAKE) create-pr
 
 version-major:
 	@echo "Bumping major version..."
-	uv run bump2version major
+	uv run bump-my-version bump major
 	$(MAKE) create-pr
 
 # Create pull request
@@ -69,13 +68,3 @@ create-pr:
 publish: build
 	@echo "Publishing via GitHub Actions - create and push a version tag"
 	@echo "Example: git tag v1.0.0 && git push origin v1.0.0"
-
-# Clean git history (DESTRUCTIVE)
-git-clean:
-	@echo "WARNING: This will completely reset git history!"
-	@read -p "Are you sure? (y/N): " confirm && [ "$$confirm" = "y" ] || exit 1
-	rm -rf .git
-	git init
-	git add .
-	git commit -m "chore: initial commit"
-	@echo "Git history cleaned. Set remote with: git remote add origin <url>"

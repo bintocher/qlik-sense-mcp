@@ -18,7 +18,7 @@ import pytest
 
 from qlik_sense_mcp_server import server as srv
 from qlik_sense_mcp_server.tools import context
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 class _SharedSocketEngine(QlikEngineAPI):
