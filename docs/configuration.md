@@ -103,20 +103,27 @@ Defaults match the standard
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | Root log level (`DEBUG`, `INFO`, `WARNING`, ...). |
-| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go — stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+| `LOG_LEVEL` | `INFO` | Root log level: one of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` is very verbose - it logs every Engine API frame, which is what you need to troubleshoot hypercube performance. |
+| `QLIK_LOG_FILE` | unset | Also write the log to this file. Over stdio there is nowhere else for it to go - stdout carries the protocol and MCP clients generally swallow the server's stderr. The log records every tool call with its arguments, which is what you need to see what a model actually asked for. |
+| `QLIK_LOG_REPLIES` | `false` | Set to `true` to log the body of each reply as well as the call (truncated to 4000 characters). Off by default: replies carry data, and data does not belong in a log unless someone asked for it. Turn it on to audit what a model was actually shown. |
 
-## Timeouts and retries
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to BOTH the WS handshake AND every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
-
-## Logging
+## Timeouts
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | One of `DEBUG`, `INFO`, `WARNING`, `ERROR`. `DEBUG` is very verbose — it logs every Engine API frame, useful for troubleshooting hypercube performance. |
+| `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to both the WS handshake and every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
+
+There are no retry-count or HTTP-timeout variables: the connection cache
+decides on its own when to re-check a socket (it trusts one that answered
+less than 30 seconds ago, and probes an older one with a bounded
+`EngineVersion` request), and those thresholds are constants rather than
+configuration.
+
+## Transport
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_PORT` | `8000` | Port the Streamable HTTP transport listens on. The bind address is always `127.0.0.1`, so the server is reachable from the local machine only. Ignored in stdio mode (`--stdio`). |
 
 ## Sample `.env`
 
@@ -125,8 +132,29 @@ See [`.env.example`](../.env.example) at the repository root for a copy-pasteabl
 ## MCP client configuration
 
 The blocks below are complete examples of registering the server in an
-MCP client config. The examples use Streamable HTTP (the default), so the
-client connects to the long-lived server process you start manually.
+MCP client config. They use the `command` form, in which the client
+spawns the server itself and talks to it over stdio - hence the `--stdio`
+argument. Without it the process starts in Streamable HTTP mode and the
+client never sees a reply.
+
+To use the default Streamable HTTP transport instead, start the server
+yourself (`uvx qlik-sense-mcp-server`, with the `QLIK_*` variables in the
+environment or in a `.env` file beside it) and point the client at the
+running process rather than spawning one:
+
+```jsonc
+{
+  "mcpServers": {
+    "qlik-sense": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+The exact key for an HTTP server varies by client (`type`, `transport`,
+or a bare `url`); check your client's documentation.
 
 ### Cert mode
 
@@ -135,7 +163,7 @@ client connects to the long-lived server process you start manually.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com",
         "QLIK_USER_DIRECTORY": "COMPANY",
@@ -168,7 +196,7 @@ overrides.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
         "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
@@ -188,7 +216,7 @@ overrides available for non-default login pages.
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/forms",
         "QLIK_USER_DIRECTORY": "COMPANY",

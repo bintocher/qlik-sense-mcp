@@ -1,7 +1,7 @@
 # Quick Commands Reference
 
 Quick reference. For full documentation see `docs/`:
-`installation.md` (install + certs) · `configuration.md` (env vars) · `usage.md` (MCP client setup) · `tools.md` (tool catalog) · `development.md` (dev + tests) · `architecture.md` · `troubleshooting.md` · `AUTH_JWT.md` (JWT mode).
+`installation.md` (install + certs) · `configuration.md` (env vars) · `usage.md` (MCP client setup) · `tools.md` (tool catalog) · `development.md` (dev + tests) · `architecture.md` · `troubleshooting.md` · `llm-behaviour.md` (measured model behaviour) · `AUTH_JWT.md` (JWT mode) · `AUTH_FORM.md` (login/password mode).
 
 ## Run
 
@@ -43,14 +43,14 @@ See `docs/development.md` for tests, lint, and contribution flow.
 ## Release
 
 ```bash
-# Bump version, open PR (current line: 1.6.0)
-make version-patch  # 1.6.0 -> 1.6.1
-make version-minor  # 1.6.0 -> 1.7.0
-make version-major  # 1.6.0 -> 2.0.0
+# Bump version, open PR (current line: 2.2.0)
+make version-patch  # 2.2.0 -> 2.2.1
+make version-minor  # 2.2.0 -> 2.3.0
+make version-major  # 2.2.0 -> 3.0.0
 
-# After PR merge: tag and push — GitHub Actions publishes to PyPI
-git tag v1.6.0
-git push origin v1.6.0
+# After PR merge: tag and push - GitHub Actions publishes to PyPI
+git tag v2.2.1
+git push origin v2.2.1
 ```
 
 ## Query a top-N (the most common analysis call)

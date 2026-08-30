@@ -3,7 +3,7 @@
 ## System requirements
 
 - Python 3.12 (the version pinned in [`pyproject.toml`](../pyproject.toml))
-- MCP Python SDK `>=1.1.0,<3.0.0` — installed automatically. Both the
+- MCP Python SDK `>=1.8.0,<3.0.0` — installed automatically. Both the
   1.x (`FastMCP`) and 2.x (`MCPServer`) lines are supported; the server
   detects which one is present at import time.
 - Qlik Sense Enterprise with Repository API on port 4242 and Engine API on port 4747 (the [standard Qlik Sense Enterprise port allocation](https://help.qlik.com/en-US/sense-admin/Subsystems/DeployAdministerQSE/Content/Sense_DeployAdminister/QSEoW/Deploy_QSEoW/Ports.htm))
@@ -26,12 +26,14 @@ uvx qlik-sense-mcp-server
 To pin a specific version:
 
 ```bash
-uvx qlik-sense-mcp-server@1.8.0
+uvx qlik-sense-mcp-server@2.2.0
 ```
 
-Do not pin below 1.6.1: earlier releases declare `mcp>=1.1.0` with no
-upper bound, so a fresh install resolves to MCP SDK 2.x and fails at
-import with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'`.
+Do not pin below 1.6.1: earlier releases declare the MCP SDK with no upper
+bound, so a fresh install resolves to SDK 2.x and fails at import with
+`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`. The floor is
+`mcp>=1.8.0` because `FastMCP.run_streamable_http_async()`, which serves
+the default transport, first appears there.
 
 ## Install from PyPI via pip
 

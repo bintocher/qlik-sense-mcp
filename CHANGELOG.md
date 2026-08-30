@@ -6,10 +6,35 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Fixed
+
+- Documentation consistency pass across the whole doc set. The tool count
+  is 28 everywhere (`README.md` said 27 in one table, `usage.md` said 24);
+  the authentication section of `usage.md` lists all three modes instead
+  of the two it knew before form login was added; `configuration.md` no
+  longer carries two separate "Logging" sections with different contents;
+  `installation.md` states the real MCP SDK floor (`mcp>=1.8.0,<3.0.0`,
+  matching `pyproject.toml`) and pins the current release in its `uvx`
+  example; and the project layout in `architecture.md` lists the modules
+  that were added since it was written (`tools/schema.py`,
+  `engine/queries.py`, `engine/expressions.py`, `engine/filters.py`,
+  `exceptions.py`).
+- Every MCP client example that spawns the server now passes `--stdio`.
+  Without it the process starts in Streamable HTTP mode and a client that
+  spawned it over stdio never gets a reply, so the examples in
+  `configuration.md`, `AUTH_JWT.md`, `AUTH_FORM.md` and `mcp.json.example`
+  could not work as printed. `configuration.md` also shows the HTTP form
+  of the same registration, for the long-lived server it describes.
+- `QLIK_LOG_REPLIES` and `MCP_PORT` are documented; they existed in the
+  code with no mention anywhere. `.env.example` no longer describes an
+  HTTP timeout and a retry count that are not settings, and now covers
+  JWT mode, form-mode overrides and `QLIK_TASK_TOOLS`.
+
 ## [2.2.0] - 2026-08-29
 
-Первая сборка, в которой едут обе линии работы: накопленное в 2.0.2 (она была
-выпущена в PyPI, но в основную ветку не вливалась) и вход по логину и паролю.
+The first build carrying both lines of work: everything accumulated in
+2.0.2 (released to PyPI but never merged into the main branch) and the
+login/password authentication mode.
 
 ## [2.1.0] - 2026-08-29
 

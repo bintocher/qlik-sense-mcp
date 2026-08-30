@@ -127,7 +127,7 @@ equivalent for your client):
   "mcpServers": {
     "qlik": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://qlik.company.com/jwt",
         "QLIK_JWT_TOKEN": "eyJhbGciOiJSUzI1NiJ9...."
@@ -136,6 +136,12 @@ equivalent for your client):
   }
 }
 ```
+
+`--stdio` is required in this form: the client spawns the server and talks
+to it over stdio, while the process defaults to Streamable HTTP when
+started without that flag. To use the HTTP transport instead, start the
+server yourself and point the client at `http://127.0.0.1:8000/mcp` - see
+[configuration.md](configuration.md#mcp-client-configuration).
 
 `uvx` comes with [uv](https://docs.astral.sh/uv/). If the analyst does not
 have it yet, install once: `pip install uv` (or via the OS package

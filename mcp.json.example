@@ -2,7 +2,7 @@
   "mcpServers": {
     "qlik-sense": {
       "command": "uvx",
-      "args": ["qlik-sense-mcp-server"],
+      "args": ["qlik-sense-mcp-server", "--stdio"],
       "env": {
         "QLIK_SERVER_URL": "https://your-qlik-server",
         "QLIK_USER_DIRECTORY": "your-domain",
