@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-30
+
 ### Changed
 
 - Dependency floors moved up to the lines this release is developed and
@@ -78,11 +80,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   private CA to the trust store. Certificate paths, user directory and
   user id were listed as requirements for everyone; each is now tied to
   the mode that needs it.
-- `QLIK_PROXY_PORT` and `QLIK_HTTP_PORT` are marked reserved and unused.
-  Both are read into the configuration, but nothing builds a request from
-  them: ticket authentication and the metadata endpoint they were meant
-  for do not exist in this server. They are out of the client config
-  examples for the same reason.
 - The `--help` tool list was missing `engine_query`, the main analysis
   tool, while the count printed beside it came from the live registry and
   said 28. The list names all eleven Engine tools now. `mcp.json.example`

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qlik-sense-mcp-server"
-version = "2.2.0"
+version = "2.3.0"
 description = "MCP Server for Qlik Sense Enterprise APIs"
 readme = "README.md"
 license = {text = "MIT"}
@@ -59,11 +59,15 @@ Issues = "https://github.com/bintocher/qlik-sense-mcp/issues"
 qlik-sense-mcp-server = "qlik_sense_mcp_server.server:main"
 
 [tool.bumpversion]
-current_version = "2.2.0"
+current_version = "2.3.0"
 parse = '(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
 serialize = ["{major}.{minor}.{patch}"]
 commit = true
 tag = false
+# Plain ASCII: the default message uses an arrow character, and this
+# project keeps its history to keyboard characters.
+message = "Bump version: {current_version} to {new_version}"
+
 
 [[tool.bumpversion.files]]
 filename = "pyproject.toml"
