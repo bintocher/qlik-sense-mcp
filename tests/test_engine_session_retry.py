@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 
 from qlik_sense_mcp_server.config import QlikSenseConfig
 from qlik_sense_mcp_server.exceptions import QlikLicenseError
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 class _CountingFormSessionStub:

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from qlik_sense_mcp_server.config import QlikSenseConfig
-from qlik_sense_mcp_server.engine_api import QlikEngineAPI
+from qlik_sense_mcp_server.engine import QlikEngineAPI
 
 
 class _Session:

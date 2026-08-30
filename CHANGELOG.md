@@ -6,10 +6,99 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+### Changed
+
+- Dependency floors moved up to the lines this release is developed and
+  tested against: `httpx>=0.28`, `pydantic>=2.13`, `python-dotenv>=1.2`,
+  `websocket-client>=1.9`, `PyJWT>=2.13`, `cryptography>=50.0`, and for
+  development `build>=1.6`, `twine>=7.0`, `pytest>=9.0`,
+  `pytest-asyncio>=1.4`. They are minor-level, so a newer patch is always
+  welcome. The MCP SDK range is unchanged at `>=1.8.0,<3.0.0` - both SDK
+  lines stay supported.
+- Version bumping moved from bump2version, which has had no release since
+  2020, to [bump-my-version](https://pypi.org/project/bump-my-version/).
+  Its configuration lives in `[tool.bumpversion]` in `pyproject.toml`
+  beside the version it bumps, and `.bumpversion.cfg` is gone. That file
+  had also gone stale: it still said `current_version = 2.0.2`, so the
+  next `make version-patch` would have produced 2.0.3 rather than 2.2.1.
+
+### Removed
+
+- Configuration that reached nothing: `QLIK_PROXY_PORT` and
+  `QLIK_HTTP_PORT` were read into the config object, and no code path
+  built a request from either - ticket authentication and the metadata
+  endpoint they were meant for do not exist in this server. With them go
+  the `proxy_port` / `http_port` fields and the `DEFAULT_PROXY_PORT`,
+  `DEFAULT_TICKET_TIMEOUT`, `DEFAULT_FIELD_FETCH_SIZE`,
+  `MAX_FIELD_FETCH_SIZE`, `MAX_TABLES` and `MAX_TABLES_AND_KEYS_DIM`
+  constants, none of which had a reader.
+- Seventeen unused helpers in `utils.py` (`format_bytes`,
+  `format_number`, `format_duration_ms`, `truncate_text`, `safe_divide`,
+  `validate_app_id` and the rest of that layer) and four exception classes
+  nothing raised (`QlikAuthError`, `QlikRepositoryError`,
+  `QlikAppNotFoundError`, `QlikConfigError`). What remains in `utils.py` is
+  what the server calls: field-name writing, the XSRF key, and picking
+  Qlik's session cookie out of a jar. Their tests were rewritten to cover
+  those instead of the deleted formatters.
+- The `qlik_sense_mcp_server/engine_api.py` back-compat shim. The client
+  has lived in `engine/` since 2.0.0; the twenty places still importing
+  through the old path now import `qlik_sense_mcp_server.engine`.
+- The `git-clean` make target, which deleted `.git` and re-initialised the
+  repository.
+
+### Fixed
+
+- Documentation consistency pass across the whole doc set. The tool count
+  is 28 everywhere (`README.md` said 27 in one table, `usage.md` said 24);
+  the authentication section of `usage.md` lists all three modes instead
+  of the two it knew before form login was added; `configuration.md` no
+  longer carries two separate "Logging" sections with different contents;
+  `installation.md` states the real MCP SDK floor (`mcp>=1.8.0,<3.0.0`,
+  matching `pyproject.toml`) and pins the current release in its `uvx`
+  example; and the project layout in `architecture.md` lists the modules
+  that were added since it was written (`tools/schema.py`,
+  `engine/queries.py`, `engine/expressions.py`, `engine/filters.py`,
+  `exceptions.py`).
+- Every MCP client example that spawns the server now passes `--stdio`.
+  Without it the process starts in Streamable HTTP mode and a client that
+  spawned it over stdio never gets a reply, so the examples in
+  `configuration.md`, `AUTH_JWT.md`, `AUTH_FORM.md` and `mcp.json.example`
+  could not work as printed. `configuration.md` also shows the HTTP form
+  of the same registration, for the long-lived server it describes.
+- `QLIK_LOG_REPLIES` and `MCP_PORT` are documented; they existed in the
+  code with no mention anywhere. `.env.example` no longer describes an
+  HTTP timeout and a retry count that are not settings, and now covers
+  JWT mode, form-mode overrides and `QLIK_TASK_TOOLS`.
+- Three statements that would have misconfigured a working deployment.
+  The virtual proxy prefix in `QLIK_SERVER_URL` was described as required
+  in form mode as well as JWT; it is required only in JWT mode, and a
+  form-based auth module can sit on the central proxy. A missing
+  `QLIK_CA_CERT_PATH` was said to disable TLS verification; verification
+  is governed by `QLIK_VERIFY_SSL` alone, and the CA path only adds a
+  private CA to the trust store. Certificate paths, user directory and
+  user id were listed as requirements for everyone; each is now tied to
+  the mode that needs it.
+- `QLIK_PROXY_PORT` and `QLIK_HTTP_PORT` are marked reserved and unused.
+  Both are read into the configuration, but nothing builds a request from
+  them: ticket authentication and the metadata endpoint they were meant
+  for do not exist in this server. They are out of the client config
+  examples for the same reason.
+- The `--help` tool list was missing `engine_query`, the main analysis
+  tool, while the count printed beside it came from the live registry and
+  said 28. The list names all eleven Engine tools now. `mcp.json.example`
+  likewise pre-approves `engine_query`, `engine_get_field_range`,
+  `search_app` and `get_about`, which it had left out.
+- CI never ran on a pull request into `dev`: `test.yml` triggered on
+  `main` only, so a branch merged the way this project merges was tested
+  after the fact rather than before. Both `main` and `dev` trigger it now.
+- The 1.x leg of the SDK matrix installed `mcp>=1.1.0,<2.0.0`, below the
+  floor the package itself declares; it pins `>=1.8.0,<2.0.0` now.
+
 ## [2.2.0] - 2026-08-29
 
-Первая сборка, в которой едут обе линии работы: накопленное в 2.0.2 (она была
-выпущена в PyPI, но в основную ветку не вливалась) и вход по логину и паролю.
+The first build carrying both lines of work: everything accumulated in
+2.0.2 (released to PyPI but never merged into the main branch) and the
+login/password authentication mode.
 
 ## [2.1.0] - 2026-08-29
 

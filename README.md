@@ -95,7 +95,7 @@ secrets), and login/password against a "Form based" virtual proxy
 | [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) | JWT authentication via virtual proxy: key generation, virtual proxy setup, `QLIK_JWT_TOKEN` usage |
 | [`docs/AUTH_FORM.md`](docs/AUTH_FORM.md) | Login/password authentication via a "Form based" virtual proxy: how the login flow works, `QLIK_PASSWORD` usage, overrides for non-default login pages |
 | [`docs/usage.md`](docs/usage.md) | Transports, server start commands, recommended call order, hard limits enforced by this server |
-| [`docs/tools.md`](docs/tools.md) | Inventory of all 27 tools, response/error envelope, error categories |
+| [`docs/tools.md`](docs/tools.md) | Inventory of all 28 tools, response/error envelope, error categories |
 | [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
 | [`docs/development.md`](docs/development.md) | `make` targets, tests, versioning, how to add a new tool |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
@@ -154,7 +154,7 @@ secrets), and login/password against a "Form based" virtual proxy
 
 - **Runs on both MCP SDK lines.** SDK 2.0 dropped `FastMCP`; the server
   now picks `MCPServer` (2.x) or `FastMCP` (1.x) at import time, so
-  `mcp>=1.1.0,<3.0.0` all work. Both lines are covered by the test
+  `mcp>=1.8.0,<3.0.0` all work. Both lines are covered by the test
   suite and were verified end to end against a live Qlik app.
 
 - **Ranked queries (top-N) in one call.** `engine_create_hypercube`
@@ -203,7 +203,7 @@ secrets), and login/password against a "Form based" virtual proxy
   WebSocket and the same open document. Switching `app_id` closes the
   old document and opens the new one on the same socket. Dropped
   connections are reopened transparently. Implementation:
-  [`engine_api.py`](qlik_sense_mcp_server/engine_api.py) and
+  [`engine/connection.py`](qlik_sense_mcp_server/engine/connection.py) and
   [`docs/architecture.md`](docs/architecture.md).
 - **Streamable HTTP transport by default.** The server is a long-lived
   process; multiple MCP clients can talk to it in parallel. The legacy
@@ -226,6 +226,8 @@ secrets), and login/password against a "Form based" virtual proxy
 - Qlik Sense Enterprise (Repository on port 4242, Engine on port 4747 — the
   [standard ports](https://help.qlik.com/en-US/sense-admin/Subsystems/DeployAdministerQSE/Content/Sense_DeployAdminister/QSEoW/Deploy_QSEoW/Ports.htm))
 - Client certificate, private key and root CA from the Qlik Sense node
+  (certificate mode only - JWT and form mode need nothing on disk beyond
+  the token or the password)
 - Network access from the host running this server to Qlik
 
 ## Disclaimer

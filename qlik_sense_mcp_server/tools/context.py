@@ -44,7 +44,7 @@ except ImportError:  # mcp < 2.0
 
 from ..config import QlikSenseConfig, AUTH_MODE_JWT, AUTH_MODE_FORM, AUTH_MODE_CERTIFICATE
 from ..repository_api import QlikRepositoryAPI
-from ..engine_api import QlikEngineAPI
+from ..engine import QlikEngineAPI
 from ..jwt_session import JwtSession
 from ..form_session import FormSession
 

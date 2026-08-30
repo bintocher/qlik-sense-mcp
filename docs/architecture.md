@@ -10,18 +10,23 @@ qlik-sense-mcp/
 │   ├── tools/            # MCP tools, grouped by the API they talk to
 │   │   ├── context.py    #   MCP host + API clients shared by every tool
 │   │   ├── helpers.py    #   Response envelope, timing, argument coercion
+│   │   ├── schema.py     #   Typed query shape: Query, Metric, Filter, Scope
 │   │   ├── repository.py #   get_about, get_apps, get_app_details
 │   │   ├── engine.py     #   script, fields, sheets, hypercubes
-│   │   └── tasks.py      #   reload tasks (certificate mode only)
+│   │   └── tasks.py      #   reload tasks (on by default in certificate
+│   │                     #   mode, opt-in elsewhere via QLIK_TASK_TOOLS)
 │   ├── engine/           # Engine API client, split by responsibility
 │   │   ├── api.py        #   QlikEngineAPI: assembles the mixins below
 │   │   ├── connection.py #   WebSocket, greeting, liveness, JSON-RPC
 │   │   ├── hypercube.py  #   Sorting, limits, page completion
+│   │   ├── queries.py    #   engine_query: a stated query, written and run
+│   │   ├── expressions.py#   Expression checks performed by Qlik itself
+│   │   ├── filters.py    #   Filters written as set analysis, and proven
 │   │   ├── fields.py     #   Values, ranges, statistics, descriptions
 │   │   ├── sheets.py     #   Sheets and their objects
 │   │   └── app_model.py  #   Data model, master items, variables
-│   ├── engine_api.py     # Back-compat import path for QlikEngineAPI
 │   ├── config.py         # QlikSenseConfig + defaults
+│   ├── exceptions.py     # Error types carried into the response envelope
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
 │   ├── form_session.py   # Login/password session bootstrap + cache
@@ -77,7 +82,7 @@ endpoints used by the Repository / task tools. Accepts an optional
 plus `qlik-csrf-token` header on every request instead of presenting a
 client certificate.
 
-### `QlikEngineAPI` ([engine_api.py](../qlik_sense_mcp_server/engine_api.py))
+### `QlikEngineAPI` ([engine/api.py](../qlik_sense_mcp_server/engine/api.py))
 
 WebSocket client for the Engine API. Speaks JSON-RPC 2.0. Hosts every
 data-side tool: hypercubes, fields, sheets, objects, script. Accepts
