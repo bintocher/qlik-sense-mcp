@@ -32,10 +32,13 @@ Sources:
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import ssl
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -59,8 +62,61 @@ DEFAULT_JWT_SESSION_TTL_SECONDS = 25 * 60
 BOOTSTRAP_TIMEOUT_SECONDS = 60.0
 
 
+# A token that starts being valid a little later than this machine's clock
+# says is clock drift, not a wrong token; the signer backdates iat for the
+# same reason.
+CLOCK_SKEW_SECONDS = 60
+
+# Said with every problem found in the token itself, because the model
+# reading the error otherwise goes looking for a broken proxy, a deleted app
+# or a network fault, and retries.
+_TOKEN_REMEDY = (
+    "Qlik and the apps are fine; retrying will not help. Ask the Qlik "
+    "administrator for a new token and put it into QLIK_JWT_TOKEN."
+)
+
+
 class JwtBootstrapError(RuntimeError):
     """Raised when /qps/csrftoken bootstrap fails irrecoverably."""
+
+
+def _utc(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def token_problem(token: str, now: Optional[float] = None) -> Optional[str]:
+    """What is wrong with the token as such, read from its payload; None if nothing.
+
+    The signature cannot be checked here - only the virtual proxy holds the
+    certificate - but expiry and shape can, and they are what goes wrong in
+    practice. Checking them first matters because the proxy answers every
+    unusable token with the same bare HTTP 400: measured against a live
+    virtual proxy, an expired token, a wrong signature and a string that is
+    not a JWT at all are indistinguishable from its reply.
+    """
+    now = time.time() if now is None else now
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return ("QLIK_JWT_TOKEN is not a valid JWT (expected three parts "
+                "separated by dots). " + _TOKEN_REMEDY)
+    try:
+        segment = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(segment))
+    except (ValueError, TypeError):
+        return ("QLIK_JWT_TOKEN is damaged: its payload cannot be decoded. "
+                "It was probably cut short or altered when copied. " + _TOKEN_REMEDY)
+    if not isinstance(claims, dict):
+        return "QLIK_JWT_TOKEN is damaged: its payload is not a JSON object. " + _TOKEN_REMEDY
+
+    exp = claims.get("exp")
+    if isinstance(exp, (int, float)) and exp <= now:
+        return f"QLIK_JWT_TOKEN expired on {_utc(exp)}. " + _TOKEN_REMEDY
+    nbf = claims.get("nbf")
+    if isinstance(nbf, (int, float)) and nbf > now + CLOCK_SKEW_SECONDS:
+        return (f"QLIK_JWT_TOKEN is not valid until {_utc(nbf)}. If that "
+                "date is right, wait; otherwise check the clock on this "
+                "machine.")
+    return None
 
 
 class JwtSession:
@@ -267,6 +323,9 @@ class JwtSession:
                 "virtual_proxy_prefix is empty — set QLIK_SERVER_URL to include "
                 "the VP prefix, e.g. https://qlik.company.com/jwt"
             )
+        problem = token_problem(cfg.jwt_token)
+        if problem:
+            raise JwtBootstrapError(problem)
 
         url = f"{cfg.qlik_base_host}/{cfg.virtual_proxy_prefix}/qps/csrftoken"
         headers = {
@@ -299,6 +358,15 @@ class JwtSession:
                 "common cause: the client hostname is not in the VP Host "
                 "allow list in QMC. Add the exact hostname (no IP) used in "
                 "QLIK_SERVER_URL to the VP allow list and retry."
+            )
+        if resp.status_code == 400:
+            raise JwtBootstrapError(
+                "csrftoken returned 400 — the virtual proxy did not accept "
+                "QLIK_JWT_TOKEN. The token is not expired, so it was most "
+                "likely signed with a different key than the one the proxy "
+                "trusts, or it names a user or directory the proxy does not "
+                "expect. " + _TOKEN_REMEDY + " If a new token fails the same "
+                "way, the virtual proxy may not be linked to the Central Proxy."
             )
         if resp.status_code >= 400:
             raise JwtBootstrapError(

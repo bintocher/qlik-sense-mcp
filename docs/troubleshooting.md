@@ -47,9 +47,12 @@ of hitting the QRS / Engine ports directly. The most common failures:
   Token expired, claim names mismatched with QMC, wrong certificate in
   QMC, or the user is unknown to Qlik. See
   [`AUTH_JWT.md` → "csrftoken returned 401"](AUTH_JWT.md#csrftoken-returned-401--jwt-rejected-by-the-virtual-proxy).
-- **`csrftoken returned 400` — VP not linked to Central Proxy.** In a
-  multi-node cluster a prefixed VP that is not linked to the Central
-  Proxy is rejected by every proxy with a styled HTML 400 page. See
+- **`QLIK_JWT_TOKEN expired on ...`, `is not a valid JWT`, `is damaged`.**
+  Found in the token itself before Qlik is contacted; issue a new token.
+- **`csrftoken returned 400` — token refused or VP not linked to Central
+  Proxy.** A well-formed, unexpired token signed with the wrong key gets
+  this 400. So does every request in a multi-node cluster whose prefixed
+  VP is not linked to the Central Proxy (a styled HTML 400 page). See
   [`AUTH_JWT.md` → "csrftoken returned 400"](AUTH_JWT.md#csrftoken-returned-400--vp-is-not-linked-to-central-proxy).
 - **`csrftoken returned 403` — VP refused.** Hostname in
   `QLIK_SERVER_URL` is not in the VP **Host allow list**. See
