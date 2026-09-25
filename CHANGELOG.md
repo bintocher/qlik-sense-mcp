@@ -6,6 +6,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-09-25
+
+### Fixed
+
+- JWT mode: an expired, not-yet-valid or malformed `QLIK_JWT_TOKEN` is now
+  reported as exactly that, with the expiry date and the remedy (issue a new
+  token), before any request reaches Qlik. The virtual proxy answers every
+  unusable token with the same bare HTTP 400, so the error used to read
+  "csrftoken returned HTTP 400: <html page>" and sent the model looking for a
+  changed proxy, rotated keys or a deleted app.
+- JWT mode: HTTP 400 for a token that is well-formed and not expired now
+  says the proxy refused the token instead of quoting the HTML error page.
+
 ## [2.3.0] - 2026-08-30
 
 ### Changed

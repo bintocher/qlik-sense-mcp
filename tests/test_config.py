@@ -51,7 +51,7 @@ class TestAuthModeResolution:
     def test_jwt_token_wins_over_password(self):
         config = QlikSenseConfig(server_url="https://qlik.example.com/jwt",
                                  user_id="ivanov", password="s3cret",
-                                 jwt_token="header.payload.signature")
+                                 jwt_token="eyJhbGciOiJSUzI1NiJ9.e30.c2lnbmF0dXJl")
         assert config.auth_mode == "jwt"
 
     @patch.dict(os.environ, {
