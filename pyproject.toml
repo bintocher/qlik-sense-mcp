@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qlik-sense-mcp-server"
-version = "2.3.0"
+version = "2.3.1"
 description = "MCP Server for Qlik Sense Enterprise APIs"
 readme = "README.md"
 license = {text = "MIT"}
@@ -59,7 +59,7 @@ Issues = "https://github.com/bintocher/qlik-sense-mcp/issues"
 qlik-sense-mcp-server = "qlik_sense_mcp_server.server:main"
 
 [tool.bumpversion]
-current_version = "2.3.0"
+current_version = "2.3.1"
 parse = '(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)'
 serialize = ["{major}.{minor}.{patch}"]
 commit = true
