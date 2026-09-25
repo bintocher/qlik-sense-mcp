@@ -29,7 +29,7 @@ class _Session:
 
 
 def _client(server_url):
-    config = QlikSenseConfig(server_url=server_url, jwt_token="jwt-payload")
+    config = QlikSenseConfig(server_url=server_url, jwt_token="eyJhbGciOiJSUzI1NiJ9.e30.c2lnbmF0dXJl")
     return QlikEngineAPI(config, jwt_session=_Session())
 
 
