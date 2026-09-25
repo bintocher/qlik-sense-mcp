@@ -265,6 +265,21 @@ Most common causes:
    identify a user that Qlik recognizes. Disabled / nonexistent users are
    rejected.
 
+### `QLIK_JWT_TOKEN expired on ...` / `is not a valid JWT` / `is damaged`
+
+The server reads `exp`, `nbf` and the token's shape before it contacts
+Qlik, and stops there: the virtual proxy answers every unusable token with
+the same bare HTTP 400, so its reply cannot tell an expired token from a
+wrong signature. Nothing is wrong with Qlik; issue a new token and replace
+`QLIK_JWT_TOKEN`.
+
+### `csrftoken returned 400 — the virtual proxy did not accept QLIK_JWT_TOKEN`
+
+The token is well-formed and not expired, yet the proxy refused it: it was
+signed with a key other than the one in the VP's JWT certificate, or its
+claims name a user or directory the VP does not expect. If a freshly issued
+token fails the same way, check the Central Proxy link below.
+
 ### `csrftoken returned 400 — VP is not linked to Central Proxy`
 
 In a multi-node Qlik cluster, any request to a prefixed virtual proxy

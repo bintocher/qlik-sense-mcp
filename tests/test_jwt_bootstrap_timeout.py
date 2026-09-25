@@ -42,7 +42,7 @@ class _Client:
 def _session():
     return JwtSession(QlikSenseConfig(
         server_url="https://qlik.example.com/jwt",
-        jwt_token="header.payload.signature"))
+        jwt_token="eyJhbGciOiJSUzI1NiJ9.e30.c2lnbmF0dXJl"))
 
 
 class TestBootstrapDeadline:
