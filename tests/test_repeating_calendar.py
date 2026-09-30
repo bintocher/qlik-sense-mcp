@@ -97,7 +97,7 @@ class TestTheWarning:
         [spread] = reply["fan_out_check"]
         assert spread == {"field": "Month", "table": "Facts", "key": "MonthKey",
                           "key_values": 13, "per_value": 13.0,
-                          "belong_to_values": 9, "repeating_table": "Accumulated"}
+                          "belong_to_values": 9, "repeating_tables": ["Accumulated"]}
         note = reply["warnings"][0]
         assert note.startswith("The filter on [Month] ('2026-08') reaches Facts "
                                "through 13 values of [MonthKey]")
@@ -190,3 +190,60 @@ class TestThePlainLayer:
                         "date stands for several rows. One row per date, the date "
                         "itself: [Layer] = 'Month' - set it with every filter on "
                         "this calendar, e.g. {<[Layer]={'Month'}>}.")
+
+
+CHAIN = [
+    _field("FactKey", "Facts", 1_000_000, 33, DATE),
+    _field("Amount", "Facts", 1_000_000, 50_000),
+    _field("FactKey", "Shift", 63, 33, DATE),
+    _field("MonthLink", "Shift", 63, 21, DATE),
+    _field("MonthLink", "Cumulative", 669, 21, DATE),
+    _field("Month", "Cumulative", 669, 21, ("$text",)),
+]
+
+
+class _ChainEngine(_Engine):
+    """Counted back through each key, the field reaches `through`."""
+
+    def __init__(self, through):
+        super().__init__(known=("Region", "Amount", "Month", "MonthLink", "FactKey"))
+        self.through = through
+
+    def _model_fields(self, app_handle):
+        return CHAIN
+
+    def plain_layers(self, app_handle, raw_fields):
+        return []
+
+    def _evaluate(self, expression):
+        for key, count in self.through.items():
+            if f"[{key}]=P(" in expression:
+                return {"qText": str(count), "qNumber": count, "qIsNumeric": True}
+        if "DISTINCT [FactKey]" in expression:
+            return {"qText": "3", "qNumber": 3, "qIsNumeric": True}
+        if "DISTINCT [Month]" in expression:
+            return {"qText": "1", "qNumber": 1, "qIsNumeric": True}
+        return super()._evaluate(expression)
+
+
+class TestWhichTableRepeats:
+    """Live, a month on a cumulative calendar behind a shift calendar was
+    blamed on the cumulative one although the shift one did it."""
+
+    def _spread(self, through):
+        reply = _ChainEngine(through).run_queries(1, "app", [_query(
+            filters=[{"field": "Month", "values": ["2026-08"]}])])["results"][0]
+        return reply["fan_out_check"][0], reply["warnings"][0]
+
+    def test_the_shift_calendar_alone(self):
+        spread, note = self._spread({"MonthLink": 1, "FactKey": 5})
+        assert spread["repeating_tables"] == ["Shift"]
+        assert "Shift holds 63 rows" in note and "Cumulative holds" not in note
+
+    def test_the_cumulative_calendar_alone(self):
+        spread, _ = self._spread({"MonthLink": 12, "FactKey": 12})
+        assert spread["repeating_tables"] == ["Cumulative"]
+
+    def test_both(self):
+        spread, _ = self._spread({"MonthLink": 12, "FactKey": 13})
+        assert spread["repeating_tables"] == ["Cumulative", "Shift"]

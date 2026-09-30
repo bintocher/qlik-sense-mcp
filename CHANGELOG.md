@@ -58,7 +58,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `{filter}` marker at the start of the expression is an outer set that
   reaches every aggregation inside, `{filter} [A] / [B]` or
   `{filter} (expression)`, and a measure with no marker at all takes the
-  filters the same way, said in `warnings` (`engine_create_hypercube`
+  filters the same way, said in `notes` - a note, not a doubt, so it leaves `numbers_verified` alone (`engine_create_hypercube`
   refused it before). A marker next to a set of the expression's own -
   `Sum({filter} {<Flag={1}>} X)`, `Sum({filter <Flag={1}>} X)`,
   `{filter} {<Flag={1}>} Fractile(...)`, or inside `P()` - is merged into
@@ -98,7 +98,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   field the filter names, the key values of the facts it reaches, and the
   values of the field those key values belong to; more of the last than
   the first give `fan_out_check` (`field`, `table`, `key`, `key_values`,
-  `per_value`, `belong_to_values`, `repeating_table`) and a warning that
+  `per_value`, `belong_to_values`, and `repeating_tables` - the tables on
+  the way that do repeat, found by counting the field back through each
+  one's key) and a warning that
   leads `warnings`, per query and at the top of the reply, with the
   condition for one row per date where one was found. Measured on a
   1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a

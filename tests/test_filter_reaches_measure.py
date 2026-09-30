@@ -133,7 +133,18 @@ class TestPeriodCheckReadsTheMeasure:
                 filters=[{"field": "Region", "values": ["North"]}]), 0)
         assert plan["measures"][0]["expression"] == (
             "{&<[Region]={'North'}>} Sum({<Flag={1}>} Amount)")
-        assert "'Stakes' marks no place for the filters" in plan["warnings"][0]
+        assert "'Stakes' marks no place for the filters" in plan["notes"][0]
+        assert "warnings" not in plan
+
+    def test_a_note_leaves_the_numbers_verified(self):
+        """Only a doubt about the figures may say they are unverified; where
+        the filter went is a note."""
+        reply = _Engine(known=("Region", "Amount", "OrderDate", "Flag")).run_queries(
+            1, "app", [_query(metrics=[], measures=[
+                {"expression": "Sum({<Flag={1}>} Amount)", "label": "Stakes"}],
+                filters=[{"field": "OrderDate", "period": "2011"}])])["results"][0]
+        assert "marks no place" in reply["notes"][0]
+        assert "numbers_verified" not in reply and "warnings" not in reply
 
     def test_a_shape_that_cannot_take_the_filter_is_refused(self):
         reply = _Engine().run_queries(1, "app", [_query(
@@ -190,7 +201,8 @@ class TestHypercube:
         assert [m["expression"] for m in reply["measures"]] == [
             "{&<[Region]={'North'}>} Sum({<Flag={1}>} Amount)",
             "{&<[Region]={'North'}>} Count(Amount)"]
-        assert "No measure marks where the filters go" in reply["warnings"][0]
+        assert "No measure marks where the filters go" in reply["notes"][0]
+        assert not reply["warnings"]
 
     def test_a_marker_on_one_measure_leaves_the_other_alone(self):
         engine = _Cube(drop_when="never")

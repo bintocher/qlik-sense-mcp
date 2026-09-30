@@ -700,6 +700,9 @@ class EngineHypercubeMixin:
             # hence the marker rather than a guess.
             filters_applied: List[Dict[str, Any]] = []
             outer_warnings: List[str] = []
+            # What the server did with the query, apart from doubts about
+            # its figures.
+            notes: List[str] = []
             # What the checks after the cube ask about: per measure, the
             # sets its aggregations read through, and the filter it took.
             checked: List[Dict[str, Any]] = []
@@ -759,7 +762,7 @@ class EngineHypercubeMixin:
                                     "modifier": modifier,
                                     **({"_contexts": contexts} if contexts else {})})
                 if not marked:
-                    outer_warnings.insert(0, (
+                    notes.append((
                         "No measure marks where the filters go, so each "
                         "measure took them as an outer set in front of its "
                         "whole expression, which reaches every aggregation "
@@ -1248,6 +1251,8 @@ class EngineHypercubeMixin:
                 # period actually selected and how many values of the field
                 # fall inside it.
                 response["filters_applied"] = filters_applied
+            if notes:
+                response["notes"] = notes
             if checks.get("period_check"):
                 response["period_check"] = checks["period_check"]
             if checks.get("fan_out_check"):

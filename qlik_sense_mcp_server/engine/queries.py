@@ -371,7 +371,8 @@ _PROBE_KEYS = ("earliest", "latest", "earliest_number", "latest_number",
 # The control values of a filter on a calendar whose dates repeat: how many
 # values of the field it names, how many key values of the facts it
 # reaches, and how many values of the field those key values belong to.
-_SPREAD_KEYS = ("selected", "reached", "linked", "key_earliest", "key_latest")
+_SPREAD_KEYS = ("selected", "reached", "linked", "linked_0", "linked_1",
+                "linked_2", "linked_3", "key_earliest", "key_latest")
 
 # Different sets one filter is checked under, and filters on a repeating
 # calendar checked per query: each costs a few more questions to Engine.
@@ -553,6 +554,8 @@ class EngineQueriesMixin:
         measure_warnings = []
         for measure in measures:
             measure_warnings.extend(measure.pop("warnings", None) or [])
+        measure_notes = [note for measure in measures
+                         for note in measure.pop("notes", None) or []]
         if not measures:
             return {"id": query_id, "error": (
                 f"Query {query_id!r} asks for no measure."),
@@ -580,6 +583,7 @@ class EngineQueriesMixin:
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
             **({"warnings": measure_warnings} if measure_warnings else {}),
+            **({"notes": measure_notes} if measure_notes else {}),
         }
 
     @staticmethod
@@ -1161,6 +1165,7 @@ class EngineQueriesMixin:
                     "hint": ("Add `filters`, or drop the marker — Qlik has no "
                              "meaning for it and would read it as text.")}
             warnings = []
+            notes = []
             # The sets each aggregation of the measure reads through, as
             # written: what the checks after the query ask about.
             contexts = set_contexts(master["expression"] if master is not None
@@ -1187,11 +1192,13 @@ class EngineQueriesMixin:
                     # measure, and the reply says so. Refusing cost a model
                     # three calls on one question.
                     label = str(measure.get("label") or expression)
-                    warnings = [
+                    # Said as a note: where the filter went is a fact about
+                    # the query, not a doubt about its figures.
+                    notes = [
                         f"Measure {label!r} marks no place for the filters, so "
                         f"it took them as an outer set in front of its whole "
-                        f"expression, which reaches every aggregation in it."
-                    ] + limit_warnings(label, filter_limits(expression), stated)
+                        f"expression, which reaches every aggregation in it."]
+                    warnings = limit_warnings(label, filter_limits(expression), stated)
                     try:
                         expression = place_filter(
                             FILTER_MARKER + " " + expression.lstrip("= "), own)
@@ -1233,6 +1240,8 @@ class EngineQueriesMixin:
                 written["scope"] = own_scope
             if warnings:
                 written["warnings"] = warnings
+            if notes:
+                written["notes"] = notes
             oversized = _too_long(written["expression"], query_id)
             if oversized:
                 return [], oversized
@@ -1450,6 +1459,15 @@ class EngineQueriesMixin:
                 "reached": f"=Count({within} DISTINCT {key})",
                 "linked": f"=Count({back} DISTINCT {field})",
             }
+            # The same count through the key of every repeating table on
+            # the way: where it grows is the table that repeats.
+            for position, repeat in enumerate(link["repeats"][:4]):
+                if repeat["key"] == link["key"]:
+                    continue
+                own_key = escape_qlik_field_name(repeat["key"])
+                through = _set_text(identifier, others + [
+                    f"{field}=", f"{own_key}=P({within} {own_key})"])
+                probe[f"linked_{position}"] = f"=Count({through} DISTINCT {field})"
             if link.get("temporal"):
                 probe["key_earliest"] = f"=Text(Min({within} {key}))"
                 probe["key_latest"] = f"=Text(Max({within} {key}))"
@@ -1472,12 +1490,23 @@ class EngineQueriesMixin:
         link = probe["link"]
         field = escape_qlik_field_name(probe["field"])
         key = escape_qlik_field_name(link["key"])
-        repeat = link["repeats"][0]
+        # A table repeats when, counted through its key, the values of the
+        # field grow past what the tables before it reached.
+        causes, before = [], selected
+        for position, repeat in enumerate(link["repeats"][:4]):
+            if repeat["key"] == link["key"]:
+                count = linked
+            else:
+                count = (values.get(f"linked_{position}") or {}).get("number")
+            if isinstance(count, (int, float)) and count > before:
+                causes.append(repeat)
+                before = count
+        causes = causes or link["repeats"]
         spread = {"field": probe["field"], "table": link["table"],
                   "key": link["key"], "key_values": reached,
                   "per_value": round(reached / selected, 1),
                   "belong_to_values": linked,
-                  "repeating_table": repeat["table"]}
+                  "repeating_tables": [r["table"] for r in causes]}
         if probe.get("measure"):
             spread["measure"] = probe["measure"]
         low = (values.get("key_earliest") or {}).get("text")
@@ -1490,7 +1519,7 @@ class EngineQueriesMixin:
                 ", ..." if len(probe["values"]) > 3 else "") + ")"
         shown = "; ".join(
             f"{r['table']} holds {r['rows']} rows for {r['dates']} dates of "
-            f"{r['key']}" for r in link["repeats"])
+            f"{r['key']}" for r in causes)
         spread["note"] = (
             f"{named} reaches {link['table']} through {reached} values of "
             f"{key}{span} - about {spread['per_value']:g} per value of {field} "
@@ -1499,7 +1528,8 @@ class EngineQueriesMixin:
             f"{field} stands for several dates (cumulative, as-of or shifted "
             f"rows). The figures cover more than the value named.")
         layers = [layer_text(layer) for layer in probe.get("layers") or []
-                  if layer.get("plain")]
+                  if layer.get("plain")
+                  and layer["table"] in spread["repeating_tables"]]
         if layers:
             spread["note"] += " " + " ".join(layers)
         return spread
@@ -2182,6 +2212,9 @@ class EngineQueriesMixin:
             "id": plan["id"],
             **({"warnings": warnings,
                 "numbers_verified": False} if warnings else {}),
+            # What the server did with the query, not a doubt about the
+            # figures: it leaves `numbers_verified` alone.
+            **({"notes": plan["notes"]} if plan.get("notes") else {}),
             "columns": column_names,
             "rows": rows,
             "returned_rows": len(rows),

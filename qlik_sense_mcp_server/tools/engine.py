@@ -766,7 +766,7 @@ def engine_create_hypercube(
             than dates: cumulative, as-of or shifted layers) whose key
             values belong to other values of its field too: the `field`,
             the fact `table` and `key`, how many `key_values` it reached,
-            `per_value`, and the `repeating_table`. `warnings` then leads
+            `per_value`, and the `repeating_tables` that cause it. `warnings` then leads
             with it and names the rows that pick one per date.
           - `timings`: seconds per step.
 

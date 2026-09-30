@@ -221,7 +221,7 @@ a cumulative, as-of or shifted calendar - is checked the same way, a value
 list or a set written by hand in a measure included: when the key values
 it reaches belong to other values of its field too, `fan_out_check` gives
 the `field`, the fact `table` and `key`, the `key_values` reached,
-`per_value` and the `repeating_table`, and `warnings` leads with it,
+`per_value` and the `repeating_tables` that cause it, and `warnings` leads with it,
 naming the rows that keep one per date where `get_app_details` found them
 (its `plain_layer`). The field that picks such rows is not checked
 itself. `filters_applied[].form` says how the
