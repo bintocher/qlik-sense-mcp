@@ -282,8 +282,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   sees the current selections and that the first one on an app is slow
   unless the script sets `CreateSearchIndexOnReload`.
 - `get_app_variables` finds a variable by a part of its name or value:
-  `search_string` without `*` is a part of the text, so `BK_LS` finds
-  `vBK_LS`. It was a pattern of the whole text, found nothing, and a model
+  `search_string` without `*` is a part of the text, so `Rate` finds
+  `vRate`. It was a pattern of the whole text, found nothing, and a model
   concluded the variable was not in the app. With `*` it is still a
   pattern of the whole text.
 

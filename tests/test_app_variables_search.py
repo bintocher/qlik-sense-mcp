@@ -1,7 +1,7 @@
 """get_app_variables finds a variable by a part of its name.
 
-A model searched for "BK_LS" and got nothing back next to a variable named
-"vBK_LS": the search was a whole-text pattern, so a part matched nothing,
+A model searched for "Rate" and got nothing back next to a variable named
+"vRate": the search was a whole-text pattern, so a part matched nothing,
 and the model concluded the variable was not in the app.
 """
 
@@ -23,7 +23,7 @@ class _Engine:
 
     def _get_user_variables(self, app_handle):
         return [
-            {"name": "vBK_LS", "text_value": "=If(GetFieldSelections([Side]) = 'B', 'B', 'A')",
+            {"name": "vRate", "text_value": "=If(GetFieldSelections([Side]) = 'B', 'B', 'A')",
              "is_script_created": False},
             {"name": "vToday", "text_value": "=Today()", "is_script_created": True},
         ]
@@ -40,9 +40,9 @@ def variables(monkeypatch):
 
 
 def test_a_part_of_the_name_finds_the_variable(variables):
-    reply = variables(search_string="BK_LS")
+    reply = variables(search_string="Rate")
     assert reply["variables_from_ui"] == {
-        "vBK_LS": "=If(GetFieldSelections([Side]) = 'B', 'B', 'A')"}
+        "vRate": "=If(GetFieldSelections([Side]) = 'B', 'B', 'A')"}
     assert reply["total_found"] == 1
 
 
