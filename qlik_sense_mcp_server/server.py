@@ -11,6 +11,7 @@ host object is selected in `tools.context`.
 """
 
 import asyncio
+import os
 import sys
 
 from . import __version__
@@ -108,8 +109,71 @@ async def _run_stdio():
     await mcp.run_stdio_async()
 
 
+def _watch_stop_file(path: str) -> None:
+    """Stop the server the way Ctrl+C does when `path` appears.
+
+    A process started without a console - a background service on
+    Windows - cannot be sent Ctrl+C or Ctrl+Break, and the tools that stop
+    it kill it outright, leaving its Qlik session open. A launcher that sets
+    QLIK_STOP_FILE creates the file instead; the server then shuts down
+    through its own handlers, closes the Engine socket and logs out, and
+    exits by itself if that has not happened within ten seconds.
+    """
+    import signal
+    import threading
+    import time
+
+    def watch():
+        while not os.path.exists(path):
+            time.sleep(0.5)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        logger.info("Stop file %s found; shutting down", path)
+        signal.raise_signal(signal.SIGINT)
+        time.sleep(10)
+        context.shutdown()
+        os._exit(0)
+
+    threading.Thread(target=watch, name="stop-file", daemon=True).start()
+
+
+def _graceful_exit() -> None:
+    """Close the Engine socket and log out however the process ends,
+    short of being killed; see `context.shutdown`."""
+    import atexit
+    import signal
+
+    atexit.register(context.shutdown)
+
+    def on_signal(signum, frame):
+        context.shutdown()
+        raise SystemExit(0)
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        if hasattr(signal, name):
+            try:
+                signal.signal(getattr(signal, name), on_signal)
+            except (ValueError, OSError):  # pragma: no cover - not main thread
+                pass
+    stop_file = os.getenv("QLIK_STOP_FILE", "").strip()
+    if stop_file:
+        _watch_stop_file(stop_file)
+
+
 def main():
     """CLI entry point."""
+    _graceful_exit()
+    try:
+        _run()
+    except KeyboardInterrupt:
+        # Ctrl+C, or the stop file: the shutdown already ran; a traceback
+        # in the log would read like a crash.
+        logger.info("Stopped")
+
+
+def _run():
     if len(sys.argv) > 1:
         if sys.argv[1] in ("--help", "-h"):
             _print_help()

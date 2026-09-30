@@ -513,7 +513,12 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
          usage.trim_usage),
     ])
     if isinstance(fields_data, dict) and "error" in fields_data:
-        result["engine_error"] = fields_data["error"]
+        # No data model is no answer: an app with no tables read as a
+        # success, and a client not reading `engine_error` saw an empty
+        # app. Measured: 74 calls refused over the session limit came back
+        # that way and counted as no errors at all.
+        return _err(f"The data model could not be read: {fields_data['error']}",
+                    error_category="engine_error", app_id=aid)
     else:
         # Only cache a complete answer. A reply that lost its data model to
         # a refused session must not become the cached truth.

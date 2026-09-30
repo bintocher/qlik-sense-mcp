@@ -43,6 +43,7 @@ from typing import Optional
 
 import httpx
 
+from . import session_cache
 from .config import QlikSenseConfig
 from .utils import looks_like_qlik_session_name, pick_qlik_session_cookie
 
@@ -165,6 +166,12 @@ class JwtSession:
         # Survives invalidate(): whether this proxy has ever issued a session,
         # which decides whether a missing cookie points at its configuration.
         self._logged_in_before = False
+        # A session a previous start of this server left behind is taken
+        # up again rather than a new one opened: see session_cache.
+        self._cache_key = session_cache.key_for(
+            "jwt", config.qlik_base_host, config.virtual_proxy_prefix,
+            config.jwt_token)
+        self._cache_checked = False
 
     # ─── public surface ────────────────────────────────────────────────
     # Reader properties snapshot the three session fields under the lock
@@ -207,6 +214,8 @@ class JwtSession:
             self._fetched_at = 0.0
             # Forget the name too, so a fresh Set-Cookie is picked up.
             self._cookie_name = None
+            self._cache_checked = True
+        session_cache.forget(self._cache_key)
 
     def logout(self) -> bool:
         """Ask the proxy to end this user's Qlik session, and forget it.
@@ -218,7 +227,9 @@ class JwtSession:
         with `OnMaxParallelSessionsExceeded`, which looks like an outage
         and lasts until the timeout expires.
 
-        Not called automatically. `DELETE /{vp}/qps/user` is the only
+        Called on the way out (`context.shutdown`) and once when Engine
+        refuses a session over the limit, unless QLIK_PROXY_LOGOUT=false.
+        `DELETE /{vp}/qps/user` is the only
         logout a virtual proxy exposes — the per-session endpoint needs
         admin rights on port 4243 — and it ends every session this user
         holds *on this virtual proxy*. Measured: sessions
@@ -332,6 +343,9 @@ class JwtSession:
         and a session that loses it gets a 403 that the existing re-login path
         already handles.
         """
+        if not self._cookie_value and not self._cache_checked:
+            self._cache_checked = True
+            session_cache.restore(self, self._cache_key, self._ttl)
         if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
@@ -454,6 +468,7 @@ class JwtSession:
         # stays Optional[str] and downstream code uses truthiness checks.
         self._csrf_token = csrf or None
         self._fetched_at = time.time()
+        session_cache.store(self, self._cache_key)
         logger.info(
             "JWT session bootstrap OK (cookie=%s, csrf_present=%s)",
             cookie_name, bool(csrf),

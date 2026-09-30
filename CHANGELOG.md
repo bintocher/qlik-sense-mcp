@@ -360,6 +360,33 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   answer 2 905 309 486; a query stating only a channel keeps the shared
   month and answers 2 639 121 914, and one stating July answers
   3 311 116 219 with a note.
+- A server no longer leaves a proxy session behind each time it stops. In
+  JWT and form mode every login opens a session that outlives the process
+  until the proxy's inactivity timeout; eight restarts within ten minutes
+  exhausted the five Qlik allows a user, and every call was refused with
+  `OnMaxParallelSessionsExceeded` for a quarter of an hour. Now the server
+  closes the Engine socket and logs out of its virtual proxy on the way out
+  (Ctrl+C, SIGTERM, SIGBREAK, or a `QLIK_STOP_FILE` it watches, for a
+  background process on Windows that no signal reaches); a server killed
+  outright leaves its session cookie in a file named after a hash of its
+  identity, and the next start takes it up while it is younger than the
+  session TTL (`QLIK_SESSION_CACHE`, `QLIK_SESSION_CACHE_DIR`). When Engine
+  still refuses a session over the limit, the server ends this user's
+  sessions on its proxy once and logs in again. `QLIK_PROXY_LOGOUT=false`
+  keeps the sessions. Measured: a start after a hard kill took up the
+  31-second-old session instead of opening one, and a stop logged out (HTTP
+  204).
+- A refused Engine session is an error: `get_app_details` answered a
+  session-limit refusal as a success with no tables and an `engine_error`
+  beside them - 74 such calls counted as no errors at all - and now says
+  `error` with `error_category: "session_limit"` (`engine_error` for any
+  other failure to read the model), as every tool does for that refusal.
+  The server log carries Engine's session notifications
+  (`OnMaxParallelSessionsExceeded`, `OnSessionClosed`, ...) at WARNING; it
+  said only "close status: 1001" before. The refusal no longer tells an
+  analyst to call the admin-only session endpoint: it says the sessions end
+  at the proxy's inactivity timeout, that closing other clients of the
+  account frees them sooner, and that an administrator can end them.
 
 ## [2.3.1] - 2026-09-25
 

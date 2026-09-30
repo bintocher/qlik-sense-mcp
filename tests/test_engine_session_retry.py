@@ -187,3 +187,57 @@ class TestLicenseDenied:
             client.connect(app_id="app-1")
 
         assert client.form_session.invalidate_calls == 1
+
+
+def _limit_ws():
+    ws = MagicMock()
+    ws.recv.return_value = json.dumps({"jsonrpc": "2.0", "method": "OnMaxParallelSessionsExceeded",
+                                       "params": {"severity": "fatal"}})
+    return ws
+
+
+class _LoggingOutStub(_CountingFormSessionStub):
+    def __init__(self):
+        super().__init__()
+        self.logouts = 0
+
+    def logout(self):
+        self.logouts += 1
+        return True
+
+
+class TestSessionLimit:
+    """Eight restarts left eight sessions on the proxy and the limit held
+    every call for a quarter of an hour. The sessions are this user's on
+    this proxy; ending them once and logging in again frees the limit."""
+
+    def _client(self):
+        config = QlikSenseConfig(server_url="https://qlik.example.com/forms",
+                                 user_id="ivanov", password="s3cret")
+        return QlikEngineAPI(config, form_session=_LoggingOutStub())
+
+    def test_the_limit_logs_out_once_and_connects(self, monkeypatch):
+        monkeypatch.delenv("QLIK_PROXY_LOGOUT", raising=False)
+        client = self._client()
+        sockets = iter([_limit_ws(), _connected_ws()])
+        with patch("websocket.create_connection", side_effect=lambda url, **kw: next(sockets)):
+            client.connect(app_id="app-1")
+        assert client.form_session.logouts == 1
+
+    def test_a_second_refusal_is_said(self, monkeypatch):
+        from qlik_sense_mcp_server.exceptions import QlikSessionLimitError
+        monkeypatch.delenv("QLIK_PROXY_LOGOUT", raising=False)
+        client = self._client()
+        with patch("websocket.create_connection", side_effect=lambda url, **kw: _limit_ws()):
+            with pytest.raises(QlikSessionLimitError):
+                client.connect(app_id="app-1")
+        assert client.form_session.logouts == 1
+
+    def test_logout_can_be_turned_off(self, monkeypatch):
+        from qlik_sense_mcp_server.exceptions import QlikSessionLimitError
+        monkeypatch.setenv("QLIK_PROXY_LOGOUT", "false")
+        client = self._client()
+        with patch("websocket.create_connection", side_effect=lambda url, **kw: _limit_ws()):
+            with pytest.raises(QlikSessionLimitError):
+                client.connect(app_id="app-1")
+        assert client.form_session.logouts == 0

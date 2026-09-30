@@ -53,6 +53,11 @@ def _err(msg: str, **extra: Any) -> str:
     """
     payload = {"error": explain_engine_error(msg)}
     payload.update(extra)
+    # Qlik's refusal over the per-user session limit reads like any other
+    # connection failure; its category says it is neither the query nor
+    # the network.
+    if "OnMaxParallelSessionsExceeded" in str(msg):
+        payload["error_category"] = "session_limit"
     for key in _ADVICE_KEYS:
         payload.pop(key, None)
 

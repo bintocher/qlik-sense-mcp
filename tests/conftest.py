@@ -254,3 +254,11 @@ def text_field(data_model):
         if name and not name.startswith("$"):
             return field
     pytest.skip("test app has no usable field")
+
+
+@pytest.fixture(autouse=True)
+def _no_session_cache(monkeypatch, tmp_path):
+    """A kept proxy session is per machine; a test must not find one a
+    neighbouring test left, nor leave one behind."""
+    monkeypatch.setenv("QLIK_SESSION_CACHE", "false")
+    monkeypatch.setenv("QLIK_SESSION_CACHE_DIR", str(tmp_path / "sessions"))

@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from typing import Dict, List, Any, Optional
 import json
 import logging
+import os
 import socket
 import ssl
 import threading
@@ -50,6 +51,31 @@ _TTL = f"/ttl/{WS_SESSION_TTL_SECONDS}"
 
 # Guards creation of a per-instance transaction lock, nothing else.
 _LOCK_CREATION_GUARD = threading.Lock()
+
+
+# Engine notifications that end or refuse a session. Said in the server
+# log at WARNING: without them a refused session showed there only as the
+# websocket library's "close status: 1001", which reads like a network fault.
+_SESSION_NOTIFICATIONS = ("OnMaxParallelSessionsExceeded", "OnSessionClosed",
+                          "OnSessionTimedOut", "OnLicenseAccessDenied",
+                          "OnEngineWebsocketFailed", "OnNoEngineAvailable",
+                          "OnSessionLoggedOut", "OnManyUsers")
+
+
+def _log_notification(frame: Dict[str, Any]) -> None:
+    method = frame.get("method")
+    if method in _SESSION_NOTIFICATIONS:
+        params = frame.get("params") or {}
+        logger.warning("Engine notification %s (severity=%s): %s", method,
+                       params.get("severity", "unknown"),
+                       params.get("message") or params.get("reason") or "")
+
+
+def _logout_allowed() -> bool:
+    """Whether this server may end its user's sessions on its virtual proxy
+    (on exit, and once when Engine refuses a session over the limit)."""
+    return os.getenv("QLIK_PROXY_LOGOUT", "true").strip().lower() not in (
+        "false", "0", "no", "off")
 
 
 class EngineConnectionMixin:
@@ -314,6 +340,7 @@ class EngineConnectionMixin:
 
         last_error = None
         session_retried = False  # one re-bootstrap per connect() call
+        limit_retried = False    # one logout per connect() call
         i = 0
         while i < len(endpoints_to_try):
             url = endpoints_to_try[i]
@@ -338,12 +365,29 @@ class EngineConnectionMixin:
                 # call, which says nothing about the real cause.
                 self._consume_greeting()
                 return  # Success
-            except (QlikSessionLimitError, QlikLicenseError):
-                # Quota or a missing license, not a bad endpoint - every
-                # fallback URL would be refused the same way, and a fresh login
-                # cannot grant a license. Surface as-is: retrying here would
-                # spend one more Qlik session on a certain failure and bring the
-                # per-user limit closer.
+            except QlikSessionLimitError as limit:
+                # The sessions filling the limit are most often this
+                # server's own, left by earlier starts on this proxy: they
+                # live until its inactivity timeout. Ending them - the one
+                # logout a virtual proxy offers, for this user on this
+                # proxy only - and logging in again frees the limit once;
+                # a second refusal is someone else's sessions and is said.
+                logger.warning("Engine refused the session: %s", limit)
+                self._kill_socket()
+                if (is_cookie_mode and cookie_session is not None
+                        and not limit_retried and _logout_allowed()):
+                    limit_retried = True
+                    logger.warning("Ending this user's sessions on the proxy "
+                                   "and logging in again")
+                    cookie_session.logout()
+                    endpoints_to_try, headers = _refresh_cookie_session_and_rebuild(
+                        "the session limit")
+                    continue  # retry same i
+                raise
+            except QlikLicenseError:
+                # A missing license, not a bad endpoint - every fallback URL
+                # would be refused the same way, and a fresh login cannot
+                # grant a license.
                 self._kill_socket()
                 raise
             except websocket.WebSocketBadStatusException as e:
@@ -410,11 +454,12 @@ class EngineConnectionMixin:
     # the per-user cap.
     _FATAL_GREETINGS = {
         "OnMaxParallelSessionsExceeded": (
-            "Qlik refused the Engine session: the per-user limit of concurrent "
-            "sessions is exhausted. Existing sessions stay alive until the "
-            "virtual proxy inactivity timeout expires. Close them (QPS "
-            "delete-user-sessions) or wait for the timeout, and avoid running "
-            "several MCP servers or parallel tool calls against one account."
+            "Qlik refused the Engine session: this user already holds as many "
+            "Qlik sessions as Qlik allows (five by default). They end when the "
+            "virtual proxy's inactivity timeout passes; closing other Qlik tabs "
+            "or clients of this account, or stopping other servers that use it, "
+            "frees them sooner, and a Qlik administrator can end them at once. "
+            "Retrying now will be refused the same way."
         ),
         "OnSessionClosed": "Qlik closed the Engine session immediately after connect.",
         "OnSessionTimedOut": "Qlik reported the Engine session as timed out on connect.",
@@ -460,6 +505,7 @@ class EngineConnectionMixin:
                     continue
 
                 method = frame.get("method")
+                _log_notification(frame)
                 if method in self._FATAL_GREETINGS:
                     params = frame.get("params") or {}
                     message = (
@@ -784,6 +830,7 @@ class EngineConnectionMixin:
                     if frame_id is None:
                         # Engine notifications: OnConnected, OnAuthenticated,
                         # OnSessionTimedOut, change events. Harmless.
+                        _log_notification(frame)
                         logger.debug(
                             "send_request[%s req_id=%d]: skipping notification: %s",
                             method, req_id, frame.get("method", "<no-method>"),
@@ -981,6 +1028,7 @@ class EngineConnectionMixin:
                     # timed-out request — same stray-frame handling as
                     # send_request().
                     if frame_id is None:
+                        _log_notification(frame)
                         logger.debug(
                             "send_requests_pipelined: skipping notification: %s",
                             frame.get("method", "<no-method>"),
