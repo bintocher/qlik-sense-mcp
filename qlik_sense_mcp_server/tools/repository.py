@@ -226,7 +226,11 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         facts. A calendar carries `calendar`: its rows against its distinct
         dates - fewer dates than rows means one date stands for several
         rows (as-of, cumulative or shifted periods), and the fields with
-        few values next to the date say by what.
+        few values next to the date say by what. Such a calendar carries
+        `plain_layer`, the set that keeps one row per date - the date
+        itself - as found by counting its rows per value, and the field
+        that picks it `picks_plain_layer`, listed with its values even when
+        hidden; `warnings` opens with one line per such calendar.
         `links` - `Facts -Key-> Table`, from the facts outward; `A -Key- B`
         closes a loop.
         `islands` - tables linked to nothing, one line each with their
@@ -263,8 +267,9 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         `bookmarks` - the approved bookmarks shipped with the app, title
         and description. Bookmarks users saved are not listed.
         `alternate_states` where the app defines them.
-        `warnings` - volume: tables that need a filter, fields too wide to
-        group by without a limit; and the description, when it names dates
+        `warnings` - calendars whose dates repeat, with the condition for
+        one row per date; volume: tables that need a filter, fields too
+        wide to group by without a limit; and the description, when it names dates
         or a span ("2 months") that match none of the date fields' ranges.
         `size_budget` - the estimated size in tokens against its limit,
         and `trimmed` naming what was shortened to stay under it.
@@ -371,6 +376,20 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     model = overview.model_sections(raw_fields, values, ranges)
     model_fields = {f.get("field_name") for f in raw_fields}
 
+    # A calendar with more rows than dates counts a date several times
+    # unless a field picks one row per date; which field and value do that
+    # is asked of Engine over the calendar alone and said in plain words.
+    layers: List[Dict[str, Any]] = []
+    try:
+        read_layers = getattr(context.engine_api, "plain_layers", None)
+        if read_layers is not None and raw_fields:
+            layers = read_layers(app_handle, raw_fields) or []
+    except Exception as ex:
+        if isinstance(ex, TimeoutError):
+            raise
+        logger.debug("Could not read the calendar layers of %s: %s", aid, ex)
+    layer_warnings = overview.apply_layers(model["tables"], layers)
+
     # Volume is the one thing worth a warning: a query over a billion-row
     # table without a filter, or a group-by on a field with millions of
     # values, is what runs into the time limit.
@@ -400,6 +419,9 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         resolved.get("description", ""), overview.date_ranges(model["tables"]))
     if disagreement:
         warnings.append(disagreement)
+    # First: a filter on such a calendar answers with a wrong figure and no
+    # error, which no other warning here can say.
+    warnings[:0] = layer_warnings
 
     # The app's own vocabulary: what the author calls revenue and how it is
     # computed. A caller assembling the aggregation itself may pick a

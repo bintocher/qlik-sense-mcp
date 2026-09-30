@@ -13,6 +13,7 @@ import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from ..engine.layers import layer_text
 from ..engine.objects import fields_in_expression, measure_text
 from ..engine.outer_set import filter_limits
 
@@ -263,6 +264,35 @@ def model_sections(raw_fields: List[Dict[str, Any]], values: Dict[str, List[str]
     return {"tables": tables, "links": model["links"], "islands": islands}
 
 
+def apply_layers(tables: List[Dict[str, Any]],
+                 layers: Iterable[Dict[str, Any]]) -> List[str]:
+    """Say on each repeating calendar which rows are the plain layer.
+
+    `layers` come from Engine: a table whose date key repeats, and the
+    field values that pick one row per date (`plain`, empty when none
+    does). The table gets `plain_layer`, the condition to write; the
+    fields that pick it keep their values even when hidden - a hidden
+    field is still the one the figures depend on. Returns one warning per
+    such calendar.
+    """
+    by_name = {table.get("name"): table for table in tables}
+    warnings = []
+    for layer in layers:
+        table = by_name.get(layer.get("table"))
+        if table is None:
+            continue
+        options = layer.get("plain") or []
+        if options:
+            table["plain_layer"] = " or ".join(
+                "{<" + option["condition"] + ">}" for option in options)
+            picked = {field for option in options for field in option["fields"]}
+            for entry in table.get("fields") or []:
+                if entry.get("name") in picked:
+                    entry["picks_plain_layer"] = True
+        warnings.append(layer_text(layer))
+    return warnings
+
+
 # -- the description against the data ----------------------------------------
 
 _DAY_DOTTED = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})")
@@ -500,6 +530,10 @@ def trim_values(reply: Dict[str, Any]) -> bool:
     changed = False
     for table in reply.get("tables") or []:
         for entry in table.get("fields") or []:
+            # The field that picks the plain layer keeps every value: the
+            # one the condition names must stay readable.
+            if entry.get("picks_plain_layer"):
+                continue
             if len(entry.get("values") or []) > TRIMMED_VALUES:
                 entry["values"] = entry["values"][:TRIMMED_VALUES]
                 changed = True

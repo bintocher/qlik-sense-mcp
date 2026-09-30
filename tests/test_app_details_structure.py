@@ -212,10 +212,14 @@ def test_usage_of_the_published_sheets_is_included(details):
     assert "Segment (dimension)" in reply["usage"]["fields_in_one_object"]
 
 
-def test_warnings_are_about_volume(details):
+def test_warnings_are_about_repeating_calendars_then_volume(details):
     _text, reply = details()
-    assert len(reply["warnings"]) == 2
-    assert "rows" in reply["warnings"][0] and "values" in reply["warnings"][1]
+    assert len(reply["warnings"]) == 4
+    # A calendar whose dates repeat comes first: a filter on it answers a
+    # wrong figure with no error.
+    assert reply["warnings"][0].startswith("ShiftLink holds 90 rows for 30 dates of ShiftKey")
+    assert reply["warnings"][1].startswith("ShiftCalendar holds 400 rows for 21 dates of LinkDate")
+    assert "rows" in reply["warnings"][2] and "values" in reply["warnings"][3]
 
 
 def test_get_app_object_returns_a_cut_measure_whole(monkeypatch):
