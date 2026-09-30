@@ -983,7 +983,9 @@ def get_app_variables(
         offset: variables to skip.
         created_in_script: `"true"` for script `SET`/`LET` only, `"false"`
             for ones made in the interface, omitted for both.
-        search_string: wildcard filter on the name or the value.
+        search_string: part of the name or of the value (`BK_LS` finds
+            `vBK_LS`); with `*` it is a pattern of the whole text instead
+            (`v*` - names starting with v).
         case_sensitive: default false.
 
     Returns:
@@ -1023,7 +1025,11 @@ def get_app_variables(
         # `variables_from_script` permanently empty on the default call —
         # half the reply was structurally dead.
         if search_string:
-            rx = _wildcard_to_regex(search_string, case_sensitive)
+            # A part of the name finds it: "BK_LS" found nothing next to
+            # "vBK_LS", and a model concluded the variable did not exist.
+            wanted = (search_string if any(c in search_string for c in "*%")
+                      else f"*{search_string}*")
+            rx = _wildcard_to_regex(wanted, case_sensitive)
             prepared = [x for x in prepared if rx.match(x["name"]) or rx.match(x["text_value"])]
         page = prepared[off:off + lim]
         # Always objects, never "" for an empty one: a field whose type
