@@ -6,6 +6,18 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.4.0] - unreleased
+
+### Fixed
+
+- JWT mode: the re-login after the 25-minute session TTL no longer fails with
+  "did not set a Qlik session cookie". It ran on the Repository client, whose
+  jar still held the old session cookie, so the proxy answered 204 without a
+  new one. The login now runs on a cookieless client, the stale cookie is
+  dropped from the shared jar and the new one copied in; a 204 for a cookie
+  the request carried keeps that session; the QMC advice is given only when
+  the very first login returns no cookie.
+
 ## [2.3.1] - 2026-09-25
 
 ### Fixed
