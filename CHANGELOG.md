@@ -346,9 +346,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   a formula on a sheet that is its very text. The reply says so in
   `notes`; a label that stands for two library measures names both. The
   sheets are read only on such a miss, once per app. Measured on a
-  1.16-billion-row app: "Оборот", the sheets' label for the library
+  1.16-billion-row app: the sheets' label for the library
   measure of settled stakes, answered 34 228 244 489 for August 2026; it
   was "no measure named" before.
+- `group_by`, `metrics`, `measures`, `filters` and `scope` stated beside
+  `queries` in `engine_query` are shared by every query that does not state
+  its own. They were ignored without a word: a model sent its measures and
+  filters once for three queries and got "asks for no measure", and a
+  query with measures of its own was computed without the stated filters.
+  Measured: two queries with shared GGR and a month on the plain rows now
+  answer 2 905 309 486 and, with their own filter on a channel added,
+  2 639 121 914.
 
 ## [2.3.1] - 2026-09-25
 

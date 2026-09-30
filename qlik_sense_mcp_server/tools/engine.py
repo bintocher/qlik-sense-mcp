@@ -423,7 +423,9 @@ def engine_query(
         limit: rows per query, default 100, cap 5000.
         queries: a list of whole queries, each with the keys above plus an
             optional "id". Use it for several independent questions at
-            once. When present, the single-query arguments are ignored.
+            once. `group_by`, `metrics`, `measures`, `filters` and `scope`
+            stated beside it are shared: each query that does not state
+            its own takes them. Paging and sorting arguments are per query.
         measures: an escape hatch inside a query, for one expression this
             vocabulary cannot state — `[{"expression": "{filter} Sum(A) / "
             "Count(B)", "label": "AOV"}]`. With `filters`, the marker says
@@ -561,6 +563,22 @@ def engine_query(
             "include_raw_layout": include_raw_layout,
             "accept_fan_out": accept_fan_out,
         }]
+    elif isinstance(queries, list):
+        # Stated beside `queries`, these are shared by every query that does
+        # not state its own. They used to be ignored without a word: a
+        # model sent its measures and filters once for three queries, and
+        # got "asks for no measure" - or, with measures of their own,
+        # figures without the filters it had stated.
+        shared = {"group_by": group_by, "metrics": metrics,
+                  "measures": measures, "filters": filters, "scope": scope}
+        shared = {key: value for key, value in shared.items() if value is not None}
+        if shared:
+            queries = [dict({key: value for key, value in shared.items()
+                             if key not in query
+                             and not (key == "group_by" and "dimensions" in query)},
+                            **query)
+                       if isinstance(query, dict) else query
+                       for query in queries]
     if not isinstance(queries, list) or not queries:
         return _err(
             "queries must be a non-empty list of query objects",
