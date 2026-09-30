@@ -444,7 +444,7 @@ class EngineHypercubeMixin:
                                 "qSortByFrequency": 0,
                                 "qSortByNumeric": dim["sort_by"].get("qSortByNumeric", 0),
                                 "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
-                                "qSortByLoadOrder": 0,
+                                "qSortByLoadOrder": dim["sort_by"].get("qSortByLoadOrder", 0),
                                 "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
                                 "qExpression": EngineHypercubeMixin._as_value_expr(
                                     dim["sort_by"].get("qExpression", "")

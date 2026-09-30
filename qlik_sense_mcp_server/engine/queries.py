@@ -371,8 +371,9 @@ _PROBE_KEYS = ("earliest", "latest", "earliest_number", "latest_number",
 # The control values of a filter on a calendar whose dates repeat: how many
 # values of the field it names, how many key values of the facts it
 # reaches, and how many values of the field those key values belong to.
-_SPREAD_KEYS = ("selected", "reached", "linked", "linked_0", "linked_1",
-                "linked_2", "linked_3", "key_earliest", "key_latest")
+_SPREAD_KEYS = ("selected", "reached", "plain_reached", "both", "linked",
+                "linked_0", "linked_1", "linked_2", "linked_3",
+                "key_earliest", "key_latest")
 
 # Different sets one filter is checked under, and filters on a repeating
 # calendar checked per query: each costs a few more questions to Engine.
@@ -1297,6 +1298,11 @@ class EngineQueriesMixin:
                 spread.append(dict(subject, link=link))
         if spread:
             probes.extend(self._spread_probes(spread, model, app_handle))
+        if plan.get("dimensions"):
+            if model is None:
+                reader = getattr(self, "_model_fields", None)
+                model = reader(app_handle) if reader else None
+            probes.extend(self._grouping_probes(plan, model, app_handle))
         return probes
 
     @staticmethod
@@ -1400,32 +1406,43 @@ class EngineQueriesMixin:
             probe["key_latest_number"] = _in_context(context, "Max", key, wrap="Num")
         return probe
 
+    def _calendar_layers(self, model, app_handle: Optional[int]
+                         ) -> List[Dict[str, Any]]:
+        """The repeating calendars with their plain layer, best effort."""
+        reader = getattr(self, "plain_layers", None)
+        if reader is None or not model:
+            return []
+        try:
+            return reader(app_handle, model) or []
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not read the calendar layers: %s", exc)
+            return []
+
     def _spread_probes(self, subjects: List[Dict[str, Any]], model,
                        app_handle: Optional[int]) -> List[Dict[str, Any]]:
-        """Whether a filter on a repeating calendar reaches other values'
-        facts.
+        """Whether a filter on a repeating calendar reaches more than it names.
 
         A filter names values of a field; the facts are narrowed by the key
-        values those reach. On an ordinary table each key value belongs to
-        one value of the field. On a calendar whose rows repeat per date - a
-        cumulative, as-of or shifted layer - the key values reached also
-        belong to other values of the field, and the figure covers them.
-        Measured: `Month='2026-08'` on a cumulative calendar reached
-        thirteen months of facts, and the sum grew thirteen times.
-        The fields that pick a layer are not filters of a period and are
-        left alone.
+        values those reach. On a calendar whose rows repeat per date - a
+        cumulative, as-of or shifted layer - one value can reach the keys of
+        other periods, and the figure covers them. Measured: `Month=
+        '2026-08'` on a cumulative calendar reached twelve months of facts.
+
+        Where the calendars on the way have a plain layer, the key values
+        reached are compared with those the same filter reaches on the plain
+        rows: the same set is the period asked for, whatever layers the
+        field also appears in - `Year=2025` on the same calendar reached
+        exactly the twelve months of 2025 and was right. Where a plain layer
+        is not known, the key values reached are counted back to the values
+        of the field they belong to. The fields that pick a layer are not
+        filters of a period and are left alone.
         """
-        layers: List[Dict[str, Any]] = []
-        reader = getattr(self, "plain_layers", None)
-        if reader is not None and model:
-            try:
-                layers = reader(app_handle, model) or []
-            except Exception as exc:
-                if isinstance(exc, TimeoutError):
-                    raise
-                logger.debug("Could not read the calendar layers: %s", exc)
-        selectors = {field for layer in layers
-                     for option in layer.get("plain") or []
+        layers = self._calendar_layers(model, app_handle)
+        plain_of = {layer["table"]: layer["plain"][0] for layer in layers
+                    if layer.get("plain")}
+        selectors = {field for option in plain_of.values()
                      for field in option["fields"]}
         probes = []
         for subject in subjects:
@@ -1441,11 +1458,6 @@ class EngineQueriesMixin:
             field = escape_qlik_field_name(applied["field"])
             key = escape_qlik_field_name(link["key"])
             within = _set_text(identifier, parts)
-            others = [part for part in parts
-                      if applied["field"] not in filter_limits(
-                          _set_text("", [part])).get("fields", [])]
-            back = _set_text(identifier, others + [
-                f"{field}=", f"{key}=P({within} {key})"])
             probe = {
                 "kind": "spread",
                 "field": applied["field"],
@@ -1457,55 +1469,154 @@ class EngineQueriesMixin:
                 "values": applied.get("values"),
                 "selected": f"=Count({within} DISTINCT {field})",
                 "reached": f"=Count({within} DISTINCT {key})",
-                "linked": f"=Count({back} DISTINCT {field})",
             }
-            # The same count through the key of every repeating table on
-            # the way: where it grows is the table that repeats.
-            for position, repeat in enumerate(link["repeats"][:4]):
-                if repeat["key"] == link["key"]:
-                    continue
-                own_key = escape_qlik_field_name(repeat["key"])
-                through = _set_text(identifier, others + [
-                    f"{field}=", f"{own_key}=P({within} {own_key})"])
-                probe[f"linked_{position}"] = f"=Count({through} DISTINCT {field})"
+            options = [plain_of.get(r["table"]) for r in link["repeats"]]
+            if all(options):
+                # The same filter on the plain rows of every calendar on
+                # the way, and the key values both reach.
+                picked = {name for option in options for name in option["fields"]}
+                kept = [part for part in parts
+                        if not set(filter_limits(_set_text("", [part])).get(
+                            "fields", [])) & picked]
+                plain = _set_text(identifier, kept + [
+                    part for option in options for part in option["parts"]])
+                probe["plain"] = plain
+                probe["plain_reached"] = f"=Count({plain} DISTINCT {key})"
+                probe["both"] = (
+                    f"=Count({_set_text(identifier, [f'{key}=P({within} {key})*P({plain} {key})'])}"
+                    f" DISTINCT {key})")
+                probe["missing"] = [
+                    r for r, option in zip(link["repeats"], options)
+                    if not set(option["fields"]) <= set(
+                        filter_limits(within).get("fields", []))]
+            else:
+                others = [part for part in parts
+                          if applied["field"] not in filter_limits(
+                              _set_text("", [part])).get("fields", [])]
+                back = _set_text(identifier, others + [
+                    f"{field}=", f"{key}=P({within} {key})"])
+                probe["linked"] = f"=Count({back} DISTINCT {field})"
+                # The same count through the key of every repeating table
+                # on the way: where it grows is the table that repeats.
+                for position, repeat in enumerate(link["repeats"][:4]):
+                    if repeat["key"] == link["key"]:
+                        continue
+                    own_key = escape_qlik_field_name(repeat["key"])
+                    through = _set_text(identifier, others + [
+                        f"{field}=", f"{own_key}=P({within} {own_key})"])
+                    probe[f"linked_{position}"] = f"=Count({through} DISTINCT {field})"
             if link.get("temporal"):
                 probe["key_earliest"] = f"=Text(Min({within} {key}))"
                 probe["key_latest"] = f"=Text(Max({within} {key}))"
             probes.append(probe)
         return probes
 
+    def _grouping_probes(self, plan: Dict[str, Any], model,
+                         app_handle: Optional[int]) -> List[Dict[str, Any]]:
+        """A grouping by a field of a repeating calendar without its plain
+        layer: every row sums the other layers of its value too. Read from
+        the query's text; nothing is asked of Engine but the layers."""
+        fields = [bare_field_name(str(d.get("field") or ""))
+                  for d in plan.get("dimensions") or []
+                  if not str(d.get("field") or "").startswith("=")]
+        paths = {name: repeating_path(model, name) for name in fields if model}
+        paths = {name: path for name, path in paths.items()
+                 if path and path.get("repeats")}
+        if not paths:
+            return []
+        layers = self._calendar_layers(model, app_handle)
+        plain_of = {layer["table"]: layer for layer in layers if layer.get("plain")}
+        selectors = {field for layer in plain_of.values()
+                     for option in layer["plain"] for field in option["fields"]}
+        contexts = []
+        for measure in plan.get("measures") or []:
+            for context in measure.get("_contexts") or [("", measure.get("modifier")
+                                                             or plan.get("modifier", ""))]:
+                if context not in contexts:
+                    contexts.append(context)
+        probes = []
+        for name, path in paths.items():
+            if name in selectors:
+                continue
+            missing = []
+            for repeat in path["repeats"]:
+                layer = plain_of.get(repeat["table"])
+                if layer is None:
+                    continue
+                option = layer["plain"][0]
+                for context in contexts or [("", "")]:
+                    flat = flat_set(context)
+                    named = set(filter_limits(_set_text(*flat)).get("fields", [])) \
+                        if flat else set()
+                    if not set(option["fields"]) <= named:
+                        missing.append(layer)
+                        break
+            if missing:
+                probes.append({"kind": "grouping", "field": name, "link": path,
+                               "layers": missing})
+        return probes
+
+    @staticmethod
+    def _read_grouping(probe: Dict[str, Any]) -> Dict[str, Any]:
+        field = escape_qlik_field_name(probe["field"])
+        tables = [layer["table"] for layer in probe["layers"]]
+        note = (f"The rows are grouped by {field}, a field of "
+                f"{' and '.join(tables)}, whose dates repeat, and the measures "
+                f"do not keep one row per date: each row sums every layer its "
+                f"value stands for (cumulative, as-of or shifted rows), not "
+                f"that value alone. "
+                + " ".join(layer_text(layer) for layer in probe["layers"]))
+        return {"field": probe["field"], "grouped_by": True,
+                "table": probe["link"]["table"], "key": probe["link"]["key"],
+                "repeating_tables": tables, "note": note}
+
     @staticmethod
     def _read_spread(probe: Dict[str, Any],
                      values: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """One statement about a filter on a repeating calendar, or None
-        when its key values belong to the values it names alone."""
-        numbers = {key: (values.get(key) or {}).get("number")
-                   for key in ("selected", "reached", "linked")}
-        if not all(isinstance(n, (int, float)) for n in numbers.values()):
-            return None
-        selected, reached, linked = (int(numbers[k]) for k in
-                                     ("selected", "reached", "linked"))
-        if selected <= 0 or linked <= selected:
+        when it reaches the key values it names and no others."""
+        def number(key):
+            value = (values.get(key) or {}).get("number")
+            return int(value) if isinstance(value, (int, float)) else None
+
+        selected, reached = number("selected"), number("reached")
+        if not selected or reached is None:
             return None
         link = probe["link"]
+        if "plain_reached" in probe:
+            plain, both = number("plain_reached"), number("both")
+            if plain is None or both is None:
+                return None
+            if reached == plain == both:
+                return None
+            causes = probe.get("missing") or link["repeats"]
+            per_value = round(reached / max(plain, 1), 1)
+            compared = (f"where the same filter on one row per date reaches "
+                        f"{plain}")
+            extra = {"plain_key_values": plain}
+        else:
+            linked = number("linked")
+            if linked is None or linked <= selected:
+                return None
+            # A table repeats when, counted through its key, the values of
+            # the field grow past what the tables before it reached.
+            causes, before = [], selected
+            for position, repeat in enumerate(link["repeats"][:4]):
+                count = (linked if repeat["key"] == link["key"]
+                         else number(f"linked_{position}"))
+                if count is not None and count > before:
+                    causes.append(repeat)
+                    before = count
+            causes = causes or link["repeats"]
+            per_value = round(reached / selected, 1)
+            compared = (f"and those key values belong to {linked} values of "
+                        f"the field, not only to the {selected} named")
+            extra = {"belong_to_values": linked}
         field = escape_qlik_field_name(probe["field"])
         key = escape_qlik_field_name(link["key"])
-        # A table repeats when, counted through its key, the values of the
-        # field grow past what the tables before it reached.
-        causes, before = [], selected
-        for position, repeat in enumerate(link["repeats"][:4]):
-            if repeat["key"] == link["key"]:
-                count = linked
-            else:
-                count = (values.get(f"linked_{position}") or {}).get("number")
-            if isinstance(count, (int, float)) and count > before:
-                causes.append(repeat)
-                before = count
-        causes = causes or link["repeats"]
         spread = {"field": probe["field"], "table": link["table"],
                   "key": link["key"], "key_values": reached,
-                  "per_value": round(reached / selected, 1),
-                  "belong_to_values": linked,
+                  "per_value": per_value, **extra,
                   "repeating_tables": [r["table"] for r in causes]}
         if probe.get("measure"):
             spread["measure"] = probe["measure"]
@@ -1522,11 +1633,9 @@ class EngineQueriesMixin:
             f"{r['key']}" for r in causes)
         spread["note"] = (
             f"{named} reaches {link['table']} through {reached} values of "
-            f"{key}{span} - about {spread['per_value']:g} per value of {field} "
-            f"- and those key values belong to {linked} values of {field}, "
-            f"not only to the {selected} named: {shown}, so one value of "
-            f"{field} stands for several dates (cumulative, as-of or shifted "
-            f"rows). The figures cover more than the value named.")
+            f"{key}{span}, {compared}: {shown}, so the value stands for "
+            f"dates outside it (cumulative, as-of or shifted rows). The "
+            f"figures cover more than the value named.")
         layers = [layer_text(layer) for layer in probe.get("layers") or []
                   if layer.get("plain")
                   and layer["table"] in spread["repeating_tables"]]
@@ -1570,6 +1679,9 @@ class EngineQueriesMixin:
     def _file_check(cls, plan: Dict[str, Any], probe: Dict[str, Any],
                     values: List[Dict[str, Any]]) -> None:
         """Put what one probe says where the reply reads it."""
+        if probe.get("kind") == "grouping":
+            plan.setdefault("fan_out_check", []).append(cls._read_grouping(probe))
+            return
         if probe.get("kind") == "spread":
             keys = [key for key in _SPREAD_KEYS if key in probe]
             spread = cls._read_spread(probe, dict(zip(keys, values)))

@@ -94,13 +94,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   reaches, whatever its kind: a value list, a range, a pattern, or a
   condition written by hand in a measure's own set. Such a calendar is
   found from the model - a table whose date key towards the facts has
-  fewer values than the table has rows. The check counts the values of the
-  field the filter names, the key values of the facts it reaches, and the
-  values of the field those key values belong to; more of the last than
-  the first give `fan_out_check` (`field`, `table`, `key`, `key_values`,
-  `per_value`, `belong_to_values`, and `repeating_tables` - the tables on
-  the way that do repeat, found by counting the field back through each
-  one's key) and a warning that
+  fewer values than the table has rows. The check compares the key values
+  of the facts the filter reaches with those the same filter reaches on
+  the plain rows of every calendar on the way (see `plain_layer`): the
+  same set is the period asked for, however many layers the field also
+  appears in. Where no plain layer is known, it counts the values of the
+  field those key values belong to instead. A difference gives
+  `fan_out_check` (`field`, `table`, `key`, `key_values`, `per_value`,
+  `plain_key_values` or `belong_to_values`, and `repeating_tables` - the
+  calendars that do repeat) and a warning that
   leads `warnings`, per query and at the top of the reply, with the
   condition for one row per date where one was found. Measured on a
   1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a
@@ -109,12 +111,22 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   only; now the reply leads with 12 key values reached that belong to 13
   months, and with the plain layer added the figure is 2 905 309 486 and
   the reply is quiet. A set written by hand on the same calendar
-  (9.28 billion, three key values) is named the same way.
+  (9.28 billion, three key values) is named the same way. `Year=2025` on
+  that calendar reaches the twelve months of 2025, the same as on its
+  plain rows, and is quiet (it was flagged as unverified with the right
+  total, 418 613 839 776); `Year=2026` reaches 20 months against 9 and is
+  flagged. Grouping by a field of such a calendar while the measures do
+  not set its plain layer is named as well (`grouped_by`): each row then
+  sums every layer of its value.
 - `get_app_details` names the rows of a repeating calendar that keep one
   row per date. For each such calendar the server asks Engine, once per
   app and over the calendar alone, which value of a field with few values
   - or of a pair of them - holds every date once with the date itself,
-  read by its displayed text (a dual fiscal year `24-25` is not `2025`); the
+  read by its displayed text (a dual fiscal year `24-25` is not `2025`).
+  One condition is named: values holding the very same rows are one
+  layer, named by the value loaded first - a month-to-date layer on a
+  calendar of months holds each month once too, and naming it sent a
+  caller to a cumulative value; the
   calendar gets `plain_layer` (`{<[Aggregation]={'Date'}>}`, and
   `{<[PrevYear]={'0'},[PrevMonth]={'0'}>}` for a shift calendar), the field
   `picks_plain_layer`, listed with its values even when hidden, and

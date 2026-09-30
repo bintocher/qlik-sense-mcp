@@ -136,10 +136,10 @@ def repeating_calendars(raw_fields: List[Dict[str, Any]]
     return found
 
 
-def _condition(fields: List[str], values: List[str]) -> str:
+def _condition_parts(fields: List[str], values: List[str]) -> List[str]:
     from .filters import quote_value
-    return ",".join(f"{escape_qlik_field_name(field)}={{{quote_value(value)}}}"
-                    for field, value in zip(fields, values))
+    return [f"{escape_qlik_field_name(field)}={{{quote_value(value)}}}"
+            for field, value in zip(fields, values)]
 
 
 def layer_text(layer: Dict[str, Any]) -> str:
@@ -209,8 +209,13 @@ class EngineLayersMixin:
                 "expression": (f"Sum(If({escape_qlik_field_name(other)}={name}"
                                f",1,0))"),
                 "label": f"same{position}"})
+        # In load order: of values holding the same rows, the one loaded
+        # first - the base the others were built from - comes first.
+        order = {"qSortByNumeric": 0, "qSortByAscii": 0, "qSortByLoadOrder": 1,
+                 "qSortByExpression": 0, "qExpression": ""}
         reply = self.create_hypercube(
-            app_handle, [{"field": field} for field in fields], measures,
+            app_handle, [{"field": field, "sort_by": dict(order)} for field in fields],
+            measures,
             max_rows=LAYER_FIELD_MAX * LAYER_FIELD_MAX, include_raw_layout=True)
         if reply.get("error"):
             raise RuntimeError(reply["error"])
@@ -249,11 +254,19 @@ class EngineLayersMixin:
                 value = int(value)
             return str(value)
 
+        # One condition is named: several values holding the very same rows
+        # (a month-to-date layer on a calendar of months holds each month
+        # once, as the plain one does) are one layer, and naming a
+        # cumulative one sends a caller to it. The first field that has
+        # such a value, and of it the value loaded first.
         found = []
         for field in calendar["candidates"]:
             for row in self._layer_rows(app_handle, [field], key, dates):
                 if plain(row, 1):
                     found.append({"fields": [field], "values": [text(row[0])]})
+                    break
+            if found:
+                break
         if not found:
             few = [c for c in calendar["candidates"]
                    if calendar["distinct"].get(c, 0) <= LAYER_PAIR_MAX]
@@ -262,6 +275,10 @@ class EngineLayersMixin:
                     if plain(row, 2):
                         found.append({"fields": list(pair),
                                       "values": [text(row[0]), text(row[1])]})
+                        break
+                if found:
+                    break
         for option in found:
-            option["condition"] = _condition(option["fields"], option["values"])
+            option["parts"] = _condition_parts(option["fields"], option["values"])
+            option["condition"] = ",".join(option["parts"])
         return found

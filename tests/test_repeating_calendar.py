@@ -41,6 +41,7 @@ MODEL = [
 
 PLAIN = [{"table": "Accumulated", "key": "MonthKey", "rows": 669, "dates": 21,
           "plain": [{"fields": ["Layer"], "values": ["Month"],
+                     "parts": ["[Layer]={'Month'}"],
                      "condition": "[Layer]={'Month'}"}]}]
 
 
@@ -62,12 +63,14 @@ class TestStructure:
 
 
 class _SpreadEngine(_Engine):
-    """Month '2026-08' reaches 13 month keys, which belong to 9 months;
-    with the plain layer set, one key, one month."""
+    """Month '2026-08' reaches 13 month keys, and on the plain rows one;
+    `reached` is how many a filter reaches without the plain layer."""
 
-    def __init__(self):
-        super().__init__(known=("Region", "Amount", "Month", "MonthKey", "Layer"))
+    def __init__(self, reached=13, plain=1):
+        super().__init__(known=("Region", "Amount", "Month", "MonthKey", "Layer",
+                                "Year"))
         self.probes = []
+        self.counts = (reached, plain)
 
     def _model_fields(self, app_handle):
         return MODEL
@@ -77,11 +80,12 @@ class _SpreadEngine(_Engine):
 
     def _evaluate(self, expression):
         self.probes.append(expression)
+        reached, plain_count = self.counts
         plain = "[Layer]={'Month'}" in expression
         if "P(" in expression:
-            count = 1 if plain else 9
+            count = min(reached, plain_count)
         elif "DISTINCT [MonthKey]" in expression:
-            count = 1 if plain else 13
+            count = plain_count if plain else reached
         elif "DISTINCT [Month]" in expression:
             count = 1
         else:
@@ -97,7 +101,7 @@ class TestTheWarning:
         [spread] = reply["fan_out_check"]
         assert spread == {"field": "Month", "table": "Facts", "key": "MonthKey",
                           "key_values": 13, "per_value": 13.0,
-                          "belong_to_values": 9, "repeating_tables": ["Accumulated"]}
+                          "plain_key_values": 1, "repeating_tables": ["Accumulated"]}
         note = reply["warnings"][0]
         assert note.startswith("The filter on [Month] ('2026-08') reaches Facts "
                                "through 13 values of [MonthKey]")
@@ -105,6 +109,16 @@ class TestTheWarning:
         assert "{<[Layer]={'Month'}>}" in note
         assert result["warnings"][0].startswith("q1: The filter on [Month]")
         assert reply["numbers_verified"] is False
+
+    def test_a_filter_reaching_exactly_its_own_period_is_quiet(self):
+        """Live, `Year=2025` on the cumulative calendar reached the twelve
+        months of 2025 and the total was right, yet the reply said the
+        numbers were unverified. The same key values on the plain rows mean
+        the period asked for."""
+        reply = _SpreadEngine(reached=12, plain=12).run_queries(1, "app", [_query(
+            filters=[{"field": "Month", "values": ["2025"]}])])["results"][0]
+        assert "fan_out_check" not in reply
+        assert "numbers_verified" not in reply
 
     def test_the_plain_layer_set_beside_it_quiets_it(self):
         reply = _SpreadEngine().run_queries(1, "app", [_query(
@@ -124,6 +138,18 @@ class TestTheWarning:
             "The set of measure 'GGR' on [Month] reaches Facts through 13 values")
         assert reply["fan_out_check"][0]["measure"] == "GGR"
 
+    def test_grouping_by_a_repeating_calendar_without_its_plain_layer(self):
+        """A row per month of a cumulative calendar sums every layer of that
+        month; the filter check alone would say nothing without a filter."""
+        reply = _SpreadEngine().run_queries(1, "app", [_query(
+            group_by=["Month"])])["results"][0]
+        [spread] = reply["fan_out_check"]
+        assert spread["grouped_by"] is True and spread["repeating_tables"] == ["Accumulated"]
+        assert reply["warnings"][0].startswith("The rows are grouped by [Month]")
+        quiet = _SpreadEngine().run_queries(1, "app", [_query(
+            group_by=["Month"], filters=[{"field": "Layer", "values": ["Month"]}])])
+        assert "fan_out_check" not in quiet["results"][0]
+
     def test_a_field_on_an_ordinary_table_is_not_asked(self):
         engine = _SpreadEngine()
         engine.run_queries(1, "app", [_query(
@@ -137,7 +163,10 @@ class _LayerEngine(EngineLayersMixin):
     ROWS = {
         # "Part" holds the plain rows of 12 of the 21 dates only, as a
         # fiscal-year field set on one year's plain rows did live.
-        ("Layer",): [["Month", 21, 21, 21], ["YTD", 120, 21, 21],
+        # "To date" holds the very same rows as "Month" on a calendar of
+        # months, as a month-to-date layer did live; it is loaded after it.
+        ("Layer",): [["Month", 21, 21, 21], ["To date", 21, 21, 21],
+                     ["YTD", 120, 21, 21],
                      ["Shift", 21, 21, 0], ["Part", 12, 12, 12]],
         ("Month",): [["2026-08", 8, 8, 1]],
     }
@@ -148,6 +177,7 @@ class _LayerEngine(EngineLayersMixin):
     def create_hypercube(self, app_handle, dimensions, measures, max_rows=None, **kw):
         fields = tuple(d["field"] for d in dimensions)
         self.asked.append((fields, [m["expression"] for m in measures]))
+        self.sorts = [d.get("sort_by", {}).get("qSortByLoadOrder") for d in dimensions]
         return {"rows": self.ROWS.get(fields, [])}
 
 
@@ -155,8 +185,12 @@ class TestThePlainLayer:
     def test_one_row_per_date_that_is_the_date_itself(self):
         engine = _LayerEngine()
         [layer] = engine.plain_layers(1, MODEL)
+        # One value is named, the first loaded: a cumulative layer that
+        # happens to hold the same rows is not offered.
         assert layer["plain"] == [{"fields": ["Layer"], "values": ["Month"],
+                                   "parts": ["[Layer]={'Month'}"],
                                    "condition": "[Layer]={'Month'}"}]
+        assert engine.sorts == [1]
         fields, measures = engine.asked[0]
         assert measures == ["Count([Layer])", "Count(DISTINCT [MonthKey])",
                             "Sum(If([MonthName]=[MonthKey],1,0))"]
