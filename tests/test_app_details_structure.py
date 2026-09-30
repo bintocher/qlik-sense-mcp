@@ -107,6 +107,14 @@ class _Engine(QlikEngineAPI):
                                     "description": "Current month" if i == 0 else ""}})
         return {"qLayout": {"qBookmarkList": {"qItems": items}}}
 
+    def published_sheets(self, app_handle):
+        from qlik_sense_mcp_server.engine.objects import ObjectParser
+        chart = ObjectParser().describe({
+            "qInfo": {"qId": "c1", "qType": "barchart"}, "title": "Amount by segment",
+            "qHyperCubeDef": {"qDimensions": [{"qDef": {"qFieldDefs": ["Segment"]}}],
+                              "qMeasures": [{"qDef": {"qDef": "Sum(Amount)", "qLabel": "Amount"}}]}})
+        return [{"id": "s1", "title": "Overview", "objects": [chart]}], "approved sheets"
+
     def _known_sets(self, app_handle):
         return {"bookmarks": set(), "states": {"Compare"}}
 
@@ -195,6 +203,13 @@ def test_an_oversized_reply_is_trimmed_and_says_so(details):
     assert reply["size_budget"]["trimmed"]
     assert "measure expressions cut to 80 characters" in reply["size_budget"]["trimmed"]
     assert all(len(m["expression"]) <= 83 for m in reply["measures"])
+
+
+def test_usage_of_the_published_sheets_is_included(details):
+    _text, reply = details()
+    assert reply["usage"]["read_from"] == "approved sheets"
+    assert reply["usage"]["objects"] == ['"Amount by segment" (barchart, sheet "Overview"): dims Segment; measures Amount']
+    assert "Segment (dimension)" in reply["usage"]["fields_in_one_object"]
 
 
 def test_warnings_are_about_volume(details):

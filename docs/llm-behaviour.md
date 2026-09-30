@@ -107,6 +107,13 @@ measure, and gives every short field its values; past the budget it trims
 values to 10 and expressions to 80 characters and says so in
 `size_budget.trimmed`.
 
+It also says how the author's own sheets use the model (`usage`): per field,
+in how many objects it appears and whether it is grouped by, aggregated or
+only named in a set modifier, and next to which measures. A date field used
+in 17 objects next to the revenue measures and a look-alike used in none is
+the evidence a model needs to pick the period field, and it is the report's
+evidence, not the server's guess.
+
 The reply states the model, it does not choose for the caller: which table
 holds facts, which key links what, how many dates a calendar has against its
 rows. Which date field is "the period" is left to the caller - a hint that

@@ -30,6 +30,25 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   an extension ships ("Button 1", "Click Here", `http://`) are dropped.
   Measures placed in a text object as `=[](cId)` are shown by their label,
   and the text of an sn-text object is decoded from the JSON stored in it.
+- `get_app_details` carries `usage`: how the author's own sheets use the
+  model - the approved sheets of a published app, every sheet of an
+  unpublished one, read from definitions with the per-type parser and
+  nothing calculated, cached with the rest of the reply until the app
+  reloads. Per field: objects, sheets, role (`dimension`, `aggregated`,
+  `condition` for a field named in a set modifier, `Aggr dimension`) and the
+  three fields and measures it most often stands next to; fields seen in one
+  object on one line; `unused_fields`; master measures by use; titled
+  objects, title first, with their dimensions and measures; measure
+  formulas written in objects rather than the library, deduplicated, with
+  the sheet and the number of objects; objects in an alternate state or
+  under a whole-cube set. `report_filters` lists how the report is
+  filtered: filter-pane fields by number of sheets, date pickers, variable
+  inputs with their values, what buttons select, set or apply (approved
+  bookmarks by title), and tab conditions with the meaning of their
+  variables. Past the budget, `usage` keeps the 10 most used fields, 30
+  objects and 20 formulas.
+- Field names starting with `%` (`%Issue_ID`) are read whole from
+  expressions, and `NODISTINCT` is no longer taken for a field.
 
 ### Changed
 

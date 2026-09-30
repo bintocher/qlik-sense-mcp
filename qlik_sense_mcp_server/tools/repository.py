@@ -6,7 +6,7 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import context, overview
+from . import context, overview, usage
 from .helpers import (
     _check,
     _tool,
@@ -239,6 +239,22 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         and `variants` - measures named "<name> Y-1", "<name> YoY, %",
         "<name>, %" folded under their base, by exact name. `engine_query`
         computes any of them by name: {"measures": [{"master": "<name>"}]}.
+        `usage` - how the author's sheets use the model (the approved
+        sheets of a published app, every sheet of an unpublished one; read
+        from definitions, nothing calculated): per field, in how many
+        objects and sheets, in which role - `dimension`, `aggregated`,
+        `condition` (named in a set modifier), `Aggr dimension` - and next
+        to which fields and measures; `fields_in_one_object`,
+        `unused_fields`; `master_measures` by use; `objects` - titled
+        visualizations, the title first, as the question they answer, with
+        their dimensions and measures; `formulas` - measure expressions
+        written in objects rather than the library, deduplicated, with the
+        sheet and how many objects use them; `alternate_state_or_set` -
+        objects whose figures come from another state or a whole-cube set.
+        `report_filters` - how a user filters this report: filter-pane
+        fields by the number of sheets they are on, date pickers, variable
+        inputs with their values, what buttons select, set or apply, and
+        tab conditions with the meaning of the variables in them.
         `bookmarks` - the approved bookmarks shipped with the app, title
         and description. Bookmarks users saved are not listed.
         `alternate_states` where the app defines them.
@@ -387,12 +403,15 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     # the app. Users' own bookmarks are left out entirely - on one app 698
     # of them, half named by a GUID, were a third of the reply.
     bookmarks: List[str] = []
+    bookmark_titles: Dict[str, str] = {}
     states: List[str] = []
     try:
         read_bookmarks = getattr(context.engine_api, "approved_bookmarks", None)
         if read_bookmarks is not None and raw_fields:
+            approved = read_bookmarks(app_handle)
             bookmarks = [b["title"] + (f" - {b['description']}" if b.get("description") else "")
-                         for b in read_bookmarks(app_handle)]
+                         for b in approved]
+            bookmark_titles = {b["id"]: b["title"] for b in approved if b.get("id")}
         read_sets = getattr(context.engine_api, "_known_sets", None)
         if read_sets is not None and raw_fields:
             states = sorted((read_sets(app_handle) or {}).get("states") or ())
@@ -400,6 +419,24 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         if isinstance(ex, TimeoutError):
             raise
         logger.debug("Could not read the bookmarks of %s: %s", aid, ex)
+
+    # How the author's own sheets use the model - the reference answers of
+    # this app. Read once per reload with everything else here, from
+    # definitions only; a failure leaves the rest of the reply intact.
+    usage_section: Dict[str, Any] = {}
+    report_filters: List[str] = []
+    try:
+        read_sheets = getattr(context.engine_api, "published_sheets", None)
+        if read_sheets is not None and raw_fields:
+            sheets, basis = read_sheets(app_handle)
+            if sheets:
+                usage_section, report_filters = usage.summarise(
+                    sheets, {f["field_name"] for f in raw_fields}, bookmark_titles)
+                usage_section = {"read_from": basis, **usage_section}
+    except Exception as ex:
+        if isinstance(ex, TimeoutError):
+            raise
+        logger.warning("Could not summarise the sheets of %s: %s", aid, ex)
 
     result: Dict[str, Any] = {
         "app": {
@@ -421,6 +458,10 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     measures = overview.measure_entries(library.get("measures") or [], model_fields)
     if measures:
         result["measures"] = measures
+    if usage_section:
+        result["usage"] = usage_section
+    if report_filters:
+        result["report_filters"] = report_filters
     if bookmarks:
         result["bookmarks"] = bookmarks
     if states:
@@ -431,6 +472,8 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
          overview.trim_values),
         (f"measure expressions cut to {overview.TRIMMED_EXPRESSION_CHARS} characters",
          overview.trim_measures),
+        ("usage cut to the 10 most used fields, 30 objects and 20 formulas",
+         usage.trim_usage),
     ])
     if isinstance(fields_data, dict) and "error" in fields_data:
         result["engine_error"] = fields_data["error"]

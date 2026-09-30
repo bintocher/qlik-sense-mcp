@@ -78,7 +78,7 @@ _COORDINATE = re.compile(
 _EXPRESSION_KEYWORDS = frozenset("""
     and or not xor like precedes follows
     if then else elseif end
-    total distinct all aggr
+    total distinct nodistinct all aggr
     null true false
     as in when
     intervalmatch resident inline autogenerate
@@ -249,7 +249,8 @@ def fields_in_expression(expression: str) -> List[str]:
     text = re.sub(r"#\s*\(", "(", text)
     # Field names are routinely non-Latin, so the identifier pattern is
     # Unicode-aware rather than A-Za-z.
-    for match in re.finditer(r"(?<![\w.])(\w[\w.]*)\s*(\()?", text, re.UNICODE):
+    # A leading % is part of a name (`%Issue_ID`): Qlik has no % operator.
+    for match in re.finditer(r"(?<![\w.%])(%?\w[\w.]*)\s*(\()?", text, re.UNICODE):
         name, is_call = match.group(1), match.group(2)
         if is_call or name.lower() in _EXPRESSION_KEYWORDS:
             continue

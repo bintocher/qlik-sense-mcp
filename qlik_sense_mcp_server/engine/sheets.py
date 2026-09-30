@@ -280,12 +280,42 @@ class EngineSheetsMixin:
             title = str(data.get("title") or meta.get("title") or "").strip()
             if not title:
                 continue
-            entry = {"title": title}
+            entry = {"id": (item.get("qInfo") or {}).get("qId", ""), "title": title}
             description = str(data.get("description") or meta.get("description") or "").strip()
             if description:
                 entry["description"] = description
             found.append(entry)
         return found
+
+    def published_sheets(self, app_handle: int) -> Tuple[List[Dict[str, Any]], str]:
+        """The sheets the app's author made, with their objects described.
+
+        In a published app those are the approved (base) sheets; sheets
+        users made for themselves or shared are not read. An app that is
+        not published has no approved sheets, and every sheet in it is its
+        owner's, so all of them are read. Definitions only, as for
+        `get_app_sheet_objects`: nothing is calculated.
+        """
+        sheets = self.get_sheets(app_handle)
+        approved = [s for s in sheets if (s.get("qMeta") or {}).get("approved")]
+        chosen = approved or sheets
+        read = []
+        for sheet in chosen:
+            sheet_id = (sheet.get("qInfo") or {}).get("qId")
+            if not sheet_id:
+                continue
+            try:
+                objects = self._get_sheet_objects_detailed(app_handle, sheet_id)
+            except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    raise
+                logger.warning("Could not read sheet %s: %s", sheet_id, exc)
+                continue
+            read.append({"id": sheet_id,
+                         "title": (sheet.get("qMeta") or {}).get("title")
+                         or (sheet.get("qData") or {}).get("title") or sheet_id,
+                         "objects": objects})
+        return read, "approved sheets" if approved else "all sheets (none is approved)"
 
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
         """The objects on a sheet, read from their definitions alone.

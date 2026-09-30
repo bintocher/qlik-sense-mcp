@@ -115,6 +115,10 @@ def _ok(obj: Any) -> str:
     for key, value in obj.items():
         if key in _LINE_KEYS and isinstance(value, list) and len(value) > 1:
             compact[key] = _LinesList(value)
+        elif key in _LINE_KEYS and isinstance(value, dict):
+            # A section of lists, such as `usage`: each list a line an item.
+            compact[key] = {k: _LinesList(v) if isinstance(v, list) and len(v) > 1 else v
+                            for k, v in value.items()}
         elif key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
             compact[key] = _CompactList(value)
         elif key in _BULK_KEYS and isinstance(value, dict) and "rows" in value:
@@ -140,7 +144,8 @@ class _CompactList(list):
 # Lists read an item at a time: one table with its fields, one measure,
 # one link per line. Indented, a measure spreads over eight lines of mostly
 # spaces; all on one line, a hundred of them are a wall.
-_LINE_KEYS = ("tables", "measures", "dimensions", "links", "islands", "bookmarks")
+_LINE_KEYS = ("tables", "measures", "dimensions", "links", "islands", "bookmarks",
+              "usage", "report_filters")
 
 
 class _LinesList(list):
