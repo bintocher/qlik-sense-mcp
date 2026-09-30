@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 
 # Day zero of Qlik's date serial numbers.
 _EPOCH = datetime.date(1899, 12, 30)
+# A range over a text field is its values between the bounds; this many
+# values are read at most.
+TEXT_RANGE_MAX_VALUES = 1000
 
 # How a caller may write a period bound. Anything else is refused with the
 # list of accepted forms rather than guessed at.
@@ -793,6 +796,56 @@ class EngineFiltersMixin:
         return any(str(tag).lstrip("$") in ("date", "timestamp")
                    for tag in tags)
 
+    def _text_range(self, app_handle: int, field: str, low: Any, high: Any,
+                    low_exclusive: bool, high_exclusive: bool,
+                    base: str) -> Dict[str, Any]:
+        """The values of a text field between two bounds, as a value list.
+
+        Bounds like `2026-01` are neither dates nor numbers, and a range of
+        them was refused; a model then wrote the range by hand and got
+        zeros. The field's values are read and those that sort between the
+        bounds, as text, are named one by one - which is also what the
+        caller can check in `values`.
+        """
+        name = escape_qlik_field_name(field)
+        read = self.get_field_values(app_handle, field,
+                                     max_values=TEXT_RANGE_MAX_VALUES,
+                                     include_frequency=False)
+        if read.get("error"):
+            return {"error": f"The values of {name} could not be read: "
+                             f"{read['error']}",
+                    "error_category": "invalid_filter"}
+        if int(read.get("total_values") or 0) > TEXT_RANGE_MAX_VALUES:
+            return {"error": (
+                f"{name} holds {read['total_values']} values; a range over "
+                f"text is taken as the values between its bounds, and this "
+                f"server lists at most {TEXT_RANGE_MAX_VALUES}. Filter by the "
+                f"date field the text comes from, or list the values."),
+                "error_category": "invalid_filter"}
+        texts = [str(v.get("value")) for v in read.get("values") or []
+                 if v.get("value") not in (None, "")]
+
+        def inside(text: str) -> bool:
+            if low is not None and (text < low or (low_exclusive and text == low)):
+                return False
+            if high is not None and (text > high or (high_exclusive and text == high)):
+                return False
+            return True
+
+        chosen = sorted(text for text in texts if inside(text))
+        if not chosen:
+            shown = sorted(texts)
+            return {"error": (
+                f"No value of {name} falls in {low!r}..{high!r}"
+                + (f"; it holds {shown[0]!r}..{shown[-1]!r}." if shown else ".")),
+                "error_category": "empty_range"}
+        outcome = self.values_modifier(app_handle, field, chosen, base=base)
+        if outcome.get("error"):
+            return outcome
+        outcome["range"] = [low, high]
+        outcome["form"] = "text values"
+        return outcome
+
     def range_modifier(self, app_handle: int, app_id: str, field: str,
                        low: Any, high: Any, low_exclusive: bool = False,
                        high_exclusive: bool = False,
@@ -809,6 +862,12 @@ class EngineFiltersMixin:
         stated = [v for v in (low, high) if v is not None]
         written = [_plain_number(v) for v in stated
                    if not isinstance(v, bool)]
+        if (stated and all(isinstance(v, str) for v in stated)
+                and any(w is None for w in written)):
+            # A text field whose values sort as text - months written
+            # `2026-08` - takes the range as the values between the bounds.
+            return self._text_range(app_handle, field, low, high,
+                                    low_exclusive, high_exclusive, base)
         if len(written) != len(stated) or any(w is None for w in written):
             return {
                 "error": (

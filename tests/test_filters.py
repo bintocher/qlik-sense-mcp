@@ -695,3 +695,42 @@ class TestRangeInTheFieldsFormat:
         engine.period_modifier(1, "app", "F", "2011", "2011")
         engine.period_modifier(1, "app", "F", "2012", "2012")
         assert len([a for a in engine.asked if "FieldValue(" in a]) == 1
+
+
+from tests.test_typed_queries import _Engine as _QueryEngine, _query as _typed_query  # noqa: E402
+
+
+class _Months(_QueryEngine):
+    """A text field of months, `2025-11` to `2026-03`."""
+
+    def __init__(self):
+        super().__init__(known=("Region", "Amount", "Month"))
+
+    def get_field_values(self, app_handle, field_name, max_values=100,
+                         include_frequency=True, offset=0):
+        months = ["2025-11", "2025-12", "2026-01", "2026-02", "2026-03"]
+        return {"values": [{"value": m} for m in months], "total_values": len(months)}
+
+
+class TestTextRange:
+    """A range of months written as text was refused as "neither dates nor
+    numbers"; it is taken as the values between the bounds."""
+
+    def test_the_values_between_the_bounds(self):
+        plan = _Months()._plan_query(1, "app", _typed_query(
+            filters=[{"field": "Month", "from": "2025-12", "to": "2026-02"}]), 0)
+        [applied] = plan["filters_applied"]
+        assert applied["values"] == ["2025-12", "2026-01", "2026-02"]
+        assert applied["form"] == "text values"
+        assert "[Month]={'2025-12','2026-01','2026-02'}" in plan["modifier"]
+
+    def test_a_period_on_the_text_field_is_that_value(self):
+        plan = _Months()._plan_query(1, "app", _typed_query(
+            filters=[{"field": "Month", "period": "2026-01"}]), 0)
+        assert plan["filters_applied"][0]["values"] == ["2026-01"]
+
+    def test_bounds_outside_the_field_say_what_it_holds(self):
+        plan = _Months()._plan_query(1, "app", _typed_query(
+            filters=[{"field": "Month", "greater_than": "2026-03"}]), 0)
+        assert plan["error_category"] == "empty_range"
+        assert "'2025-11'..'2026-03'" in plan["error"]

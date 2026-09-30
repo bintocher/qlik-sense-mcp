@@ -336,6 +336,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   found", the third worked. The calls ran one after the other under the
   Engine lock, and two calls sent at once are served one after the other
   as before; a timeout or a wrong query is not repeated.
+- A range on a text field whose values sort as text - months written `2026-08`
+  - is the list of its values between the bounds (`form: "text values"`,
+  at most 1000 values read); it was refused as "neither dates nor
+  numbers". Measured on a 1.16-billion-row app: months `2026-07` to
+  `2026-08` with the plain rows gave GGR 3 311 116 219 and 2 905 309 486.
 
 ## [2.3.1] - 2026-09-25
 
