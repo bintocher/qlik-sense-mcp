@@ -317,6 +317,142 @@ def _timed(func):
 
 
 
+# How often a long call tells the client it is still working. Well inside
+# the silence a client tolerates, and rare enough not to be noise.
+PROGRESS_INTERVAL_SECONDS = 10.0
+
+# The Engine requests of a call stop themselves at the limit; this margin
+# is for whatever cannot be stopped from inside - a connect, a QRS call -
+# after which the call is abandoned from outside.
+_BACKSTOP_GRACE_SECONDS = 5.0
+
+
+def _tool():
+    """Register a tool with the MCP host, bounded in time.
+
+    Returns the function unchanged, so Python callers (the tests, anything
+    importing `server`) keep calling it synchronously. What the host gets
+    is `_bounded(func)`.
+    """
+    def decorator(func):
+        context.mcp.tool()(_bounded(func))
+        return func
+    return decorator
+
+
+def _bounded(func):
+    """The async form of a tool that the MCP host runs.
+
+    A plain function registered with the host runs on its event loop, so a
+    call waiting on a slow Engine froze the server for every client, sent
+    nothing, and after 300 silent seconds the client dropped the session.
+    Here the tool body runs in a worker thread under the QLIK_TOOL_TIMEOUT
+    limit (`deadline`), the loop stays free, and every
+    PROGRESS_INTERVAL_SECONDS the client is sent a progress notification -
+    when it asked for them with a progress token; otherwise there is
+    nothing to send. At the limit the reply is an error that says so, and
+    the next call starts on a clean connection.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):  # pragma: no cover - builtins only
+        sig = None
+    uses_engine = getattr(func, "__engine_serialised__", False)
+
+    @functools.wraps(func)
+    async def runner(*args, **kwargs):
+        import anyio
+
+        from .. import deadline
+
+        limit = deadline.tool_timeout_seconds()
+        state = {}
+
+        def work():
+            with deadline.call_deadline(limit) as bound:
+                state["bound"] = bound
+                return func(*args, **kwargs)
+
+        if limit <= 0:
+            return await anyio.to_thread.run_sync(work)
+
+        ctx = _request_context()
+        started = time.monotonic()
+        result = None
+
+        async def heartbeat():
+            while True:
+                await anyio.sleep(PROGRESS_INTERVAL_SECONDS)
+                await _report_progress(ctx, time.monotonic() - started, limit)
+
+        with anyio.move_on_after(limit + _BACKSTOP_GRACE_SECONDS):
+            async with anyio.create_task_group() as group:
+                if ctx is not None:
+                    group.start_soon(heartbeat)
+                result = await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+                group.cancel_scope.cancel()
+
+        bound = state.get("bound")
+        if result is None:
+            # Abandoned from outside. The thread may still hold the Engine
+            # lock in a blocked recv(); breaking the socket lets it finish.
+            if uses_engine and context.engine_api is not None:
+                context.engine_api.abort_socket()
+            return _time_limit_reply(func.__name__, limit, sig, args, kwargs,
+                                     time.monotonic() - started)
+        if bound is not None and bound.expired:
+            try:
+                parsed = json.loads(result)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and "error" in parsed:
+                return _time_limit_reply(func.__name__, limit, sig, args, kwargs,
+                                         parsed.get("tool_call_seconds"))
+        return result
+
+    return runner
+
+
+def _time_limit_reply(name, limit, sig, args, kwargs, elapsed) -> str:
+    """The reply for a call the time limit stopped.
+
+    Replaces whatever the tool made of it: a step that swallowed the
+    timeout leaves the next one to fail with "not connected", which would
+    send the caller looking for a network fault.
+    """
+    return _err(
+        f"The call did not finish within its {limit:.0f}s time limit "
+        f"(QLIK_TOOL_TIMEOUT) and was stopped; the connection is fine. Ask "
+        f"for less in one call: fewer objects, fields or dimensions, a "
+        f"filter on the large table, or explicit field names.",
+        error_category="time_limit",
+        tool=name,
+        request=_describe_call(sig, args, kwargs),
+        tool_call_seconds=round(elapsed, 3) if isinstance(elapsed, (int, float)) else elapsed,
+    )
+
+
+def _request_context():
+    """The MCP request context of the running call, or None outside one."""
+    get_context = getattr(context.mcp, "get_context", None)
+    if get_context is None:
+        return None
+    try:
+        ctx = get_context()
+        return ctx if getattr(ctx, "request_context", None) is not None else None
+    except Exception:
+        return None
+
+
+async def _report_progress(ctx, elapsed: float, limit: float) -> None:
+    try:
+        await ctx.report_progress(
+            round(elapsed), limit,
+            f"still working, {elapsed:.0f}s of at most {limit:.0f}s")
+    except Exception as exc:  # a lost notification must not fail the call
+        logger.debug("Progress notification failed: %s", exc)
+
+
 def _to_bool(value: Any, default: bool = True) -> bool:
     if isinstance(value, bool):
         return value

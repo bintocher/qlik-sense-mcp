@@ -217,8 +217,10 @@ secrets), and login/password against a "Form based" virtual proxy
   top-N patterns. Qlik Engine itself returns
   [error 7009 `calc-pages-too-large`](https://help.qlik.com/en-US/sense-developer/November2025/Subsystems/EngineJSONAPI/Content/service-genericobject-gethypercubedata.htm)
   for any single page over 10000 cells.
-- **Single timeout knob.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
-  controls both the WebSocket handshake and every Engine API call.
+- **Two timeout knobs.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
+  controls both the WebSocket handshake and every Engine API call;
+  `QLIK_TOOL_TIMEOUT` (default `120.0`) bounds a whole tool call, so a
+  slow one ends with a clear error before the client gives up on it.
 
 ## Requirements
 

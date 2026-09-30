@@ -23,6 +23,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `qFieldLabels` and `qGrouping` - `name = field`, `name = A > B (drill-down)`,
   `name = A | B (cyclic)`, or `name = =expr (calculated)` cut at 150
   characters with `expression_truncated` - plus `fields` for field-based ones.
+- `get_app_sheet_objects` no longer calculates the sheet. It called
+  `GetLayout` on every object, so Engine computed every chart, and on a
+  large app a sheet ran past 300 seconds until the client dropped the MCP
+  session. Objects are now read from definitions only: the sheet's
+  `GetFullPropertyTree` in one request, linked objects from their master
+  visualization's properties, master items with `GetProperties`. Container
+  objects list theirs in `children`; `master_object`, `state`,
+  `calc_condition` and `context_set` appear where set.
+- A tool call now has a time limit, `QLIK_TOOL_TIMEOUT` (default 120 s,
+  `0` turns it off). Tools used to run on the server's event loop, so a
+  slow Engine call froze the server for every client and sent nothing.
+  They now run in a worker thread; Engine requests are cut to the time
+  left, cancelled with `CancelRequest` at the limit, and the reply is an
+  error with `error_category: "time_limit"` while the next call works as
+  usual. A progress notification goes out every 10 seconds when the client
+  asked for them with a progress token.
+- An Engine socket timeout is handled as a timeout again. websocket-client
+  raises `WebSocketTimeoutException`, which is not a `TimeoutError`, so
+  every timeout took the generic "recv() failed" path, and a greeting that
+  did not arrive in time failed the connect instead of being skipped.
 
 ## [2.3.1] - 2026-09-25
 

@@ -9,10 +9,10 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from . import context
-from .context import mcp
 from .schema import (Filter, Measure, Metric, Query, Scope)
 from .helpers import (
     _check,
+    _tool,
     _engine_serialised,
     _err,
     _ok,
@@ -29,7 +29,7 @@ from ..config import (
 )
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_script(app_id: str) -> str:
@@ -89,7 +89,7 @@ def get_app_script(app_id: str) -> str:
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_field_statistics(
@@ -146,7 +146,7 @@ def get_app_field_statistics(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def engine_get_field_range(app_id: str, field_name: str) -> str:
@@ -187,7 +187,7 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def engine_query(
@@ -485,7 +485,7 @@ def engine_query(
                     app_id=app_id)
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def engine_create_hypercube(
@@ -710,7 +710,7 @@ def engine_create_hypercube(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_field(
@@ -855,7 +855,7 @@ def get_app_field(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_variables(
@@ -944,7 +944,7 @@ def get_app_variables(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_sheets(app_id: str) -> str:
@@ -986,7 +986,28 @@ def get_app_sheets(app_id: str) -> str:
 
 
 
-@mcp.tool()
+def _sheet_object_entry(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """One object of `get_app_sheet_objects`, children in the same shape.
+
+    Fields, measures and dimensions are all there is to it: dropping any of
+    them meant answering "which fields does this sheet work with" took one
+    get_app_object call per object.
+    """
+    entry = {"object_id": obj.get("object_id", ""),
+             "object_type": obj.get("object_type", ""),
+             "object_description": obj.get("object_title", ""),
+             "fields_used": obj.get("fields_used", []),
+             "measures": obj.get("measures", []),
+             "dimensions": obj.get("dimensions", [])}
+    for key in ("master_object", "state", "calc_condition", "context_set"):
+        if obj.get(key):
+            entry[key] = obj[key]
+    if obj.get("children"):
+        entry["children"] = [_sheet_object_entry(c) for c in obj["children"]]
+    return entry
+
+
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
@@ -1011,11 +1032,18 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 
     Returns:
         `objects`, each with `object_id`, `object_type` (`barchart`,
-        `table`, `kpi`, `listbox`), `object_description` (its title),
-        `fields_used`, `measures` and `dimensions`; plus `total_objects`.
+        `table`, `kpi`, `filterpane`), `object_description` (its title, or
+        the `=...` expression that computes it), `fields_used`, `measures`
+        and `dimensions`; plus `total_objects`. Where they apply:
+        `master_object` (the master visualization it is linked to),
+        `state` (an alternate state), `calc_condition`, `context_set` (a
+        set expression over the whole object) and `children` (the objects
+        inside a container, same shape). A filter pane lists its fields as
+        `dimensions`.
 
     Does not return:
-        Computed values, formatting, or layout position.
+        Computed values, formatting, or layout position. Nothing is
+        calculated to answer this, so it stays fast on any app size.
     """
     e = _check()
     if e:
@@ -1024,27 +1052,14 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
         # no_data=False to keep the cached connection data-ready
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         objects = context.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
-        formatted = [
-            {"object_id": o.get("object_id", ""),
-             "object_type": o.get("object_type", ""),
-             "object_description": o.get("object_title", ""),
-             # Already computed while reading each object's layout and
-             # properties. Dropping any of it meant answering "which fields
-             # does this sheet work with" took one get_app_object call per
-             # object — and the expressions were not reachable at all, since
-             # the layout get_app_object returns does not contain them.
-             "fields_used": o.get("fields_used", []),
-             "measures": o.get("measures", []),
-             "dimensions": o.get("dimensions", [])}
-            for o in objects if isinstance(o, dict)
-        ]
+        formatted = [_sheet_object_entry(o) for o in objects if isinstance(o, dict)]
         return _ok({"app_id": app_id, "sheet_id": sheet_id, "total_objects": len(formatted), "objects": formatted})
     except Exception as ex:
         return _err(str(ex), app_id=app_id, sheet_id=sheet_id)
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_object(app_id: str, object_id: str, limit: int = 50,
@@ -1192,7 +1207,7 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,

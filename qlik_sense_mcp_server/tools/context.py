@@ -184,5 +184,8 @@ def _task_admin_tool():
     """Register a tool only when task administration was asked for and
     the current mode allows it — see `_TASK_TOOLS_ENABLED` above."""
     def decorator(fn):
-        return mcp.tool()(fn) if _TASK_TOOLS_ENABLED else fn
+        if not _TASK_TOOLS_ENABLED:
+            return fn
+        from .helpers import _tool  # helpers imports this module
+        return _tool()(fn)
     return decorator

@@ -15,11 +15,13 @@ from ..config import (
     AUTH_MODE_JWT,
     AUTH_MODE_FORM,
 )
+from .. import deadline
 from ..exceptions import (
     QlikConnectionError,
     QlikEngineError,
     QlikLicenseError,
     QlikSessionLimitError,
+    ToolTimeLimitError,
 )
 from ..jwt_session import JwtBootstrapError
 from ..form_session import FormBootstrapError
@@ -27,6 +29,7 @@ from contextlib import contextmanager
 from typing import Dict, List, Any, Optional
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -34,6 +37,12 @@ import uuid
 import websocket
 
 logger = logging.getLogger(__name__)
+
+# What a socket timeout looks like from recv()/send(). websocket-client
+# wraps the socket's own timeout in WebSocketTimeoutException, which is not
+# a TimeoutError: catching only the latter sent every Engine timeout down
+# the generic "recv() failed" path instead of the timeout handling.
+_RECV_TIMEOUTS = (socket.timeout, TimeoutError, websocket.WebSocketTimeoutException)
 
 # Every Engine endpoint carries this: Qlik reads `/ttl/<n>` from the socket
 # path and drops the session that many seconds after the socket goes away.
@@ -422,7 +431,6 @@ class EngineConnectionMixin:
         typed error here, because the socket is closed right after it and
         every later call would otherwise fail with an unrelated parse error.
         """
-        import socket as _socket
 
         # Greeting frames arrive immediately; a long wait here would only
         # delay the fallback to the next endpoint.
@@ -432,7 +440,7 @@ class EngineConnectionMixin:
             for _ in range(10):
                 try:
                     data = self.ws.recv()
-                except (_socket.timeout, TimeoutError):
+                except _RECV_TIMEOUTS:
                     # No OnConnected within the window: keep the socket and
                     # let the first real request decide. Pre-1.7.2 behaviour.
                     logger.debug("No OnConnected within %.1fs, proceeding anyway",
@@ -629,6 +637,66 @@ class EngineConnectionMixin:
                 pass
             self.ws = None
 
+    def _within_deadline(self, timeout: Optional[float],
+                         method: str) -> "tuple[Optional[float], bool]":
+        """The socket timeout for one request, cut to the tool call's time left.
+
+        Returns the timeout to use and whether the tool's limit, rather than
+        QLIK_WS_TIMEOUT, is what bounds it. A call with no time left fails
+        before sending anything, so the socket stays clean.
+        """
+        left = deadline.remaining()
+        base = timeout if timeout is not None else self.ws_timeout_seconds
+        if left is None or left >= base:
+            return timeout, False
+        if left <= 0:
+            raise self._time_limit_error(method)
+        return left, True
+
+    @staticmethod
+    def _time_limit_error(method: str) -> ToolTimeLimitError:
+        limit = deadline.mark_expired()
+        return ToolTimeLimitError(
+            f"The call did not finish within its {limit:.0f}s time limit "
+            f"(QLIK_TOOL_TIMEOUT) and was stopped at Engine method "
+            f"'{method}'. The connection is fine; ask for less in one call: "
+            f"fewer objects, fields or dimensions, a filter on the large "
+            f"table, or explicit field names.")
+
+    def _cancel_and_drop(self, request_ids: List[int]) -> None:
+        """Ask Engine to abandon these requests, then drop the socket.
+
+        Closing the socket alone leaves Engine computing for a session
+        nobody reads; `CancelRequest` stops the calculation. The socket
+        still goes, because the cancelled replies would arrive later as
+        stray frames.
+        """
+        if self.ws is not None:
+            try:
+                self._set_socket_timeout(2.0)
+                for request_id in request_ids:
+                    self.ws.send(json.dumps({
+                        "jsonrpc": "2.0", "id": self._get_next_request_id(),
+                        "handle": -1, "method": "CancelRequest",
+                        "params": {"qRequestId": request_id}}))
+            except Exception as exc:
+                logger.debug("CancelRequest failed: %s", exc)
+        self._kill_socket()
+
+    def abort_socket(self) -> None:
+        """Break a request blocked in another thread, without waiting.
+
+        `close()` sends a close frame and waits for the answer; this only
+        shuts the socket, so the blocked `recv()` fails at once and the
+        thread that owns the call cleans up after itself.
+        """
+        ws = self.ws
+        if ws is not None:
+            try:
+                ws.shutdown()
+            except Exception as exc:
+                logger.debug("Socket shutdown failed: %s", exc)
+
     def send_request(
         self, method: str, params: List[Any] = None, handle: int = -1,
         timeout: float = None,
@@ -652,10 +720,10 @@ class EngineConnectionMixin:
             handle: Object handle for scoped operations (-1 for global)
             timeout: Override socket timeout for this request (seconds)
         """
-        import socket as _socket
         if not self.ws:
             raise ConnectionError("Not connected to Engine API")
 
+        timeout, time_limited = self._within_deadline(timeout, method)
         effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
         if timeout is not None:
             self._set_socket_timeout(timeout)
@@ -673,7 +741,7 @@ class EngineConnectionMixin:
         try:
             try:
                 self.ws.send(json.dumps(request))
-            except (_socket.timeout, TimeoutError) as e:
+            except _RECV_TIMEOUTS as e:
                 self._kill_socket()
                 raise TimeoutError(
                     f"WebSocket send() timed out after {effective_timeout:.1f}s "
@@ -736,7 +804,10 @@ class EngineConnectionMixin:
                             f"received {stray_frames} stray frames without a "
                             f"matching id, killing connection"
                         )
-            except (_socket.timeout, TimeoutError) as e:
+            except _RECV_TIMEOUTS as e:
+                if time_limited:
+                    self._cancel_and_drop([req_id])
+                    raise self._time_limit_error(method) from e
                 self._kill_socket()
                 raise TimeoutError(
                     f"WebSocket recv() timed out after {effective_timeout:.1f}s "
@@ -826,12 +897,13 @@ class EngineConnectionMixin:
             left holding unread frames that a later call could mistake for
             its own.
         """
-        import socket as _socket
         if not self.ws:
             raise ConnectionError("Not connected to Engine API")
         if not requests:
             return []
 
+        timeout, time_limited = self._within_deadline(
+            timeout, requests[0].get("method", "batch"))
         effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
         if timeout is not None:
             self._set_socket_timeout(timeout)
@@ -854,7 +926,7 @@ class EngineConnectionMixin:
                 }
                 try:
                     self.ws.send(json.dumps(payload))
-                except (_socket.timeout, TimeoutError) as e:
+                except _RECV_TIMEOUTS as e:
                     self._kill_socket()
                     raise TimeoutError(
                         f"WebSocket send() timed out after {effective_timeout:.1f}s "
@@ -872,7 +944,11 @@ class EngineConnectionMixin:
             while pending:
                 try:
                     data = self.ws.recv()
-                except (_socket.timeout, TimeoutError) as e:
+                except _RECV_TIMEOUTS as e:
+                    if time_limited:
+                        self._cancel_and_drop(list(pending))
+                        raise self._time_limit_error(
+                            requests[next(iter(pending.values()))]["method"]) from e
                     self._kill_socket()
                     raise TimeoutError(
                         f"WebSocket recv() timed out after {effective_timeout:.1f}s "

@@ -7,9 +7,9 @@
 from typing import Any, Dict, List, Optional
 
 from . import context
-from .context import mcp
 from .helpers import (
     _check,
+    _tool,
     _err,
     _engine_serialised,
     _ok,
@@ -149,7 +149,7 @@ def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None
             field["highest_values"] = ends["highest"]
 
 
-@mcp.tool()
+@_tool()
 @_timed
 def get_about() -> str:
     """
@@ -183,7 +183,7 @@ def get_about() -> str:
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 def get_apps(
     limit: int = DEFAULT_APPS_LIMIT,
@@ -252,7 +252,7 @@ def get_apps(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) -> str:

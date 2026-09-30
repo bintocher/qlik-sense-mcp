@@ -27,6 +27,7 @@ qlik-sense-mcp/
 │   │   └── app_model.py  #   Data model, master items, variables
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── exceptions.py     # Error types carried into the response envelope
+│   ├── deadline.py       # Time limit of the tool call in progress
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
 │   ├── form_session.py   # Login/password session bootstrap + cache
@@ -163,10 +164,10 @@ back-to-back and matches responses by `id`, which is exactly what the
 Engine's numeric request ids are for. `send_request()` is unchanged and
 still used everywhere else.
 
-`_get_sheet_objects_detailed()` is the one caller: it resolves every child
-object's handle in one batch and reads every layout in a second, so a
-sheet with N objects costs 2 round-trips instead of 2N. Measured against a
-live sheet with 16 objects: 0.135s to 0.028s for identical results.
+Its callers resolve a set of handles in one batch and read their
+definitions in a second, so N objects cost 2 round-trips instead of 2N -
+the master visualizations behind a sheet's linked objects, and the
+master items its charts use.
 `raise_on_error=False` keeps per-object isolation — one broken object is
 skipped rather than losing the sheet.
 
@@ -280,6 +281,27 @@ field statistics). Heavy operations like building a hypercube against a
 raise `QLIK_WS_TIMEOUT` if you see `WebSocket recv() timed out`. The
 limit is per-call, not per-session.
 
+Above it sits `QLIK_TOOL_TIMEOUT` (default `120s`), the limit for a whole
+tool call. MCP clients drop the session, not just the call, after a few
+minutes of silence (Claude Code after 300 seconds), which leaves the model
+without tools. So the host does not run a tool on its event loop: `_tool()`
+registers an async form that runs the tool body in a worker thread under
+a deadline (`deadline.py`). `send_request` and `send_requests_pipelined`
+cut their socket timeout to the time the call has left; when that is what
+runs out they send Engine `CancelRequest` for the pending ids, drop the
+socket and raise `ToolTimeLimitError`, and the reply carries
+`error_category: "time_limit"`. Anything that cannot be stopped from
+inside - a connect, a QRS request - is abandoned from outside five seconds
+later, after shutting the Engine socket so the worker thread lets go of the
+Engine lock. While a call runs, a progress notification goes out every 10
+seconds when the client sent a progress token; without one the protocol
+gives the server nothing to send, and it stays silent until the limit.
+
+`get_app_sheet_objects` never calls `GetLayout`, which makes Engine
+compute each chart. The sheet's `GetFullPropertyTree` returns every object
+and every container's children as definitions in one request; objects
+linked to a master visualization are read from the master's properties.
+
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 
 The host object comes from the
@@ -300,7 +322,7 @@ takes `host`/`port` in the constructor, 2.x in
 contract down so the next SDK change fails in CI rather than at a user's
 first tool call.
 
-The host registers every `@mcp.tool()`-decorated function as an MCP tool. Each
+The host registers every `@_tool()`-decorated function as an MCP tool. Each
 tool is also wrapped in the local `_timed` decorator, which:
 
 1. Measures wall-clock time of the call.
@@ -334,7 +356,7 @@ branch on the `error` key instead.
 #### Per-mode tool registration (since v1.6.0)
 
 Reload-task tools are declared with `@_task_admin_tool()` instead of
-`@mcp.tool()`. That decorator registers the function only when
+`@_tool()`. That decorator registers the function only when
 `_TASK_TOOLS_ENABLED` is true, because QRS task administration
 (`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
 requires repository-admin rights — a QMC role, not a property of the

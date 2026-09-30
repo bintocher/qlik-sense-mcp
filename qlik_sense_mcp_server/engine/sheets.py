@@ -63,6 +63,100 @@ def describe_master_dimension(name: str, field_defs: Any, field_labels: Any,
     return result
 
 
+def _plain_text(value: Any) -> str:
+    """A title as stored: literal text, or the expression that computes it.
+
+    The expression is not evaluated - that would be a calculation - so a
+    computed title comes back as `=...`, which still says what it shows.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        expr = (value.get("qStringExpression") or {}).get("qExpr")
+        if isinstance(expr, str) and expr.strip():
+            text = expr.strip()
+            return text if text.startswith("=") else f"={text}"
+    return ""
+
+
+def _list_object_dimension(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The one field a listbox (or date picker, or filter) is built on."""
+    list_def = prop.get("qListObjectDef")
+    if not isinstance(list_def, dict):
+        return None
+    inner = list_def.get("qDef") or {}
+    fields = [f for f in (inner.get("qFieldDefs") or []) if f]
+    library_id = list_def.get("qLibraryId") or inner.get("qLibraryId")
+    if not fields and not library_id:
+        return None
+    labels = inner.get("qFieldLabels") or []
+    return {"fields": fields, "label": (labels[0] or "") if labels else "",
+            "library_id": library_id or None}
+
+
+def _calculation_context(prop: Dict[str, Any]) -> Dict[str, Any]:
+    """What makes an object's numbers differ from the main selection.
+
+    An alternate state, a condition that hides the calculation, a set
+    expression applied to the whole cube: each changes what a figure means,
+    and none of them is visible in the measure expressions.
+    """
+    found: Dict[str, Any] = {}
+    state = prop.get("qStateName")
+    if isinstance(state, str) and state not in ("", "$"):
+        found["state"] = state
+    cube = prop.get("qHyperCubeDef") or {}
+    if isinstance(cube, dict):
+        # qCalcCondition is the current form, qCalcCond the older one.
+        condition, text = cube.get("qCalcCondition"), None
+        if isinstance(condition, dict):
+            text = (condition.get("qCond") or {}).get("qv")
+        if not text and isinstance(cube.get("qCalcCond"), dict):
+            text = cube["qCalcCond"].get("qv")
+        if isinstance(text, str) and text.strip() not in ("", "1", "=1"):
+            found["calc_condition"] = text.strip()
+        context_set = cube.get("qContextSetExpression")
+        if isinstance(context_set, str) and context_set.strip():
+            found["context_set"] = context_set.strip()
+    return found
+
+
+def _all_expressions(objects: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    """Every object and nested child, indexed, for one library resolution."""
+    flat: Dict[int, Dict[str, Any]] = {}
+
+    def walk(obj: Dict[str, Any]) -> None:
+        flat[len(flat)] = obj
+        for child in obj.get("children") or []:
+            walk(child)
+
+    for obj in objects.values():
+        walk(obj)
+    return flat
+
+
+def _fill_fields_used(reader: Any, obj: Dict[str, Any]) -> List[str]:
+    """Set `fields_used` on an object and its children; a container's
+    fields include those of everything inside it."""
+    fields = set()
+    for measure in obj.get("measures") or []:
+        fields.update(reader._extract_fields_from_expression(measure.get("expression", "")))
+    for dimension in obj.get("dimensions") or []:
+        for field_def in dimension.get("fields") or []:
+            text = str(field_def or "").strip()
+            if text.startswith("="):
+                fields.update(reader._extract_fields_from_expression(text))
+            elif text:
+                # Without "=" a qFieldDefs entry is a field name, spaces and
+                # all; read as an expression, `Sport (detail)` became the
+                # fields "Sport" and "detail".
+                fields.add(text[1:-1] if text.startswith("[") and text.endswith("]") else text)
+    for child in obj.get("children") or []:
+        fields.update(_fill_fields_used(reader, child))
+    obj["fields_used"] = sorted(fields)
+    return obj["fields_used"]
+
+
 class EngineSheetsMixin:
     def get_script(self, app_handle: int) -> str:
         """Get load script."""
@@ -198,200 +292,163 @@ class EngineSheetsMixin:
         return library
 
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
-        """Get detailed information about objects on a sheet.
+        """The objects on a sheet, read from their definitions alone.
 
-        Fetches all child objects' handles and layouts in two pipelined
-        batches (see `send_requests_pipelined`) instead of one
-        GetObject+GetLayout round-trip per object — a sheet with N objects
-        used to cost 2N sequential round-trips, now costs 2 regardless of N.
-        Per-object failures are still isolated: one bad object is skipped,
-        the rest of the sheet is unaffected, same as before.
+        Nothing here is calculated. `GetLayout` on a chart makes Engine
+        compute it, and on a large app a sheet read that way ran past 300
+        seconds - the client gave up and dropped the MCP session. The
+        definitions carry everything this reply needs, and more: the
+        measure expressions, `qLibraryId`, state, calculation condition and
+        set expression exist only in the properties, never in the layout.
+
+        `GetFullPropertyTree` on the sheet returns every object on it and
+        the children of every container in one request. Objects linked to a
+        master visualization hold only `qExtendsId`; their definitions come
+        from the master's properties, read in one more batch.
         """
         # A failure to reach the sheet itself is reported; a failure on one
         # of its objects is not, because the other objects are still worth
-        # returning. Those two cases are what the try/except split below is.
+        # returning.
         sheet_result = self.send_request("GetObject", {"qId": sheet_id}, handle=app_handle)
         sheet_handle = (sheet_result.get("qReturn") or {}).get("qHandle")
         if sheet_handle is None:
             raise QlikEngineError(
                 f"No sheet {sheet_id!r} in this app: {sheet_result}")
 
-        sheet_layout = self.send_request("GetLayout", [], handle=sheet_handle)
-        child_list = (sheet_layout.get("qLayout") or {}).get("qChildList")
-        if child_list is None:
+        tree = (self.send_request("GetFullPropertyTree", [], handle=sheet_handle)
+                or {}).get("qPropEntry") or {}
+        children = [c for c in tree.get("qChildren") or [] if isinstance(c, dict)]
+        if not children:
             logger.info("Sheet %s has no child objects", sheet_id)
             return []
 
-        try:
-            child_objects = child_list.get("qItems", [])
-            child_meta = [
-                (co.get("qInfo", {}).get("qId", ""), co.get("qInfo", {}).get("qType", ""), co)
-                for co in child_objects
-            ]
-            child_meta = [(obj_id, obj_type, co) for obj_id, obj_type, co in child_meta if obj_id]
-            if not child_meta:
-                return []
-
-            # Wave 1: resolve every child object's handle in one pipelined
-            # round-trip instead of N sequential GetObject calls.
-            get_object_outcomes = self.send_requests_pipelined(
-                [{"method": "GetObject", "params": {"qId": obj_id}, "handle": app_handle}
-                 for obj_id, _obj_type, _co in child_meta],
-                raise_on_error=False,
-            )
-
-            obj_handles: List[Optional[int]] = []
-            for outcome in get_object_outcomes:
-                if (isinstance(outcome, Exception)
-                        or "qReturn" not in outcome or "qHandle" not in outcome["qReturn"]):
-                    obj_handles.append(None)
-                else:
-                    obj_handles.append(outcome["qReturn"]["qHandle"])
-
-            # Wave 2: fetch every resolved object's layout in one more
-            # pipelined round-trip instead of N sequential GetLayout calls.
-            layout_indices = [i for i, h in enumerate(obj_handles) if h is not None]
-            layout_outcomes = self.send_requests_pipelined(
-                [{"method": "GetLayout", "params": [], "handle": obj_handles[i]}
-                 for i in layout_indices],
-                raise_on_error=False,
-            ) if layout_indices else []
-            layout_by_index = dict(zip(layout_indices, layout_outcomes))
-
-            # Wave 3: the layout does NOT carry measure expressions. Verified
-            # against a live sheet: `qMeasureInfo` has
-            # qFallbackTitle, formatting and statistics, but no `qDef` —
-            # reading the expression from the layout found nothing on every
-            # real object. The definition lives in the properties, under
-            # qHyperCubeDef.qMeasures[].qDef.qDef.
-            property_outcomes = self.send_requests_pipelined(
-                [{"method": "GetProperties", "params": [], "handle": obj_handles[i]}
-                 for i in layout_indices],
-                raise_on_error=False,
-            ) if layout_indices else []
-            properties_by_index = dict(zip(layout_indices, property_outcomes))
-
-            expressions_by_index = {
-                i: self._object_expressions(properties_by_index.get(i))
-                for i in layout_indices
-            }
-            # A filter pane holds no fields itself — it is a container whose
-            # listbox children each carry one. Reading only the top level
-            # reported every filter pane on every sheet as using no fields,
-            # which is the opposite of what a filter pane is for.
-            nested_fields = self._nested_object_fields(app_handle, layout_by_index)
-            # Wave 4: master items carry a library id instead of a definition,
-            # so resolve those in one more batch.
-            self._resolve_library_items(app_handle, expressions_by_index)
-
-            detailed_objects = []
-            for i, (obj_id, obj_type, child_obj) in enumerate(child_meta):
-                obj_layout = layout_by_index.get(i)
-                if obj_layout is None:
-                    continue  # GetObject failed for this child — same as the old `continue`
-                if isinstance(obj_layout, Exception):
-                    logger.warning(f"Error processing object {obj_id}: {obj_layout}")
-                    continue
-                if "qLayout" not in obj_layout:
-                    continue
-                try:
-                    expressions = expressions_by_index.get(i) or {"measures": [], "dimensions": []}
-                    fields_used = set(self._extract_fields_from_object(obj_layout["qLayout"]))
-                    fields_used.update(nested_fields.get(i, []))
-                    for measure in expressions["measures"]:
-                        fields_used.update(
-                            self._extract_fields_from_expression(measure.get("expression", "")))
-                    for dimension in expressions["dimensions"]:
-                        for field_def in dimension.get("fields", []):
-                            name = self._extract_field_name_from_expression(field_def)
-                            if name:
-                                fields_used.add(name)
-                            else:
-                                fields_used.update(
-                                    self._extract_fields_from_expression(field_def))
-                    fields_used = sorted(fields_used)
-                    detailed_obj = {
-                        "object_id": obj_id,
-                        "object_type": obj_type,
-                        "object_title": obj_layout["qLayout"].get("title", ""),
-                        "object_subtitle": obj_layout["qLayout"].get("subtitle", ""),
-                        "fields_used": fields_used,
-                        "measures": expressions["measures"],
-                        "dimensions": expressions["dimensions"],
-                        "basic_info": child_obj,
-                        "detailed_layout": obj_layout["qLayout"]
-                    }
-                    detailed_objects.append(detailed_obj)
-                    logger.info(f"Processed object {obj_id} ({obj_type}) with {len(fields_used)} fields")
-                except Exception as obj_error:
-                    logger.warning(f"Error processing object {obj_id}: {obj_error}")
-                    continue
-
-            return detailed_objects
-
-        except Exception as e:
-            logger.error("_get_sheet_objects_detailed error: %s", e)
-            raise
-
-    def _nested_object_fields(self, app_handle: int,
-                              layout_by_index: Dict[int, Any]) -> Dict[int, List[str]]:
-        """Fields used by the children of container objects.
-
-        One level deep: that covers the filter pane, which is the container
-        that matters and the only one commonly nested on a sheet. A
-        container inside a container would need recursion, and buying that
-        with two more round-trips per level is not worth it until something
-        actually needs it.
-        """
-        wanted = []  # (parent_index, child_id)
-        for index, layout in layout_by_index.items():
-            if isinstance(layout, Exception) or not isinstance(layout, dict):
+        masters = self._master_visualizations(app_handle, children)
+        objects = []
+        for node in children:
+            try:
+                described = self._describe_object(node, masters, depth=0, seen=set())
+            except Exception as exc:
+                logger.warning("Could not describe an object on sheet %s: %s", sheet_id, exc)
                 continue
-            children = ((layout.get("qLayout") or {}).get("qChildList") or {}).get("qItems") or []
-            for child in children:
-                child_id = ((child or {}).get("qInfo") or {}).get("qId")
-                if child_id:
-                    wanted.append((index, child_id))
+            if described:
+                objects.append(described)
+
+        by_index = {i: obj for i, obj in enumerate(objects)}
+        self._resolve_library_items(app_handle, _all_expressions(by_index))
+        for obj in objects:
+            _fill_fields_used(self, obj)
+        return objects
+
+    # Container children are read to this depth. Deeper nesting exists in
+    # theory; in practice a sheet does not go past a container of tabs
+    # holding a filter pane.
+    _MAX_CONTAINER_DEPTH = 3
+
+    def _master_visualizations(self, app_handle: int,
+                               nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Properties of the master visualizations the given objects link to.
+
+        Keyed by master id. Two pipelined batches whatever the number of
+        linked objects; a master that cannot be read is simply absent, and
+        its linked object is reported with what it has.
+        """
+        wanted: List[str] = []
+
+        def collect(node: Dict[str, Any], depth: int) -> None:
+            prop = node.get("qProperty") or {}
+            extends = prop.get("qExtendsId")
+            if extends and extends not in wanted:
+                wanted.append(extends)
+            if depth < self._MAX_CONTAINER_DEPTH:
+                for child in node.get("qChildren") or []:
+                    if isinstance(child, dict):
+                        collect(child, depth + 1)
+
+        for node in nodes:
+            collect(node, 0)
         if not wanted:
             return {}
-
         try:
-            handle_outcomes = self.send_requests_pipelined(
-                [{"method": "GetObject", "params": {"qId": child_id}, "handle": app_handle}
-                 for _parent, child_id in wanted],
-                raise_on_error=False,
-            )
-        except Exception as exc:
-            logger.debug("Could not resolve nested objects: %s", exc)
-            return {}
-
-        handles = []
-        for outcome in handle_outcomes:
-            if isinstance(outcome, Exception):
-                handles.append(None)
-                continue
-            handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
-
-        positions = [i for i, handle in enumerate(handles) if handle is not None]
-        try:
-            layouts = self.send_requests_pipelined(
-                [{"method": "GetLayout", "params": [], "handle": handles[i]}
+            opened = self.send_requests_pipelined(
+                [{"method": "GetObject", "params": {"qId": master_id}, "handle": app_handle}
+                 for master_id in wanted],
+                raise_on_error=False)
+            handles = [None if isinstance(o, Exception)
+                       else ((o or {}).get("qReturn") or {}).get("qHandle")
+                       for o in opened]
+            positions = [i for i, handle in enumerate(handles) if handle is not None]
+            properties = self.send_requests_pipelined(
+                [{"method": "GetProperties", "params": [], "handle": handles[i]}
                  for i in positions],
-                raise_on_error=False,
-            ) if positions else []
+                raise_on_error=False) if positions else []
         except Exception as exc:
-            logger.debug("Could not read nested object layouts: %s", exc)
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not read master visualizations: %s", exc)
             return {}
+        masters = {}
+        for position, outcome in zip(positions, properties):
+            if isinstance(outcome, dict) and isinstance(outcome.get("qProp"), dict):
+                masters[wanted[position]] = outcome["qProp"]
+        return masters
 
-        by_parent: Dict[int, List[str]] = {}
-        for position, layout in zip(positions, layouts):
-            if isinstance(layout, Exception) or not isinstance(layout, dict):
-                continue
-            parent_index = wanted[position][0]
-            fields = self._extract_fields_from_object(layout.get("qLayout") or {})
-            if fields:
-                by_parent.setdefault(parent_index, []).extend(fields)
-        return by_parent
+    def _describe_object(self, node: Dict[str, Any], masters: Dict[str, Dict[str, Any]],
+                         depth: int, seen: set) -> Optional[Dict[str, Any]]:
+        """One object from its property tree node: what it shows and how."""
+        prop = node.get("qProperty") or {}
+        info = prop.get("qInfo") or {}
+        object_id = info.get("qId", "")
+        if not object_id or object_id in seen:
+            return None
+        seen.add(object_id)
+
+        master_id = prop.get("qExtendsId")
+        definition = prop
+        if master_id and master_id in masters:
+            # The linked object's own properties are an empty shell; what
+            # it shows is the master's. Its own title, when set, still wins.
+            definition = {**masters[master_id],
+                          **{k: v for k, v in prop.items() if v not in (None, "", {}, [])}}
+        object_type = (info.get("qType") or definition.get("visualization")
+                       or (definition.get("qInfo") or {}).get("qType") or "")
+        expressions = self._object_expressions({"qProp": definition})
+        list_dimension = _list_object_dimension(definition)
+        if list_dimension:
+            expressions["dimensions"].append(list_dimension)
+
+        described: Dict[str, Any] = {
+            "object_id": object_id,
+            "object_type": object_type,
+            "object_title": _plain_text(definition.get("title"))
+                            or _plain_text((definition.get("qMetaDef") or {}).get("title")),
+            "measures": expressions["measures"],
+            "dimensions": expressions["dimensions"],
+        }
+        subtitle = _plain_text(definition.get("subtitle"))
+        if subtitle:
+            described["object_subtitle"] = subtitle
+        if master_id:
+            described["master_object"] = master_id
+        described.update(_calculation_context(definition))
+
+        nested = []
+        if depth < self._MAX_CONTAINER_DEPTH:
+            for child in node.get("qChildren") or []:
+                if not isinstance(child, dict):
+                    continue
+                child_described = self._describe_object(child, masters, depth + 1, seen)
+                if not child_described:
+                    continue
+                if (child_described["object_type"] == "listbox"
+                        and not child_described["measures"]):
+                    # A filter pane is its listboxes: their fields are what
+                    # it filters by, so they belong to the pane itself.
+                    described["dimensions"].extend(child_described["dimensions"])
+                else:
+                    nested.append(child_described)
+        if nested:
+            described["children"] = nested
+        return described
 
     @staticmethod
     def _object_expressions(properties: Any) -> Dict[str, List[Dict[str, Any]]]:
@@ -477,15 +534,19 @@ class EngineSheetsMixin:
                 continue
             resolved_handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
 
+        # The definition, not the layout: a master dimension's layout makes
+        # Engine count its values, and the definition is all that is used.
         layout_indices = [i for i, h in enumerate(resolved_handles) if h is not None]
         try:
             layouts = self.send_requests_pipelined(
-                [{"method": "GetLayout", "params": [], "handle": resolved_handles[i]}
+                [{"method": "GetProperties", "params": [], "handle": resolved_handles[i]}
                  for i in layout_indices],
                 raise_on_error=False,
             ) if layout_indices else []
         except Exception as exc:
-            logger.debug("Could not read master item layouts: %s", exc)
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not read master item definitions: %s", exc)
             return
 
         measure_expressions: Dict[str, str] = {}
@@ -493,7 +554,7 @@ class EngineSheetsMixin:
         for position, layout in zip(layout_indices, layouts):
             if isinstance(layout, Exception):
                 continue
-            body = (layout or {}).get("qLayout") or {}
+            body = (layout or {}).get("qProp") or {}
             if position < len(wanted_measures):
                 lib_id = wanted_measures[position]
                 measure_expressions[lib_id] = ((body.get("qMeasure") or {}).get("qDef") or "")

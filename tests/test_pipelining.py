@@ -78,53 +78,38 @@ class TestSendRequestsPipelined:
 
 
 class TestSheetObjectsUsesPipelining:
-    """`_get_sheet_objects_detailed` should issue exactly 2 pipelined
-    batches for N child objects, not 2N sequential send_request calls."""
+    """`_get_sheet_objects_detailed` costs a constant number of round-trips:
+    the sheet's property tree in one request, and linked master
+    visualizations in two pipelined batches whatever their number."""
 
-    def _sheet_layout(self, child_ids):
-        return {
-            "qLayout": {
-                "qChildList": {
-                    "qItems": [
-                        {"qInfo": {"qId": cid, "qType": "chart"}} for cid in child_ids
-                    ]
-                }
-            }
-        }
-
-    def test_all_children_resolved_via_two_pipelined_waves(self, monkeypatch):
+    def test_round_trips_do_not_grow_with_objects(self):
         eng = QlikEngineAPI.__new__(QlikEngineAPI)
-        pipelined_calls = []
+        single_calls, pipelined_calls = [], []
+        children = [{"qProperty": {"qInfo": {"qId": f"c{i}", "qType": "barchart"},
+                                   "qExtendsId": f"m{i}"}}
+                    for i in range(3)]
 
         def fake_send_request(method, params=None, handle=-1, timeout=None):
+            single_calls.append(method)
             if method == "GetObject":
-                return {"qReturn": {"qHandle": 999}}  # sheet handle itself
-            if method == "GetLayout":
-                return self._sheet_layout(["c1", "c2", "c3"])
+                return {"qReturn": {"qHandle": 999}}
+            if method == "GetFullPropertyTree":
+                return {"qPropEntry": {"qProperty": {}, "qChildren": children}}
             raise AssertionError(f"unexpected send_request call: {method}")
 
         def fake_pipelined(requests, timeout=None, raise_on_error=True):
             pipelined_calls.append([r["method"] for r in requests])
-            method = requests[0]["method"]
-            if method == "GetObject":
+            if requests[0]["method"] == "GetObject":
                 return [{"qReturn": {"qHandle": 100 + i}} for i in range(len(requests))]
-            if method == "GetProperties":
-                return [{"qProp": {"qHyperCubeDef": {}}} for _ in requests]
-            return [{"qLayout": {"title": f"obj{i}"}} for i in range(len(requests))]
+            return [{"qProp": {"title": f"master{i}", "qHyperCubeDef": {}}}
+                    for i in range(len(requests))]
 
         eng.send_request = fake_send_request
         eng.send_requests_pipelined = fake_pipelined
-        eng._extract_fields_from_object = lambda layout: []
 
         result = eng._get_sheet_objects_detailed(app_handle=1, sheet_id="SH01")
 
-        assert len(result) == 3
-        assert [r["object_title"] for r in result] == ["obj0", "obj1", "obj2"]
-        # The point is that the cost is a constant number of round-trips, not
-        # one per object: handles, layouts and properties, each in one batch.
-        # (Properties are needed because the layout has no measure
-        # expressions — Engine simply does not put them there.)
-        assert [len(batch) for batch in pipelined_calls] == [3, 3, 3]
-        assert [batch[0] for batch in pipelined_calls] == [
-            "GetObject", "GetLayout", "GetProperties"]
-
+        assert [r["object_title"] for r in result] == ["master0", "master1", "master2"]
+        assert single_calls == ["GetObject", "GetFullPropertyTree"]
+        assert [batch[0] for batch in pipelined_calls] == ["GetObject", "GetProperties"]
+        assert [len(batch) for batch in pipelined_calls] == [3, 3]
