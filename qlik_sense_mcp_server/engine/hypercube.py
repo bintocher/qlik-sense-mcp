@@ -10,6 +10,7 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 from ..utils import bare_field_name, escape_qlik_field_name
+from .canonical import canonical_expression
 # Where a described filter is written into a hand-written expression.
 from .outer_set import (FILTER_MARKER as _FILTER_MARKER, filter_limits,
                         limit_warnings, marks_outer, place_filter)
@@ -645,6 +646,8 @@ class EngineHypercubeMixin:
                 field_text = str(dim["field"]).strip()
                 if not field_text.startswith("="):
                     dim["field"] = escape_qlik_field_name(field_text)
+                else:
+                    dim["field"] = canonical_expression(field_text)
                 dim.setdefault("sort_by", {
                     "qSortByNumeric": 0,
                     "qSortByAscii": 1,  # Default: ASCII ascending
@@ -679,6 +682,10 @@ class EngineHypercubeMixin:
                         "hint": ('An expression, or {"expression": '
                                  '"Sum(...)", "label": "..."}.'),
                     }
+                # One written form for one question, so a repeated one
+                # finds Engine's cached result.
+                measure["expression"] = canonical_expression(
+                    measure["expression"])
                 # Default: numeric descending. Only takes effect once this
                 # measure is the leading column of qInterColumnSortOrder.
                 measure.setdefault("sort_by", {"qSortByNumeric": -1})

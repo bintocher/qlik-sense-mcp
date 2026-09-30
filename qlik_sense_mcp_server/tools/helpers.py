@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 
 from . import context
+from ..engine.canonical import explain_engine_error
 
 logger = context.logger
 
@@ -50,7 +51,7 @@ def _err(msg: str, **extra: Any) -> str:
     the next step is the caller's work, and a list the caller might need
     it can ask for with a call of its own.
     """
-    payload = {"error": msg}
+    payload = {"error": explain_engine_error(msg)}
     payload.update(extra)
     for key in _ADVICE_KEYS:
         payload.pop(key, None)
@@ -96,6 +97,10 @@ def _without_advice(value: Any) -> Any:
     if "error" in cleaned:
         for key in _ADVICE_KEYS:
             cleaned.pop(key, None)
+        # A bare Engine code says nothing to a reader; its meaning is part
+        # of the error, not advice.
+        if isinstance(cleaned["error"], str):
+            cleaned["error"] = explain_engine_error(cleaned["error"])
     return cleaned
 
 

@@ -18,6 +18,7 @@ import time
 import uuid
 
 from ..utils import bare_field_name, escape_qlik_field_name
+from .canonical import canonical_expression
 from .filters import _parse_bound, _set_identifier, _too_much
 from .outer_set import (FILTER_MARKER, filter_limits, in_front,
                         limit_warnings, marks_outer, master_reference,
@@ -504,7 +505,7 @@ class EngineQueriesMixin:
             # A grouping may carry a name of its own, the way a measure
             # does: `=Year([OrderDate])` reads as a column called "Year"
             # and can be sorted by that name.
-            written = {"field": field if is_expression
+            written = {"field": canonical_expression(field) if is_expression
                        else escape_qlik_field_name(field)}
             if isinstance(item, dict) and str(item.get("label") or "").strip():
                 written["label"] = str(item["label"]).strip()
@@ -1112,6 +1113,12 @@ class EngineQueriesMixin:
                 return [], {"id": query_id, "error": (
                     f"Measure {measure!r} carries no expression."),
                     "error_category": "invalid_argument"}
+            # Written by hand, sent in one form: the same question asked
+            # twice then finds Engine's cached result. A master measure
+            # goes as the library has it - the dashboard's own charts ask
+            # with that text.
+            if master is None:
+                expression = canonical_expression(expression)
             own = modifier
             own_applied = None
             own_scope = None

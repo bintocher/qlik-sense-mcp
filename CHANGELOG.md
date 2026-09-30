@@ -178,6 +178,20 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   and the error says it answers all of them in one cube. A model had asked
   twelve months as twelve queries of twenty measures and hit the cap four
   times.
+- Expressions go out in one written form, so the same question asked
+  twice finds Engine's cached result, which is shared by every user and
+  matches text character for character. Filter modifiers are ordered by
+  field name, whatever order the filters were listed in. Hand-written
+  measures and calculated dimensions in `engine_query` and
+  `engine_create_hypercube` have known functions in one case (`sum(` is
+  `Sum(`), whitespace collapsed and no space inside parentheses, outside
+  strings and bracketed names; an expression with a comment keeps its line
+  breaks. `Today()` and `Now()` become the day (`MakeDate(...)`) and the
+  minute they stand for. A master measure goes as the library has it.
+- Engine's error codes are said in words inside `error`: 7004 (calculation
+  time limit - narrow the period or the grouping), 7009 (more than 10000
+  cells on a page), 30100 (the generated set is too long - fewer values),
+  and 19, 6 and 7002 (out of memory).
 
 ### Fixed
 

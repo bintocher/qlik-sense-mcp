@@ -215,6 +215,12 @@ MAX_FILTER_DEPTH = 20
 VALUE_KEYS = ("values", "exclude", "add", "intersect")
 
 
+def _modifier_field(part: str) -> str:
+    """The field a modifier sets, for ordering: `[Region]={'North'}`."""
+    match = re.match(r"\s*\[([^\]]*)\]", part)
+    return (match.group(1) if match else part).casefold()
+
+
 def _modifier_too_long(modifier: str) -> Optional[Dict[str, Any]]:
     """The refusal a built modifier earns for its length, or nothing.
 
@@ -1918,6 +1924,11 @@ class EngineFiltersMixin:
                 return {"modifier": "{" + identifier + "}", "applied": [],
                         "scope": identifier}
             return {"modifier": "", "applied": []}
+        # In order of field name, whatever order the caller listed them in:
+        # the same filters then make the same text, and Engine's cache
+        # finds a result it already has. Stable, so two conditions on one
+        # field keep their order.
+        parts = sorted(parts, key=_modifier_field)
         modifier = "{" + identifier + "<" + ",".join(parts) + ">}"
         refusal = _modifier_too_long(modifier)
         if refusal:
