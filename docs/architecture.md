@@ -22,6 +22,9 @@ qlik-sense-mcp/
 │   │   ├── queries.py    #   engine_query: a stated query, written and run
 │   │   ├── expressions.py#   Expression checks performed by Qlik itself
 │   │   ├── filters.py    #   Filters written as set analysis, and proven
+│   │   ├── outer_set.py  #   A filter in front of an expression, and what
+│   │   │                 #   in a measure keeps it out
+│   │   ├── canonical.py  #   One written form per expression; Engine codes
 │   │   ├── fields.py     #   Values, ranges, statistics, descriptions
 │   │   ├── sheets.py     #   Sheets and their objects
 │   │   └── app_model.py  #   Data model, master items, variables
@@ -332,6 +335,37 @@ otherwise come back as a tree of nodes. A histogram becomes `Class()` and
 a count, a bullet chart's target a column of its own, a map its first
 layer's measures. Show conditions are evaluated as scalars first, and a
 column the object hides now is left out, as the object leaves it out.
+
+#### Filters: the period form, outer sets, the fan-out check
+
+A period on a date field is written in the first form that counts the same
+values as a reference `Count(DISTINCT If(...))`: a range in the field's own
+display format (`{">=01.08.2026<01.09.2026"}`, the format read off the
+field's first value against `DateFormat` and `TimestampFormat`), then a
+numeric range for a field shown as a number, then the expression search,
+which is scored per value and not reached by an outer set. The form and
+the format are remembered for ten minutes per field. Modifiers are ordered
+by field name.
+
+[`engine/outer_set.py`](../qlik_sense_mcp_server/engine/outer_set.py)
+places a filter in front of a whole expression - a master measure named
+by its label, or an expression whose `{filter}` marker stands first - as
+`{&<...>}`, and reads the expression for what keeps it out: a field the
+measure sets itself, a set with an identifier, `$(=...)`. It talks to
+nothing; `get_app_details` uses the same reading for
+`measures[].filter_limits`.
+
+The control values of a period (the field's first and last value in the
+result) go out in the batch that creates the cubes. When the filtered
+field reaches the largest table through a date key, the key's count and
+ends under the filter go in the same batch: key values outside the period
+are a shifted or cumulative calendar, reported as `period_check.fan_out`.
+
+[`engine/canonical.py`](../qlik_sense_mcp_server/engine/canonical.py)
+writes hand-written expressions in one form - function case, whitespace,
+`Today()`/`Now()` as the day - because Engine's shared result cache
+matches text exactly, and puts the meaning of Engine's error codes (7004,
+7009, 30100, 19, 6, 7002) into the error text.
 
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 

@@ -37,6 +37,15 @@ right one**, because Qlik answers a bad filter with a number rather than an
 error. The mitigations in this server (unknown-field refusal, all-zero
 measure warnings, sample values in `get_app_details`) exist for that reason.
 
+Two more shapes of the same mistake were seen on a 1.16-billion-row app.
+Models rewrote the app's master measures by hand to put a period into
+them and got the conditions wrong; a master measure now takes the filter
+as an outer set in front of it, and the reply names a measure whose own
+set keeps the filter out. And a filter on the date of a year-shift
+calendar applied correctly and still summed three months of facts, 3.04
+times the month's turnover: the period check now reads the key the date
+reaches the facts through and says when it holds days outside the period.
+
 ## What a deep investigation looks like
 
 Given a chain where each step depends on the previous answer, models do walk

@@ -64,6 +64,10 @@ who bought in one year and not the next (`matching` / `not_matching`),
 counting over a bookmark or ignoring selections (`scope`), and values
 kept, dropped, added or intersected on any field.
 
+The app's own master measures are named rather than rebuilt -
+`"measures": [{"master": "Revenue"}]` - and take the query's filters as
+an outer set in front of them.
+
 `engine_create_hypercube` takes the same shape with the expressions
 written by hand, for calculations the typed form cannot state.
 
@@ -116,9 +120,16 @@ secrets), and login/password against a "Form based" virtual proxy
   modifier runs against the text Qlik displays for a value, so a serial
   number range returns 0 on a field displayed as `01.01.2024` and works
   on one displayed as `45292` — with no error either way. State the
-  period as a filter and the server tries the cheap numeric form against
-  a reference count, falls back to the form that always works, and
-  reports the period the result actually covers.
+  period as a filter and the server writes it as a range in the field's
+  own display format, checks it against a reference count, falls back to
+  the numeric range and then to the form that always works, and reports
+  the period the result actually covers - and when a shifted calendar
+  made the period reach facts outside it.
+- **Filters reach the author's measures.** `{"master": "Revenue"}` with a
+  period is computed as `{&<period>} [Revenue]`, an outer set in front of
+  the measure, and the reply names a measure that sets a filtered field
+  itself or counts over a set of its own, where the filter does not
+  reach.
 - **One value, one writing.** A date in a query result reads as the text
   Qlik displays for it, the same as the sample values in
   `get_app_details` and the bounds from `engine_get_field_range`.
