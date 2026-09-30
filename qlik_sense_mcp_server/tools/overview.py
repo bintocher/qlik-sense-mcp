@@ -8,6 +8,7 @@ calendar has against its rows - and does not choose for the caller which
 field answers a question.
 """
 
+import datetime
 import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -260,6 +261,113 @@ def model_sections(raw_fields: List[Dict[str, Any]], values: Dict[str, List[str]
             parts.append(text)
         islands.append(f"{table} ({model['rows'].get(table, 0)} rows): " + "; ".join(parts))
     return {"tables": tables, "links": model["links"], "islands": islands}
+
+
+# -- the description against the data ----------------------------------------
+
+_DAY_DOTTED = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})")
+_DAY_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
+_MONTH_ISO = re.compile(r"^(\d{4})-(\d{2})$")
+_MONTH_DOTTED = re.compile(r"^(\d{2})\.(\d{4})$")
+_SERIAL = re.compile(r"^\d{5}(\.\d+)?$")
+_EPOCH = datetime.date(1899, 12, 30)
+
+# Dates and spans an author writes into a description. The span words are
+# English and Russian, the two languages descriptions were seen in.
+_DATES_IN_TEXT = re.compile(r"\b(\d{1,2}\.\d{1,2}\.\d{4}|\d{4}-\d{2}-\d{2})\b")
+_SPAN_IN_TEXT = re.compile(
+    r"\b(\d{1,3})\s*(months?|мес(?:яцев|яца|яц)?|days?|дн(?:я|ей|ь)|"
+    r"weeks?|недел(?:я|и|ь)|years?|год(?:а)?|лет)(?![\w])", re.IGNORECASE)
+_SPAN_DAYS = {"month": 30.44, "мес": 30.44, "day": 1, "дн": 1, "week": 7,
+              "недел": 7, "year": 365.25, "год": 365.25, "лет": 365.25}
+
+
+def _day(text: Any, upper: bool = False) -> Optional[datetime.date]:
+    """A value as Qlik displays a date, read back as a day; a month is its
+    first or last day depending on the side."""
+    text = str(text or "").strip()
+    try:
+        match = _DAY_DOTTED.match(text)
+        if match:
+            day, month, year = (int(g) for g in match.groups())
+            return datetime.date(year, month, day)
+        match = _DAY_ISO.match(text)
+        if match:
+            return datetime.date(*(int(g) for g in match.groups()))
+        match = _MONTH_ISO.match(text) or _MONTH_DOTTED.match(text)
+        if match:
+            first, second = (int(g) for g in match.groups())
+            year, month = (first, second) if first > 12 else (second, first)
+            start = datetime.date(year, month, 1)
+            if not upper:
+                return start
+            following = datetime.date(year + month // 12, month % 12 + 1, 1)
+            return following - datetime.timedelta(days=1)
+        if _SERIAL.match(text):
+            return _EPOCH + datetime.timedelta(days=int(float(text)))
+    except (ValueError, OverflowError):
+        return None
+    return None
+
+
+def date_ranges(tables: Iterable[Dict[str, Any]]
+                ) -> List[Tuple[str, datetime.date, datetime.date]]:
+    """First and last day of every date field, from `min`/`max` or its values."""
+    out = []
+    for table in tables or []:
+        for entry in table.get("fields") or []:
+            if entry.get("type") not in ("date", "timestamp"):
+                continue
+            if entry.get("min") and entry.get("max"):
+                low, high = _day(entry["min"]), _day(entry["max"], upper=True)
+            else:
+                days = [d for d in (_day(v) for v in entry.get("values") or []) if d]
+                ends = [d for d in (_day(v, upper=True) for v in entry.get("values") or []) if d]
+                low, high = (min(days), max(ends)) if days and ends else (None, None)
+            if low and high and low <= high:
+                out.append((entry["name"], low, high))
+    return out
+
+
+def description_disagrees(description: str,
+                          ranges: List[Tuple[str, datetime.date, datetime.date]]
+                          ) -> Optional[str]:
+    """A warning when the description names dates or a span the data lacks.
+
+    A date in the description must fall inside some date field's range; a
+    span ("2 months") must be the length of one of them, give or take a
+    quarter of it or a month. Descriptions are written once and outlive
+    the reloads that change the data; which date field is the period is
+    still the caller's call.
+    """
+    if not description or not ranges:
+        return None
+    said: List[str] = []
+    for text in _DATES_IN_TEXT.findall(description):
+        day = _day(text)
+        if day and not any(low <= day <= high for _, low, high in ranges):
+            said.append(text)
+    for match in _SPAN_IN_TEXT.finditer(description):
+        count, unit = int(match.group(1)), match.group(2).lower()
+        size = next((days for word, days in _SPAN_DAYS.items()
+                     if unit.startswith(word)), None)
+        if not size or not count:
+            continue
+        wanted = count * size
+        slack = max(wanted * 0.25, 31)
+        if not any(abs((high - low).days + 1 - wanted) <= slack
+                   for _, low, high in ranges):
+            said.append(match.group(0))
+    if not said:
+        return None
+    # In the order of `tables`, from the facts outward: the ranges nearest
+    # the data come first.
+    loaded = ", ".join(f"{name} {low.isoformat()}..{high.isoformat()}"
+                       for name, low, high in ranges[:3])
+    return (f"The app description says " + ", ".join(repr(s) for s in said)
+            + f", which matches none of the loaded date ranges ({loaded}). "
+            f"The description disagrees with the data; the ranges in "
+            f"`tables` are what is loaded.")
 
 
 # -- master items -------------------------------------------------------------

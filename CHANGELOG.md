@@ -82,6 +82,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `filter_applied` and summed turnover 3.04 times the month's, over three
   key values from 01.08.2025 to 01.08.2026; the reply now says so. The
   server does not pick the right field.
+- `get_app_details` warns when the app description disagrees with the
+  data: a date it names falls inside no date field's range, or a span it
+  names ("2 months", "2 месяца", "90 days") is the length of none of them,
+  give or take a quarter or a month. The warning quotes the words and the
+  first three date ranges from the facts outward. On a large app the
+  description said "Loaded period: 2 months" over twenty months of data,
+  and a model quoted it as the answer.
 
 ### Changed
 

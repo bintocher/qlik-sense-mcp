@@ -263,8 +263,9 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         `bookmarks` - the approved bookmarks shipped with the app, title
         and description. Bookmarks users saved are not listed.
         `alternate_states` where the app defines them.
-        `warnings` - volume only: tables that need a filter, fields too
-        wide to group by without a limit.
+        `warnings` - volume: tables that need a filter, fields too wide to
+        group by without a limit; and the description, when it names dates
+        or a span ("2 months") that match none of the date fields' ranges.
         `size_budget` - the estimated size in tokens against its limit,
         and `trimmed` naming what was shortened to stay under it.
 
@@ -390,6 +391,15 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             f"{max(wide.values()):,}. Grouping by one of these produces as many "
             f"rows; rank with `sort_by` and a small `limit` instead of returning "
             f"every group.")
+
+    # A description is written once and outlives the reloads: "loaded
+    # period: 2 months" over twenty months of data was quoted back as the
+    # answer. Said only when the text names dates or a span no date field
+    # has.
+    disagreement = overview.description_disagrees(
+        resolved.get("description", ""), overview.date_ranges(model["tables"]))
+    if disagreement:
+        warnings.append(disagreement)
 
     # The app's own vocabulary: what the author calls revenue and how it is
     # computed. A caller assembling the aggregation itself may pick a
