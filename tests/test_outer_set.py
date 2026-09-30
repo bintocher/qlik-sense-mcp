@@ -176,3 +176,6 @@ class TestDetailsCarryTheLimits:
         by_name = {e["name"]: e for e in entries}
         assert by_name["GGR"]["filter_limits"] == {"fields": ["Flag"]}
         assert "filter_limits" not in by_name["Plain"]
+
+def test_the_marker_is_not_a_set_of_its_own():
+    assert filter_limits("{filter} Sum({<Flag={1}>} Amount)") == {"fields": ["Flag"]}

@@ -149,6 +149,10 @@ def set_expressions(expression: str) -> List[Tuple[str, str]]:
             if end < 0:
                 break
             content = text[index + 1:end].strip()
+            if content == FILTER_MARKER[1:-1]:
+                # The marker itself: where the filter goes, not a set.
+                index = end + 1
+                continue
             if content.startswith("&"):
                 content = content[1:].lstrip()
             opening = _first_angle(content)
