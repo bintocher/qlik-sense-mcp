@@ -284,7 +284,7 @@ field statistics). Heavy operations like building a hypercube against a
 raise `QLIK_WS_TIMEOUT` if you see `WebSocket recv() timed out`. The
 limit is per-call, not per-session.
 
-Above it sits `QLIK_TOOL_TIMEOUT` (default `120s`), the limit for a whole
+Above it sits `QLIK_TOOL_TIMEOUT` (default `240s`), the limit for a whole
 tool call. MCP clients drop the session, not just the call, after a few
 minutes of silence (Claude Code after 300 seconds), which leaves the model
 without tools. So the host does not run a tool on its event loop: `_tool()`

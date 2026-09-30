@@ -181,6 +181,14 @@ class TestToolReply:
         reply = anyio.run(helpers._bounded(lambda: helpers._ok({"done": True})))
         assert json.loads(reply) == {"done": True}
 
+    def test_the_default_leaves_room_for_a_large_app(self, monkeypatch):
+        """Six calls on a 1.16-billion-row app hit 120 s; the default is
+        240 s, still under the 300 s of silence a client drops a session
+        after."""
+        from qlik_sense_mcp_server import deadline
+        monkeypatch.delenv("QLIK_TOOL_TIMEOUT", raising=False)
+        assert deadline.tool_timeout_seconds() == 240.0 < 300
+
 
 class TestProgress:
     def test_a_long_call_reports_progress(self, monkeypatch):

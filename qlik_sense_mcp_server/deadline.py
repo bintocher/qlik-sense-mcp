@@ -20,7 +20,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Iterator, Optional
 
-DEFAULT_TOOL_TIMEOUT_SECONDS = 120.0
+# Measured on a 1.16-billion-row app: six calls of one evaluation run hit 120
+# seconds and were answered on a retry that asked the same. Still under the
+# 300 seconds of silence after which a client drops the session.
+DEFAULT_TOOL_TIMEOUT_SECONDS = 240.0
 
 
 def tool_timeout_seconds() -> float:

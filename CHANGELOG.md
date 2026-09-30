@@ -217,7 +217,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   session. Objects are now read from definitions only: the sheet's
   `GetFullPropertyTree` in one request, linked objects from their master
   visualization's properties, master items with `GetProperties`.
-- A tool call now has a time limit, `QLIK_TOOL_TIMEOUT` (default 120 s,
+- A tool call now has a time limit, `QLIK_TOOL_TIMEOUT` (default 240 s,
   `0` turns it off). Tools used to run on the server's event loop, so a
   slow Engine call froze the server for every client and sent nothing.
   They now run in a worker thread; Engine requests are cut to the time

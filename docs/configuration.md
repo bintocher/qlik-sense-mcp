@@ -117,7 +117,7 @@ and form mode go through the virtual proxy on the port in
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `QLIK_WS_TIMEOUT` | `180.0` | WebSocket timeout in seconds. Applied to both the WS handshake and every Engine API call (`OpenDoc`, hypercube creation, `GetLayout`, field statistics). Increase this value if hypercube operations on large apps time out with `WebSocket recv() timed out`. |
-| `QLIK_TOOL_TIMEOUT` | `120.0` | Time limit for one tool call, in seconds. The Engine requests of a call are cut to the time it has left; at the limit Engine is asked to cancel and the reply is an error with `error_category: "time_limit"`, while the connection stays usable for the next call. Kept below the 300 seconds of silence after which MCP clients such as Claude Code drop the session. While a call runs the server sends a progress notification every 10 seconds, if the client asked for them with a progress token. `0` turns the limit off. |
+| `QLIK_TOOL_TIMEOUT` | `240.0` | Time limit for one tool call, in seconds. The Engine requests of a call are cut to the time it has left; at the limit Engine is asked to cancel and the reply is an error with `error_category: "time_limit"`, while the connection stays usable for the next call. Kept below the 300 seconds of silence after which MCP clients such as Claude Code drop the session. While a call runs the server sends a progress notification every 10 seconds, if the client asked for them with a progress token. `0` turns the limit off. |
 
 There are no retry-count or HTTP-timeout variables: the connection cache
 decides on its own when to re-check a socket (it trusts one that answered

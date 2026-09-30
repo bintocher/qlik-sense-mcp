@@ -232,7 +232,7 @@ secrets), and login/password against a "Form based" virtual proxy
   for any single page over 10000 cells.
 - **Two timeout knobs.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
   controls both the WebSocket handshake and every Engine API call;
-  `QLIK_TOOL_TIMEOUT` (default `120.0`) bounds a whole tool call, so a
+  `QLIK_TOOL_TIMEOUT` (default `240.0`) bounds a whole tool call, so a
   slow one ends with a clear error before the client gives up on it.
 
 ## Requirements
