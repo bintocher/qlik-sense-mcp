@@ -22,8 +22,8 @@ from .canonical import canonical_expression
 from .filters import _parse_bound, _set_identifier, _too_much
 from .layers import layer_text, repeating_path
 from .outer_set import (FILTER_MARKER, FilterPlacementError,
-                        element_set_warning,
-                        filter_limits, has_marker,
+                        element_set_warning, repeated_conditions,
+                        repeated_notes, filter_limits, has_marker,
                         in_front, limit_warnings, marks_outer,
                         master_reference, place_filter, set_contexts,
                         flat_set, holds_filter)
@@ -1183,9 +1183,11 @@ class EngineQueriesMixin:
                     expression = in_front(own, master_reference(
                         master.get("name", ""), master["expression"],
                         field_names))
+                    repeated = repeated_conditions(master["expression"], own)
                     warnings = limit_warnings(
                         master.get("name", ""),
-                        filter_limits(master["expression"]), stated)
+                        filter_limits(master["expression"]), stated, repeated)
+                    notes = repeated_notes(master.get("name", ""), repeated)
                     contexts = set_contexts(
                         in_front(own, master["expression"]))
                 elif not has_marker(expression):
@@ -1200,7 +1202,10 @@ class EngineQueriesMixin:
                         f"Measure {label!r} marks no place for the filters, so "
                         f"it took them as an outer set in front of its whole "
                         f"expression, which reaches every aggregation in it."]
-                    warnings = limit_warnings(label, filter_limits(expression), stated)
+                    repeated = repeated_conditions(expression, own)
+                    warnings = limit_warnings(label, filter_limits(expression),
+                                              stated, repeated)
+                    notes += repeated_notes(label, repeated)
                     try:
                         expression = place_filter(
                             FILTER_MARKER + " " + expression.lstrip("= "), own)
@@ -1212,9 +1217,11 @@ class EngineQueriesMixin:
                                 if holds_filter(context, own)]
                 else:
                     if marks_outer(expression):
+                        repeated = repeated_conditions(expression, own)
+                        label = str(measure.get("label") or expression)
                         warnings = limit_warnings(
-                            str(measure.get("label") or expression),
-                            filter_limits(expression), stated)
+                            label, filter_limits(expression), stated, repeated)
+                        notes = repeated_notes(label, repeated)
                     try:
                         expression = place_filter(expression, own)
                     except FilterPlacementError as exc:

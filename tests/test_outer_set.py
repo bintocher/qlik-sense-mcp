@@ -178,3 +178,37 @@ class TestDetailsCarryTheLimits:
 
 def test_the_marker_is_not_a_set_of_its_own():
     assert filter_limits("{filter} Sum({<Flag={1}>} Amount)") == {"fields": ["Flag"]}
+
+
+class TestRepeatedCondition:
+    """codex repeated a measure's own conditions in `filters` in 21 results
+    of 14 questions; the values were the same, the figures right, and every
+    one of them came back as `numbers_verified: false`."""
+
+    def test_the_same_values_are_a_note(self):
+        engine = _LibraryEngine()
+        engine.known.update({"Flag", "Revenue"})
+        reply = engine.run_queries(1, "app", [_query(
+            metrics=[], measures=[{"master": "Revenue"}],
+            filters=[{"field": "Flag", "values": [1]}])])["results"][0]
+        assert "warnings" not in reply and "numbers_verified" not in reply
+        assert "sets [Flag] itself to the same values" in reply["notes"][0]
+
+    def test_other_values_are_still_a_warning(self):
+        engine = _LibraryEngine()
+        engine.known.update({"Flag", "Revenue"})
+        reply = engine.run_queries(1, "app", [_query(
+            metrics=[], measures=[{"master": "Revenue"}],
+            filters=[{"field": "Flag", "values": [2]}])])["results"][0]
+        assert any("its own condition wins" in w for w in reply["warnings"])
+        assert reply["numbers_verified"] is False
+
+    def test_quoting_does_not_make_a_difference(self):
+        from qlik_sense_mcp_server.engine.outer_set import repeated_conditions
+        assert repeated_conditions("Sum({<Flag={'1','2'}>} A)",
+                                   "{<[Flag]={1,2}>}") == ["Flag"]
+        assert repeated_conditions("Sum({<Flag={1}>} A)", "{<[Flag]={1,2}>}") == []
+
+    def test_a_repeat_next_to_the_marker_is_merged_not_refused(self):
+        assert place_filter("Sum({filter} {<Flag={1}>} A)", "{<[Flag]={1},[Region]={'N'}>}") == (
+            "Sum({<[Region]={'N'},Flag={1}>} A)")

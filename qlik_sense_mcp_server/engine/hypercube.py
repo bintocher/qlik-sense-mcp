@@ -14,6 +14,7 @@ from .canonical import canonical_expression
 # Where a described filter is written into a hand-written expression.
 from .outer_set import (FILTER_MARKER as _FILTER_MARKER, FilterPlacementError,
                         element_set_warning, filter_limits, has_marker,
+                        repeated_conditions, repeated_notes,
                         holds_filter, limit_warnings, marks_outer,
                         place_filter, set_contexts)
 from typing import Dict, List, Any, Optional
@@ -738,8 +739,10 @@ class EngineHypercubeMixin:
                         # master measures named by label included, and what
                         # the expression sets itself says so.
                         if marks_outer(expression):
+                            repeated = repeated_conditions(expression, modifier)
                             outer_warnings.extend(limit_warnings(
-                                label, filter_limits(expression), stated))
+                                label, filter_limits(expression), stated, repeated))
+                            notes.extend(repeated_notes(label, repeated))
                         try:
                             measure["expression"] = place_filter(
                                 expression, modifier)

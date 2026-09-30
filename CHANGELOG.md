@@ -76,7 +76,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `qContextSetExpression` gave the same figures but cannot differ per
   measure, so the outer set is used. The measure's expression is read for
   what keeps a filter out, and the reply's `warnings` name the measure: a
-  filtered field it sets itself (its own condition wins - measured), a set
+  filtered field it sets itself to other values (its own condition wins -
+  measured; the same values are said in `notes`, which leave
+  `numbers_verified` alone, and next to a marker they are written once -
+  a model repeated the measure's own conditions in 21 results of 14
+  questions and each came back unverified), a set
   of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark),
   `$(=...)`, computed before the filter, and `P()`/`E()` over sets the
   filter does not reach. `get_app_details` gives the same as
@@ -321,7 +325,6 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `vRate`. It was a pattern of the whole text, found nothing, and a model
   concluded the variable was not in the app. With `*` it is still a
   pattern of the whole text.
-
 - A call whose Engine socket was gone is made once more on a new
   connection. The proxy closes an idle or expired session without a word
   and the socket still reads as open, so the first request of the next

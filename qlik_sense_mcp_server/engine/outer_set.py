@@ -259,6 +259,11 @@ def merge_sets(modifier: str, owns: List[str]) -> str:
         raise FilterPlacementError(
             f"The filters count over {{{filter_id}}} and {owns[0]} over "
             f"{{{own_id}}}; one set cannot say both.")
+    # The same condition written twice is one condition: the filter's copy
+    # goes, the expression keeps its own.
+    own_conditions = {_condition_of(part) for part in own_parts} - {None}
+    filter_parts = [part for part in filter_parts
+                    if _condition_of(part) not in own_conditions]
     both = sorted(set(_modifier_fields(filter_parts))
                   & set(_modifier_fields(own_parts)))
     if both:
@@ -598,9 +603,63 @@ def filter_limits(expression: str) -> Dict[str, Any]:
     return limits
 
 
+def _condition_of(part: str) -> Optional[Tuple[str, str, frozenset]]:
+    """(field, operator, element set) of one plain modifier `F={a,b}`."""
+    match = re.match(r"^\s*(\[[^\]]+\]|[^\s=+\-*/<>\[\]]+)\s*([+\-*/]?=)\s*\{(.*)\}\s*$",
+                     part, re.DOTALL)
+    if not match:
+        return None
+    name, operator, elements = match.groups()
+    name = name[1:-1] if name.startswith("[") else name
+    values = frozenset(value.strip().strip("'\"").strip()
+                       for value in _split_top(elements) if value.strip())
+    return name, operator, values
+
+
+def repeated_conditions(expression: str, modifier: str) -> List[str]:
+    """Fields the expression sets itself to exactly what the filter sets.
+
+    Such a filter changes nothing: the measure's own condition and the
+    filter select the same values. Only a different condition is one that
+    wins over the filter.
+    """
+    stated = _set_parts(modifier)
+    if not stated:
+        return []
+    wanted: Dict[str, Any] = {}
+    for part in stated[1]:
+        condition = _condition_of(part)
+        if condition:
+            wanted[condition[0]] = condition
+    own: Dict[str, List[Any]] = {}
+    for _identifier, modifiers in set_expressions(expression):
+        for part in _split_top(modifiers) if modifiers else []:
+            condition = _condition_of(part)
+            if condition:
+                own.setdefault(condition[0], []).append(condition)
+            else:
+                for name in _modifier_fields([part]):
+                    own.setdefault(name, []).append(None)
+    return sorted(name for name, conditions in own.items()
+                  if name in wanted and all(c == wanted[name] for c in conditions))
+
+
+def repeated_notes(name: str, fields: Iterable[str]) -> List[str]:
+    return [f"Measure {name!r} sets [{field}] itself to the same values as "
+            f"the filter on [{field}], which therefore adds nothing to it."
+            for field in fields]
+
+
 def limit_warnings(name: str, limits: Dict[str, Any],
-                   filter_fields: Iterable[str]) -> List[str]:
-    """What the caller must know before reading the filtered figure."""
+                   filter_fields: Iterable[str],
+                   repeated: Iterable[str] = ()) -> List[str]:
+    """What the caller must know before reading the filtered figure.
+
+    `repeated` - fields the expression sets to the filter's own values: a
+    repeat, not a conflict, and said as a note by the caller.
+    """
+    repeated = set(repeated)
+    filter_fields = [field for field in filter_fields if field not in repeated]
     warnings: List[str] = []
     if limits.get("own_set"):
         sets = ", ".join("{" + ident + "<...>}" for ident in limits["own_set"])
