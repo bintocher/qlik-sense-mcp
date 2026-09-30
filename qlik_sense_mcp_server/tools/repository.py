@@ -474,16 +474,13 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             f"produces as many rows; rank with `sort_by` and a small "
             f"`limit` instead of returning every group."
         )
-    date_fields = [f["name"] for f in fields if _is_temporal(f)][:3]
-    if date_fields:
-        warnings.append(
-            "Date field(s) present: " + ", ".join(date_fields)
-            + ". To learn the loaded period, call engine_get_field_range on "
-              "one of them. To ask about a period, state it as a filter — "
-              '{"field": "' + date_fields[0] + '", "period": "2024"} — and '
-              "the server writes the set analysis and reports the period it "
-              "actually selected."
-        )
+    # No word about date fields. The hint that used to stand here named the
+    # first few fields that looked like dates and offered the first as the
+    # example filter; on an app with a shift calendar that was the shifted
+    # date, and a filter on it tripled the figures. Which date field means
+    # "the period" is the caller's choice, made from the table links and
+    # from how the published sheets use each date - the server does not
+    # pick one.
 
     # The app's own library of measures and dimensions: what the author of
     # this dashboard calls revenue, and how it is actually computed. Read
