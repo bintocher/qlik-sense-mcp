@@ -322,6 +322,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   concluded the variable was not in the app. With `*` it is still a
   pattern of the whole text.
 
+- A call whose Engine socket was gone is made once more on a new
+  connection. The proxy closes an idle or expired session without a word
+  and the socket still reads as open, so the first request of the next
+  call failed - measured, right after the JWT session renewed, one call
+  answered "Not connected to Engine API", the next OpenDoc 1003 "App not
+  found", the third worked. The calls ran one after the other under the
+  Engine lock, and two calls sent at once are served one after the other
+  as before; a timeout or a wrong query is not repeated.
+
 ## [2.3.1] - 2026-09-25
 
 ### Fixed

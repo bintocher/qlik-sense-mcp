@@ -248,6 +248,31 @@ def _engine_serialised(func):
         if context.engine_api is None:
             return func(*args, **kwargs)
         with context.engine_api.transaction():
+            try:
+                result = func(*args, **kwargs)
+            except ConnectionError as exc:
+                result = exc
+            if not _connection_lost(result):
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            # The socket was gone when the call reached for it: the proxy
+            # closes an idle or expired session without a word, the socket
+            # still reads as open, and the first request of the call fails.
+            # Measured: a call right after the JWT session renewed failed
+            # with "Not connected to Engine API", the next with OpenDoc
+            # 1003, the third worked. The call is made once more on a new
+            # connection, and only when the time limit leaves room.
+            from .. import deadline
+            left = deadline.remaining()
+            if left is not None and left <= 1:
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            logger.warning("%s lost the Engine connection (%s); calling it "
+                           "once more on a new one", func.__name__,
+                           _lost_reason(result))
+            context.engine_api.disconnect()
             return func(*args, **kwargs)
 
     # functools.wraps copies __qualname__, so the wrapper is otherwise
@@ -255,6 +280,36 @@ def _engine_serialised(func):
     # to catch a new Engine tool that forgets the decorator.
     wrapper.__engine_serialised__ = True
     return wrapper
+
+
+# What a call says when the socket under it was gone, as opposed to what a
+# slow or wrong query says. A timeout is not among them: repeating a heavy
+# query repeats the wait.
+_LOST_CONNECTION = ("Not connected to Engine API", "socket is already closed",
+                    "Connection to remote host was lost",
+                    "Connection is already closed", "'code': 1003")
+
+
+def _lost_reason(result: Any) -> str:
+    if isinstance(result, Exception):
+        return str(result)
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else {}
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("error") or "")
+
+
+def _connection_lost(result: Any) -> bool:
+    """Whether a call failed because the Engine socket was gone."""
+    reason = _lost_reason(result)
+    if not reason or "timed out" in reason:
+        return False
+    if "'code': 1003" in reason and "OpenDoc" not in reason:
+        return False
+    return any(sign in reason for sign in _LOST_CONNECTION)
 
 
 
