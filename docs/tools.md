@@ -39,7 +39,7 @@ categories. The lists below are a quick map only.
 |------|---------|
 | `get_about` | Qlik Sense server info: version, build, node type. Use to verify connectivity. |
 | `get_apps` | List apps with filters (`name`, `stream`, `published`) and pagination. `limit` capped at 50. |
-| `get_app_details` | The data model and what the app's author defined, within about 20k tokens. `app` (name, description, stream, reload time); `tables` with a `role` read from the model's shape (fact, dimension table, calendar), `rows`, and their `fields` - `distinct`, `type`, `key`, `hidden`, `comment` from `COMMENT FIELD`, `values` when there are 25 or fewer, `min`/`max` on date fields; a calendar states its rows against its distinct dates, so a calendar where one date stands for several rows (as-of, cumulative, shifted) shows as such. `links` spell the joins (`Facts -Key-> Table`), `islands` list unlinked tables in one line each. `dimensions` are master dimensions as `name = field`; `measures` are master measures with their fields, the expression cut at 150 characters (`id` leads to the whole one through `get_app_object`) and `variants` such as `Y-1` or `YoY, %` folded under their base. `usage` sums up the author's sheets (approved sheets of a published app, all sheets otherwise; definitions only): each field's objects, sheets, role (`dimension`, `aggregated`, `condition` in a set modifier, `Aggr dimension`) and neighbouring fields and measures, unused fields, titled objects with their dimensions and measures, measure formulas written in objects, and objects in an alternate state or under a whole-cube set. `report_filters` lists how a user filters the report: filter panes, date pickers, variable inputs with their values, buttons, tab conditions. `bookmarks` are the approved ones only. `measures[].filter_limits` says what keeps a filter from reaching a measure (`fields` it sets itself, `own_set`, `computed_first` for `$(=...)`). `warnings` are about volume, and about a description whose dates or span ("2 months") match none of the date fields' ranges. `size_budget` gives the estimated tokens and, when the reply had to be shortened, what was `trimmed`. Always call this before building a hypercube. |
+| `get_app_details` | The data model and what the app's author defined, within about 20k tokens. `app` (name, description, stream, reload time); `tables` with a `role` read from the model's shape (fact, dimension table, calendar), `rows`, and their `fields` - `distinct`, `type`, `key`, `hidden`, `comment` from `COMMENT FIELD`, `values` when there are 25 or fewer, `min`/`max` on date fields; a calendar states its rows against its distinct dates, so a calendar where one date stands for several rows (as-of, cumulative, shifted) shows as such, and carries `plain_layer`: the set that keeps one row per date, the date itself, found by counting the calendar's rows per value of its few-valued fields; the field that picks it is marked `picks_plain_layer` and listed with its values even when hidden. `links` spell the joins (`Facts -Key-> Table`), `islands` list unlinked tables in one line each. `dimensions` are master dimensions as `name = field`; `measures` are master measures with their fields, the expression cut at 150 characters (`id` leads to the whole one through `get_app_object`) and `variants` such as `Y-1` or `YoY, %` folded under their base. `usage` sums up the author's sheets (approved sheets of a published app, all sheets otherwise; definitions only): each field's objects, sheets, role (`dimension`, `aggregated`, `condition` in a set modifier, `Aggr dimension`) and neighbouring fields and measures, unused fields, titled objects with their dimensions and measures, measure formulas written in objects, and objects in an alternate state or under a whole-cube set. `report_filters` lists how a user filters the report: filter panes, date pickers, variable inputs with their values, buttons, tab conditions. `bookmarks` are the approved ones only. `measures[].filter_limits` says what keeps a filter from reaching a measure (`fields` it sets itself, `own_set`, `computed_first` for `$(=...)`). `warnings` open with each such calendar and its condition, then volume, and a description whose dates or span ("2 months") match none of the date fields' ranges. `size_budget` gives the estimated tokens and, when the reply had to be shortened, what was `trimmed`. Always call this before building a hypercube. |
 
 ## Engine API
 
@@ -55,7 +55,7 @@ categories. The lists below are a quick map only.
 | `engine_get_field_range` | Lightning-fast bounds for one field: count distinct, min, max. Implemented as a measures-only hypercube — runs in seconds on any table size. Prefer this over `get_app_field_statistics`. |
 | `get_app_field_statistics` | Field statistics via a measures-only hypercube. Defaults to **light** mode (count distinct, non-null count, null count, total count, min, max, null %, completeness — the null share comes from `NullCount()`, not from subtracting one non-null count from another). Pass `full=true` to also compute avg / sum / median / mode / stdev — slow on big fact tables and meaningless for date/text fields. |
 | `engine_query` | **The main data-analysis tool.** A query stated rather than written: `group_by` names the grouping fields, `metrics` the aggregations (`{"field": "Amount", "agg": "sum"}`), `filters` the period or values to narrow to. The server writes the Qlik expressions, proves the filters select something, and reports the period each one actually covered. `queries` takes a list of independent questions — different groupings, different measures, different filters — and runs the whole list over three round-trips rather than three per question. A master measure is named with `{"master": "<name>"}`; with `filters` it takes them as an outer set in front of it, and `warnings` says when the measure keeps a filter out. Past the cap of 200 expressions, a batch that differs only in one filter comes back with `one_query`, the grouped query that answers all of it. |
-| `engine_create_hypercube` | The same shape, with the expressions written by the caller: for a nested aggregation, `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, or a calculated dimension. Ranking is `sort_by` + `sort_order` + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are kept unless `exclude_null_dimensions` says otherwise. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. `filters` works here too, applied wherever a measure carries the `{filter}` marker: in front of the whole expression (`{filter} [Revenue] / [Orders]`) it is an outer set that reaches every aggregation inside, master measures included; inside one aggregation (`Sum({filter} Amount)`) it narrows that one. `warnings` names an expression that sets a filtered field itself, counts over a set with an identifier, or holds `$(=...)`. |
+| `engine_create_hypercube` | The same shape, with the expressions written by the caller: for a nested aggregation, `Aggr()`, `FirstSortedValue`, `P()`/`E()` set analysis, or a calculated dimension. Ranking is `sort_by` + `sort_order` + `limit`. Rows with a NULL dimension value (Qlik's `"-"`) are kept unless `exclude_null_dimensions` says otherwise. Hard limits: `limit <= 5000`, `columns * limit <= 9900`. `filters` works here too, applied wherever a measure carries the `{filter}` marker: in front of the whole expression (`{filter} [Revenue] / [Orders]`) it is an outer set that reaches every aggregation inside, master measures included; inside one aggregation (`Sum({filter} Amount)`) it narrows that one; next to a set of the expression's own (`Sum({filter} {<Flag={1}>} Amount)`) it is merged into that set, since Qlik reads one of two sets side by side. With no marker in any measure, every measure takes the filters in front of it. `warnings` names an expression that sets a filtered field itself, counts over a set with an identifier, holds `$(=...)` or picks values with P()/E() over sets the filter does not reach; `period_check` and `fan_out_check` are the same as in `engine_query`. |
 
 ## Task management (Repository API)
 
@@ -201,17 +201,30 @@ label with its position.
 ### Checking a period from the answer
 
 A query filtered on a period carries `period_check`: the earliest and
-latest value of that field inside the result, and `filter_applied`. A
-value outside the requested period means Qlik ignored the condition,
-which is otherwise invisible — it answers with a plausible number rather
-than an error.
+latest value of that field as each measure reads it - through the
+measure's own sets, so a measure written by hand or taken from the library
+is checked as it runs - and `filter_applied`. A value outside the
+requested period means Qlik ignored the condition, which is otherwise
+invisible — it answers with a plausible number rather than an error; the
+check then names the `measure`. `engine_create_hypercube` carries the same
+check.
 
 A period that applied can still reach the facts through days outside it.
 When the filtered field reaches the largest table through a date key -
 a shifted or cumulative calendar - and the key holds values outside the
 period under the filter, `period_check.fan_out` gives the `key`, the
 number of `values` and their `min` and `max`, and `warnings` says the
-figures cover more than the period. `filters_applied[].form` says how the
+figures cover more than the period.
+
+Any filter on a calendar whose dates repeat - more rows than dates, as in
+a cumulative, as-of or shifted calendar - is checked the same way, a value
+list or a set written by hand in a measure included: when the key values
+it reaches belong to other values of its field too, `fan_out_check` gives
+the `field`, the fact `table` and `key`, the `key_values` reached,
+`per_value` and the `repeating_table`, and `warnings` leads with it,
+naming the rows that keep one per date where `get_app_details` found them
+(its `plain_layer`). The field that picks such rows is not checked
+itself. `filters_applied[].form` says how the
 period was written: `range` in the field's display format, `numeric`, or
 `expression` where neither counts the right values.
 

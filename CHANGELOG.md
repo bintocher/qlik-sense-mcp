@@ -57,18 +57,59 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `engine_create_hypercube` and in hand-written `engine_query` measures a
   `{filter}` marker at the start of the expression is an outer set that
   reaches every aggregation inside, `{filter} [A] / [B]` or
-  `{filter} (expression)`; an expression that starts with its own outer
-  set keeps it after the filter. Measured on a 1.16-billion-row app: the
-  outer set over a master measure, over its expression in parentheses and
-  over a ratio measure answered the reference figures exactly, and a chain
-  of two outer sets applied left to right. A hypercube-wide
+  `{filter} (expression)`, and a measure with no marker at all takes the
+  filters the same way, said in `warnings` (`engine_create_hypercube`
+  refused it before). A marker next to a set of the expression's own -
+  `Sum({filter} {<Flag={1}>} X)`, `Sum({filter <Flag={1}>} X)`,
+  `{filter} {<Flag={1}>} Fractile(...)`, or inside `P()` - is merged into
+  that set: Qlik reads one of two sets side by side in an aggregation and
+  drops the other without a word. Measured on a 1.16-billion-row app, the
+  filter for 2025 written that way summed two years, 719.3 billion against
+  418.6, while `filters_applied` reported 365 days. A field named both in
+  that set and in `filters`, two sets of the expression's own, a set joined
+  by an operator or two different identifiers are refused with the reason.
+  Measured on the same app: the outer set over a master measure, over its
+  expression in parentheses and over a ratio measure answered the reference
+  figures exactly. A hypercube-wide
   `qContextSetExpression` gave the same figures but cannot differ per
   measure, so the outer set is used. The measure's expression is read for
   what keeps a filter out, and the reply's `warnings` name the measure: a
   filtered field it sets itself (its own condition wins - measured), a set
-  of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark), and
-  `$(=...)`, computed before the filter. `get_app_details` gives the same as
+  of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark),
+  `$(=...)`, computed before the filter, and `P()`/`E()` over sets the
+  filter does not reach. `get_app_details` gives the same as
   `measures[].filter_limits`.
+- `period_check` reads a bounded filter's field through each measure's own
+  sets, exactly as the measure is sent - `={outer} Text(Min({inner}
+  [Field]))` per aggregation - instead of through the filter alone, so a
+  filter that did not reach a hand-written or library measure shows as
+  `filter_applied: false` with the `measure` named. `engine_create_hypercube`
+  carries `period_check` too, and both tools put such a result first in
+  `warnings`; `engine_query` repeats it at the top of the reply.
+- A filter on a calendar whose dates repeat is checked for what it
+  reaches, whatever its kind: a value list, a range, a pattern, or a
+  condition written by hand in a measure's own set. Such a calendar is
+  found from the model - a table whose date key towards the facts has
+  fewer values than the table has rows. The check counts the values of the
+  field the filter names, the key values of the facts it reaches, and the
+  values of the field those key values belong to; more of the last than
+  the first give `fan_out_check` (`field`, `table`, `key`, `key_values`,
+  `per_value`, `belong_to_values`, `repeating_table`) and a warning that
+  leads `warnings`, per query and at the top of the reply, with the
+  condition for one row per date where one was found. Measured on a
+  1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a
+  cumulative calendar gave a month's GGR of 60.9 billion against 2.9 with
+  no warning; the fan-out check ran for periods only.
+- `get_app_details` names the rows of a repeating calendar that keep one
+  row per date. For each such calendar the server asks Engine, once per
+  app and over the calendar alone, which value of a field with few values
+  - or of a pair of them - holds every date once with the date itself; the
+  calendar gets `plain_layer` (`{<[Aggregation]={'Date'}>}`, and
+  `{<[PrevYear]={'0'},[PrevMonth]={'0'}>}` for a shift calendar), the field
+  `picks_plain_layer`, listed with its values even when hidden, and
+  `warnings` opens with one line per calendar. Nothing is named by its
+  name; a model had filtered such a calendar nine times out of nineteen
+  without the hidden field that picks the plain rows.
 - `period_check` sees a period that reached the facts through days outside
   it. For a period on a date field outside the largest table, the server
   finds the key the field reaches that table through (walked over the

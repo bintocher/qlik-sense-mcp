@@ -20,9 +20,13 @@ import uuid
 from ..utils import bare_field_name, escape_qlik_field_name
 from .canonical import canonical_expression
 from .filters import _parse_bound, _set_identifier, _too_much
-from .outer_set import (FILTER_MARKER, filter_limits, in_front,
-                        limit_warnings, marks_outer, master_reference,
-                        place_filter)
+from .layers import layer_text, repeating_path
+from .outer_set import (FILTER_MARKER, FilterPlacementError,
+                        element_set_warning,
+                        filter_limits, has_marker,
+                        in_front, limit_warnings, marks_outer,
+                        master_reference, place_filter, set_contexts,
+                        flat_set, holds_filter)
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -241,45 +245,10 @@ def fan_out_key(raw_fields: List[Dict[str, Any]], field: str
     by no key. Nothing is chosen for the caller: this only says through
     what a filter on the field narrows the facts.
     """
-    tables_of: Dict[str, List[str]] = {}
-    fields_of: Dict[str, List[str]] = {}
-    rows: Dict[str, int] = {}
-    tags: Dict[str, Any] = {}
-    for entry in raw_fields or []:
-        name, table = entry.get("field_name"), entry.get("table_name")
-        if not name or not table or entry.get("is_system"):
-            continue
-        tables_of.setdefault(name, [])
-        if table not in tables_of[name]:
-            tables_of[name].append(table)
-        fields_of.setdefault(table, []).append(name)
-        rows[table] = max(rows.get(table, 0), int(entry.get("table_rows") or 0),
-                          int(entry.get("rows_count") or 0))
-        tags.setdefault(name, entry.get("tags"))
-    start = tables_of.get(field)
-    if not start or not rows:
+    path = repeating_path(raw_fields, field)
+    if not path:
         return None
-    facts = max(rows, key=lambda table: rows[table])
-    if facts in start:
-        return None
-    entered: Dict[str, str] = {}
-    visited = set(start)
-    queue = list(start)
-    while queue:
-        table = queue.pop(0)
-        for name in fields_of.get(table, []):
-            for other in tables_of.get(name, []):
-                if other in visited:
-                    continue
-                visited.add(other)
-                entered[other] = name
-                queue.append(other)
-    key = entered.get(facts)
-    if not key:
-        return None
-    words = {str(tag).lstrip("$").lower() for tag in (tags.get(key) or [])}
-    return {"key": key, "table": facts,
-            "temporal": bool(words & {"date", "timestamp"})}
+    return {k: path[k] for k in ("key", "table", "temporal")}
 
 
 _BOUND_KEYS = ("from", "to", "period", "greater_than", "less_than")
@@ -399,6 +368,31 @@ OUTER_AGGREGATIONS = {
 _PROBE_KEYS = ("earliest", "latest", "earliest_number", "latest_number",
                "key_values", "key_earliest", "key_latest",
                "key_earliest_number", "key_latest_number")
+# The control values of a filter on a calendar whose dates repeat: how many
+# values of the field it names, how many key values of the facts it
+# reaches, and how many values of the field those key values belong to.
+_SPREAD_KEYS = ("selected", "reached", "linked", "key_earliest", "key_latest")
+
+# Different sets one filter is checked under, and filters on a repeating
+# calendar checked per query: each costs a few more questions to Engine.
+MAX_CONTEXTS_PER_FILTER = 4
+MAX_SPREAD_CHECKS = 4
+
+
+def _in_context(context, function: str, field: str, distinct: bool = False,
+                wrap: str = "") -> str:
+    """`={outer} wrap(function({inner} [DISTINCT] field))`: an aggregation
+    read through exactly the sets a measure's aggregation reads through."""
+    outer, inner = context
+    body = (f"{function}({inner + ' ' if inner else ''}"
+            f"{'DISTINCT ' if distinct else ''}{field})")
+    if wrap:
+        body = f"{wrap}({body})"
+    return "=" + (outer + " " if outer else "") + body
+
+
+def _set_text(identifier: str, parts: List[str]) -> str:
+    return "{" + identifier + ("<" + ",".join(parts) + ">" if parts else "") + "}"
 
 # Rows returned per query unless the caller says otherwise. Smaller than
 # the hypercube default: a typed query is normally a ranking or a total,
@@ -1158,9 +1152,8 @@ class EngineQueriesMixin:
             # marker then has nothing to hold and comes out. Only a marker
             # with no filter stated anywhere is a mistake worth refusing.
             if own_applied is not None and not own:
-                expression = expression.replace(FILTER_MARKER, "").replace(
-                    "(  ", "(").replace("( ", "(")
-            elif not own and FILTER_MARKER in expression:
+                expression = place_filter(expression, "")
+            elif not own and has_marker(expression):
                 return [], {"id": query_id, "error": (
                     f"Measure {expression!r} marks a place for a filter, but "
                     f"the query states none."),
@@ -1168,6 +1161,10 @@ class EngineQueriesMixin:
                     "hint": ("Add `filters`, or drop the marker — Qlik has no "
                              "meaning for it and would read it as text.")}
             warnings = []
+            # The sets each aggregation of the measure reads through, as
+            # written: what the checks after the query ask about.
+            contexts = set_contexts(master["expression"] if master is not None
+                                    else expression)
             if own:
                 stated = [record.get("field") for _, record in _narrowings(
                     own_applied if own_applied is not None else applied, own)
@@ -1182,34 +1179,53 @@ class EngineQueriesMixin:
                     warnings = limit_warnings(
                         master.get("name", ""),
                         filter_limits(master["expression"]), stated)
-                elif FILTER_MARKER not in expression:
-                    return [], {"id": query_id, "error": (
-                        f"Measure {expression!r} is written by hand and this "
-                        f"query has filters, but the expression does not say "
-                        f"where the filter goes."),
-                        "error_category": "invalid_argument",
-                        "next_actions": [
-                            "put the marker in front of the whole expression, "
-                            "and the filter reaches every aggregation in it: "
-                            "\"{filter} Sum(Amount) / Count(OrderId)\"",
-                            "or inside the one aggregation it narrows: "
-                            "\"Sum({filter} Amount)\"",
-                            "or state the measure as a metric: "
-                            '{"field": "Amount", "agg": "sum"}',
-                        ],
-                        "hint": (
-                            "Without this the aggregation would run over "
-                            "every row while the reply said the period had "
-                            "been applied."
-                        )}
+                    contexts = set_contexts(
+                        in_front(own, master["expression"]))
+                elif not has_marker(expression):
+                    # No place marked: the filters go in front of the whole
+                    # expression as an outer set, as they do for a master
+                    # measure, and the reply says so. Refusing cost a model
+                    # three calls on one question.
+                    label = str(measure.get("label") or expression)
+                    warnings = [
+                        f"Measure {label!r} marks no place for the filters, so "
+                        f"it took them as an outer set in front of its whole "
+                        f"expression, which reaches every aggregation in it."
+                    ] + limit_warnings(label, filter_limits(expression), stated)
+                    try:
+                        expression = place_filter(
+                            FILTER_MARKER + " " + expression.lstrip("= "), own)
+                    except FilterPlacementError as exc:
+                        return [], {"id": query_id, "error": (
+                            f"Measure {expression!r}: {exc}"),
+                            "error_category": "invalid_argument"}
+                    contexts = [context for context in set_contexts(expression)
+                                if holds_filter(context, own)]
                 else:
                     if marks_outer(expression):
                         warnings = limit_warnings(
                             str(measure.get("label") or expression),
                             filter_limits(expression), stated)
-                    expression = place_filter(expression, own)
+                    try:
+                        expression = place_filter(expression, own)
+                    except FilterPlacementError as exc:
+                        return [], {"id": query_id, "error": (
+                            f"Measure {expression!r}: {exc}"),
+                            "error_category": "invalid_argument",
+                            "hint": ("Qlik reads one set per aggregation; "
+                                     "the filter is merged into the set "
+                                     "written next to the marker, and "
+                                     "this one cannot take it.")}
+                    contexts = [context for context in set_contexts(expression)
+                                if holds_filter(context, own)]
+                    missed = element_set_warning(
+                        str(measure.get("label") or expression), expression, own)
+                    if missed:
+                        warnings = warnings + [missed]
             written = {"expression": expression,
                        "label": str(measure.get("label") or expression)}
+            if contexts:
+                written["_contexts"] = contexts
             if own_applied is not None:
                 written["filters_applied"] = own_applied
                 written["modifier"] = own
@@ -1225,97 +1241,313 @@ class EngineQueriesMixin:
 
     def _control_probes(self, plan: Dict[str, Any],
                         app_handle: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Expressions that show whether a period filter really applied.
+        """Expressions that show whether the filters did what was asked.
 
-        For each period filter: the earliest and latest value of that field
-        inside the filtered set. A value outside the requested period means
-        Qlik ignored the condition — the one failure that otherwise returns
-        a plausible number and no sign of trouble.
+        For each bounded filter: the earliest and latest value of its field
+        as each measure's aggregation reads it - through the very sets the
+        measure is written with, not through the filter alone. Qlik drops a
+        set it cannot combine without a word, and only the measure's own
+        text shows what it really read. A value outside the bounds means the
+        filter did not reach the figures.
+
+        For a filter on a calendar whose dates repeat: how many key values
+        of the facts it reaches and how many values of its field those
+        belong to (see `_spread_probe`).
         """
-        # Every filter stated anywhere in the query, not only the one at
-        # the top: a period named inside a metric narrows that metric, and
-        # a period that fails to apply is exactly what these probes exist
-        # to catch. The measure's own modifier is used for its own probe.
-        stated = list(_narrowings(plan.get("filters_applied"),
-                                  plan.get("modifier", "")))
-        for measure in plan.get("measures", []):
-            stated.extend(_narrowings(measure.get("filters_applied"),
-                                      measure.get("modifier", "")))
-            # A part of an arithmetic metric carries its own filters, and a
-            # period stated there can fail to apply like any other.
-            for part in measure.get("part_filters") or []:
-                stated.extend(_narrowings(part.get("filters_applied"),
-                                          part.get("modifier", "")))
-
-        probes = []
+        subjects = self._probe_subjects(plan)
+        probes: List[Dict[str, Any]] = []
         seen = set()
-        # The model is read only when a period is there to be checked.
         links: Dict[str, Any] = {}
         model = None
-        if any("serial_from" in applied for _, applied in stated):
+        if subjects:
             reader = getattr(self, "_model_fields", None)
             model = reader(app_handle) if reader else None
-        for modifier_for_probe, applied in stated:
-            signature = (modifier_for_probe, applied.get("field"),
-                         str(applied.get("from")), str(applied.get("to")))
+        spread: List[Dict[str, Any]] = []
+        for subject in subjects:
+            applied, context = subject["applied"], subject["context"]
+            field_name = applied.get("field")
+            if not field_name:
+                continue
+            signature = (context, field_name, str(applied.get("from")),
+                         str(applied.get("to")), str(applied.get("values")))
             if signature in seen:
                 continue
             seen.add(signature)
-            # A period and a numeric range are both bounded filters, and
-            # both can silently fail to apply. Values outside the bounds
-            # in the result say so; a value list cannot fail this way,
-            # since each value was checked against the field.
-            if "serial_from" not in applied and "from" not in applied:
-                continue
-            if applied.get("from") is None and applied.get("to") is None:
-                continue
-            field = escape_qlik_field_name(applied["field"])
-            inner = (f"{modifier_for_probe} {field}"
-                     if modifier_for_probe else field)
-            # A period compares against day numbers; a range against the
-            # values themselves. Either way the question is the same: does
-            # the result hold anything outside what was asked for.
+            if field_name not in links and model:
+                links[field_name] = repeating_path(model, field_name)
+            link = links.get(field_name)
+            bounded = (("serial_from" in applied or "from" in applied)
+                       and not (applied.get("from") is None
+                                and applied.get("to") is None))
             is_period = "serial_from" in applied
-            low_bound = (applied["serial_from"] if is_period
-                         else _as_number(applied.get("from")))
-            high_bound = (applied["serial_to_exclusive"] if is_period
-                          else _as_number(applied.get("to")))
+            if bounded:
+                probes.append(self._bounds_probe(applied, context, link,
+                                                 is_period, subject))
+            if link and link.get("repeats") and not (
+                    is_period and link.get("temporal")):
+                spread.append(dict(subject, link=link))
+        if spread:
+            probes.extend(self._spread_probes(spread, model, app_handle))
+        return probes
+
+    @staticmethod
+    def _probe_subjects(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Every filter stated in the query, with the sets it is read under.
+
+        A period named inside a metric narrows that metric, and a period
+        that fails to apply is exactly what the probes exist to catch. A
+        measure written by hand, or taken from the library, reads through
+        sets of its own; its contexts say which. A measure with no filter
+        still names fields in its own sets, and those are checked for a
+        repeating calendar too.
+        """
+        subjects: List[Dict[str, Any]] = []
+        modifier = plan.get("modifier", "")
+        shared: Dict[tuple, Optional[str]] = {}
+        for measure in plan.get("measures", []):
+            if "filters_applied" in measure:
+                continue
+            if measure.get("_contexts") and modifier:
+                for context in measure["_contexts"]:
+                    shared.setdefault(context, measure.get("label"))
+            elif modifier:
+                shared.setdefault(("", modifier), None)
+        for narrowing, applied in _narrowings(plan.get("filters_applied"),
+                                              modifier):
+            contexts = (list(shared.items()) if narrowing == modifier and shared
+                        else [(("", narrowing), None)])
+            for context, label in contexts[:MAX_CONTEXTS_PER_FILTER]:
+                subject = {"applied": applied, "context": context}
+                if label:
+                    subject["measure"] = label
+                subjects.append(subject)
+        for measure in plan.get("measures", []):
+            label = measure.get("label")
+            if "filters_applied" in measure:
+                own = measure.get("modifier", "")
+                contexts = measure.get("_contexts") or [("", own)]
+                for narrowing, applied in _narrowings(
+                        measure["filters_applied"], own):
+                    for context in (contexts if narrowing == own
+                                    else [("", narrowing)])[:MAX_CONTEXTS_PER_FILTER]:
+                        subjects.append({"applied": applied, "context": context,
+                                         "measure": label})
+            for part in measure.get("part_filters") or []:
+                for narrowing, applied in _narrowings(
+                        part.get("filters_applied"), part.get("modifier", "")):
+                    subjects.append({"applied": applied,
+                                     "context": ("", narrowing)})
+        stated = {subject["applied"].get("field") for subject in subjects}
+        for measure in plan.get("measures", []):
+            # Fields the measure's own sets name, as conditions of their
+            # own: `Sum({<Month={'2026-08'}>} Amount)` is a filter too.
+            for context in (measure.get("_contexts") or [])[:MAX_CONTEXTS_PER_FILTER]:
+                flat = flat_set(context)
+                if not flat:
+                    continue
+                for name in filter_limits(_set_text(*flat)).get("fields", []):
+                    if name in stated:
+                        continue
+                    subjects.append({"applied": {"field": name, "own": True},
+                                     "context": context,
+                                     "measure": measure.get("label")})
+        return subjects
+
+    @staticmethod
+    def _bounds_probe(applied, context, link, is_period, subject):
+        """The ends of a bounded filter's field as the measure reads it."""
+        field = escape_qlik_field_name(applied["field"])
+        low_bound = (applied["serial_from"] if is_period
+                     else _as_number(applied.get("from")))
+        high_bound = (applied["serial_to_exclusive"] if is_period
+                      else _as_number(applied.get("to")))
+        probe = {
+            "field": applied["field"],
+            "expected_from": applied["from"],
+            "expected_to": applied["to"],
+            "serial_from": low_bound,
+            "serial_to_exclusive": high_bound,
+            "inclusive_upper": not is_period and not applied.get("to_excluded"),
+            "exclusive_lower": bool(applied.get("from_excluded")),
+            "earliest": _in_context(context, "Min", field, wrap="Text"),
+            "latest": _in_context(context, "Max", field, wrap="Text"),
+            "earliest_number": _in_context(context, "Min", field, wrap="Num"),
+            "latest_number": _in_context(context, "Max", field, wrap="Num"),
+        }
+        if subject.get("measure") or context[0]:
+            probe["measure"] = subject.get("measure")
+        # A period on a calendar reaches the facts through a key. When
+        # that key is a date too, its values under the filter show whether
+        # one day of the calendar stands for days outside the period - a
+        # shifted or cumulative calendar does exactly that, and the
+        # figures grow with no error. Asked in the same batch.
+        if is_period and link and link.get("temporal"):
+            key = escape_qlik_field_name(link["key"])
+            probe["fan_out"] = {k: link[k] for k in ("key", "table", "temporal")}
+            probe["key_values"] = _in_context(context, "Count", key, distinct=True)
+            probe["key_earliest"] = _in_context(context, "Min", key, wrap="Text")
+            probe["key_latest"] = _in_context(context, "Max", key, wrap="Text")
+            probe["key_earliest_number"] = _in_context(context, "Min", key, wrap="Num")
+            probe["key_latest_number"] = _in_context(context, "Max", key, wrap="Num")
+        return probe
+
+    def _spread_probes(self, subjects: List[Dict[str, Any]], model,
+                       app_handle: Optional[int]) -> List[Dict[str, Any]]:
+        """Whether a filter on a repeating calendar reaches other values'
+        facts.
+
+        A filter names values of a field; the facts are narrowed by the key
+        values those reach. On an ordinary table each key value belongs to
+        one value of the field. On a calendar whose rows repeat per date - a
+        cumulative, as-of or shifted layer - the key values reached also
+        belong to other values of the field, and the figure covers them.
+        Measured: `Month='2026-08'` on a cumulative calendar reached
+        thirteen months of facts, and the sum grew thirteen times.
+        The fields that pick a layer are not filters of a period and are
+        left alone.
+        """
+        layers: List[Dict[str, Any]] = []
+        reader = getattr(self, "plain_layers", None)
+        if reader is not None and model:
+            try:
+                layers = reader(app_handle, model) or []
+            except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    raise
+                logger.debug("Could not read the calendar layers: %s", exc)
+        selectors = {field for layer in layers
+                     for option in layer.get("plain") or []
+                     for field in option["fields"]}
+        probes = []
+        for subject in subjects:
+            if len(probes) >= MAX_SPREAD_CHECKS:
+                break
+            applied, link = subject["applied"], subject["link"]
+            if applied["field"] in selectors:
+                continue
+            flat = flat_set(subject["context"])
+            if flat is None:
+                continue
+            identifier, parts = flat
+            field = escape_qlik_field_name(applied["field"])
+            key = escape_qlik_field_name(link["key"])
+            within = _set_text(identifier, parts)
+            others = [part for part in parts
+                      if applied["field"] not in filter_limits(
+                          _set_text("", [part])).get("fields", [])]
+            back = _set_text(identifier, others + [
+                f"{field}=", f"{key}=P({within} {key})"])
             probe = {
+                "kind": "spread",
                 "field": applied["field"],
-                "expected_from": applied["from"],
-                "expected_to": applied["to"],
-                "serial_from": low_bound,
-                "serial_to_exclusive": high_bound,
-                "inclusive_upper": not is_period and not applied.get("to_excluded"),
-                "exclusive_lower": bool(applied.get("from_excluded")),
-                "earliest": f"=Text(Min({inner}))",
-                "latest": f"=Text(Max({inner}))",
-                "earliest_number": f"=Num(Min({inner}))",
-                "latest_number": f"=Num(Max({inner}))",
+                "own": bool(applied.get("own")),
+                "measure": subject.get("measure"),
+                "link": link,
+                "layers": [layer for layer in layers
+                           if layer["table"] in {r["table"] for r in link["repeats"]}],
+                "values": applied.get("values"),
+                "selected": f"=Count({within} DISTINCT {field})",
+                "reached": f"=Count({within} DISTINCT {key})",
+                "linked": f"=Count({back} DISTINCT {field})",
             }
-            # A period on a calendar reaches the facts through a key. When
-            # that key is a date too, its values under the filter show
-            # whether one day of the calendar stands for days outside the
-            # period - a shifted or cumulative calendar does exactly that,
-            # and the figures grow with no error. Asked in the same batch.
-            link = links.get(applied["field"]) if is_period else None
-            if link is None and is_period and model is not None:
-                link = links[applied["field"]] = fan_out_key(
-                    model, applied["field"])
-            if link and link.get("temporal"):
-                key = escape_qlik_field_name(link["key"])
-                keyed = (f"{modifier_for_probe} {key}"
-                         if modifier_for_probe else key)
-                probe["fan_out"] = dict(link)
-                probe["key_values"] = (
-                    f"=Count({modifier_for_probe} DISTINCT {key})"
-                    if modifier_for_probe else f"=Count(DISTINCT {key})")
-                probe["key_earliest"] = f"=Text(Min({keyed}))"
-                probe["key_latest"] = f"=Text(Max({keyed}))"
-                probe["key_earliest_number"] = f"=Num(Min({keyed}))"
-                probe["key_latest_number"] = f"=Num(Max({keyed}))"
+            if link.get("temporal"):
+                probe["key_earliest"] = f"=Text(Min({within} {key}))"
+                probe["key_latest"] = f"=Text(Max({within} {key}))"
             probes.append(probe)
         return probes
+
+    @staticmethod
+    def _read_spread(probe: Dict[str, Any],
+                     values: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """One statement about a filter on a repeating calendar, or None
+        when its key values belong to the values it names alone."""
+        numbers = {key: (values.get(key) or {}).get("number")
+                   for key in ("selected", "reached", "linked")}
+        if not all(isinstance(n, (int, float)) for n in numbers.values()):
+            return None
+        selected, reached, linked = (int(numbers[k]) for k in
+                                     ("selected", "reached", "linked"))
+        if selected <= 0 or linked <= selected:
+            return None
+        link = probe["link"]
+        field = escape_qlik_field_name(probe["field"])
+        key = escape_qlik_field_name(link["key"])
+        repeat = link["repeats"][0]
+        spread = {"field": probe["field"], "table": link["table"],
+                  "key": link["key"], "key_values": reached,
+                  "per_value": round(reached / selected, 1),
+                  "belong_to_values": linked,
+                  "repeating_table": repeat["table"]}
+        if probe.get("measure"):
+            spread["measure"] = probe["measure"]
+        low = (values.get("key_earliest") or {}).get("text")
+        high = (values.get("key_latest") or {}).get("text")
+        span = f" ({low}..{high})" if low and high else ""
+        named = (f"The set of measure {probe['measure']!r} on {field}"
+                 if probe.get("own") else f"The filter on {field}")
+        if probe.get("values"):
+            named += " (" + ", ".join(repr(v) for v in probe["values"][:3]) + (
+                ", ..." if len(probe["values"]) > 3 else "") + ")"
+        shown = "; ".join(
+            f"{r['table']} holds {r['rows']} rows for {r['dates']} dates of "
+            f"{r['key']}" for r in link["repeats"])
+        spread["note"] = (
+            f"{named} reaches {link['table']} through {reached} values of "
+            f"{key}{span} - about {spread['per_value']:g} per value of {field} "
+            f"- and those key values belong to {linked} values of {field}, "
+            f"not only to the {selected} named: {shown}, so one value of "
+            f"{field} stands for several dates (cumulative, as-of or shifted "
+            f"rows). The figures cover more than the value named.")
+        layers = [layer_text(layer) for layer in probe.get("layers") or []
+                  if layer.get("plain")]
+        if layers:
+            spread["note"] += " " + " ".join(layers)
+        return spread
+
+    def _cube_checks(self, app_handle: int,
+                     measures: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The query checks for a hypercube written by hand.
+
+        `measures` carry what `_build_measures` gives a typed query: the
+        filter each one took, its modifier and the sets its aggregations
+        read through. Evaluated in one pipelined batch; a check that cannot
+        run leaves the cube as it is.
+        """
+        plan: Dict[str, Any] = {"filters_applied": [], "modifier": "",
+                                "measures": measures}
+        try:
+            probes = self._control_probes(plan, app_handle)
+            spans, expressions = [], []
+            for probe in probes:
+                keys = [key for key in (_SPREAD_KEYS if probe.get("kind") == "spread"
+                                        else _PROBE_KEYS) if key in probe]
+                spans.append((probe, len(expressions), len(keys)))
+                expressions.extend(probe[key] for key in keys)
+            values = self.evaluate_expressions(app_handle, expressions)
+            for probe, start, count in spans:
+                read = [{"text": f"Error: {value['error']}", "number": None}
+                        if value.get("error") else value
+                        for value in values[start:start + count]]
+                self._file_check(plan, probe, read)
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("The hypercube checks did not run: %s", exc)
+        return {"period_check": plan.get("period_check", []),
+                "fan_out_check": plan.get("fan_out_check", [])}
+
+    @classmethod
+    def _file_check(cls, plan: Dict[str, Any], probe: Dict[str, Any],
+                    values: List[Dict[str, Any]]) -> None:
+        """Put what one probe says where the reply reads it."""
+        if probe.get("kind") == "spread":
+            keys = [key for key in _SPREAD_KEYS if key in probe]
+            spread = cls._read_spread(probe, dict(zip(keys, values)))
+            if spread:
+                plan.setdefault("fan_out_check", []).append(spread)
+            return
+        plan.setdefault("period_check", []).append(
+            cls._read_controls(probe, values))
 
     @staticmethod
     def _read_controls(probe: Dict[str, Any],
@@ -1329,6 +1561,9 @@ class EngineQueriesMixin:
             "earliest_in_result": earliest.get("text"),
             "latest_in_result": latest.get("text"),
         }
+        if probe.get("measure"):
+            # Read through that measure's own sets, not the filter alone.
+            check["measure"] = probe["measure"]
         low = earliest_num.get("number")
         high = latest_num.get("number")
         if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
@@ -1365,10 +1600,14 @@ class EngineQueriesMixin:
                                   else high >= upper)
         check["filter_applied"] = not outside
         if outside:
+            whose = (f"Measure {probe['measure']!r} reads"
+                     if probe.get("measure") else "The result holds")
             check["note"] = (
-                f"The result holds values of {probe['field']} outside "
-                f"{probe['expected_from']}..{probe['expected_to']}, so the "
-                f"period did not narrow it. Treat the numbers as unfiltered."
+                f"{whose} values of {probe['field']} outside "
+                f"{probe['expected_from']}..{probe['expected_to']} "
+                f"({check['earliest_in_result']}..{check['latest_in_result']}), "
+                f"so the filter did not narrow it. Treat the numbers as "
+                f"unfiltered."
             )
         fan = EngineQueriesMixin._read_fan_out(probe, values[4:])
         if fan:
@@ -1571,7 +1810,8 @@ class EngineQueriesMixin:
         for plan, _ in prepared:
             for probe in self._control_probes(plan, app_handle):
                 start = len(probe_requests)
-                keys = [key for key in _PROBE_KEYS if key in probe]
+                keys = [key for key in (_SPREAD_KEYS if probe.get("kind") == "spread"
+                                        else _PROBE_KEYS) if key in probe]
                 for key in keys:
                     probe_requests.append(
                         {"method": "EvaluateEx", "params": [probe[key]],
@@ -1596,8 +1836,7 @@ class EngineQueriesMixin:
                 value = (outcome or {}).get("qValue") or {}
                 values.append({"text": value.get("qText"),
                                "number": value.get("qNumber")})
-            plan.setdefault("period_check", []).append(
-                self._read_controls(probe, values))
+            self._file_check(plan, probe, values)
 
         handles = []
         for (plan, shaped), outcome in zip(prepared, create_outcomes):
@@ -1726,7 +1965,20 @@ class EngineQueriesMixin:
                 "queries_failed": len(failed),
                 "seconds": round(time.monotonic() - started, 3),
             }
+        # The reasons a figure answers a different question than the one
+        # asked, once more at the head of the whole reply: a filter that
+        # did not reach a measure, or reached more dates than it named.
+        alarms = []
+        for plan in plans:
+            for spread in plan.get("fan_out_check", []):
+                alarms.append(f"{plan.get('id')}: {spread['note']}")
+            for check in plan.get("period_check", []):
+                if check.get("filter_applied") is False:
+                    alarms.append(f"{plan.get('id')}: {check['note']}")
+                if check.get("fan_out"):
+                    alarms.append(f"{plan.get('id')}: {check['fan_out']['note']}")
         return {
+            **({"warnings": list(dict.fromkeys(alarms))} if alarms else {}),
             # Ahead of `results`, so a partial failure is read before the
             # rows are: a caller reads the head of a reply and stops.
             "queries_failed": len(failed),
@@ -1886,6 +2138,9 @@ class EngineQueriesMixin:
                 "No rows matched. The grouping fields have no values under "
                 "these filters."
             )
+        # First: a figure over more dates than asked for looks as right as
+        # any other.
+        warnings[:0] = [spread["note"] for spread in plan.get("fan_out_check", [])]
         for check in plan.get("period_check", []):
             if check.get("fan_out"):
                 warnings.append(check["fan_out"]["note"])
@@ -1977,6 +2232,10 @@ class EngineQueriesMixin:
             reply["measure_filters"] = per_measure
         if plan.get("period_check"):
             reply["period_check"] = plan["period_check"]
+        if plan.get("fan_out_check"):
+            reply["fan_out_check"] = [
+                {k: v for k, v in spread.items() if k != "note"}
+                for spread in plan["fan_out_check"]]
         if shaped["offset"] + len(rows) < total_rows:
             reply["has_more"] = True
             reply["next_offset"] = shaped["offset"] + len(rows)

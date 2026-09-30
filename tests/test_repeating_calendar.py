@@ -1,0 +1,177 @@
+"""A filter on a calendar whose dates repeat covers more than it names.
+
+Measured on a 1.16-billion-row app: a calendar of 669 rows over 21 months
+holds a row per month and per accumulation (the month, year to date, the
+twelve months to date, ...), told apart by one hidden field. A filter
+`{"field": "Month", "values": ["2026-08"]}` reached thirteen months of
+facts and the month's GGR came back as 60.9 billion against 2.9, with no
+warning: the fan-out check ran for periods only. Now any filter on such a
+calendar - values, a range, a set written by hand - is checked for key
+values that belong to other values of its field, the warning names the
+field, the tables and how many key values one value covers, and
+`get_app_details` says which field picks one row per date.
+"""
+
+from qlik_sense_mcp_server.engine.layers import (
+    EngineLayersMixin, layer_text, repeating_calendars, repeating_path)
+from tests.test_filter_reaches_measure import _Cube
+from tests.test_typed_queries import _Engine, _query
+
+
+def _field(name, table, rows, distinct, tags=("$numeric",)):
+    return {"field_name": name, "table_name": table, "table_rows": rows,
+            "rows_count": rows, "distinct_values": distinct, "tags": list(tags)}
+
+
+DATE = ("$date", "$numeric")
+
+# Facts by month; a cumulative calendar of 8 layers over 21 months; a plain
+# calendar of days.
+MODEL = [
+    _field("MonthKey", "Facts", 1_000_000, 21, DATE),
+    _field("DayKey", "Facts", 1_000_000, 600, DATE),
+    _field("Amount", "Facts", 1_000_000, 50_000),
+    _field("MonthKey", "Accumulated", 669, 21, DATE),
+    _field("MonthName", "Accumulated", 669, 21, DATE),
+    _field("Month", "Accumulated", 669, 21, ("$text",)),
+    _field("Layer", "Accumulated", 669, 8, ("$text", "$hidden")),
+    _field("DayKey", "Days", 600, 600, DATE),
+    _field("Day", "Days", 600, 600, DATE),
+]
+
+PLAIN = [{"table": "Accumulated", "key": "MonthKey", "rows": 669, "dates": 21,
+          "plain": [{"fields": ["Layer"], "values": ["Month"],
+                     "condition": "[Layer]={'Month'}"}]}]
+
+
+class TestStructure:
+    def test_the_calendar_repeats_its_dates(self):
+        path = repeating_path(MODEL, "Month")
+        assert (path["key"], path["table"]) == ("MonthKey", "Facts")
+        assert path["repeats"] == [{"table": "Accumulated", "key": "MonthKey",
+                                    "rows": 669, "dates": 21}]
+
+    def test_an_ordinary_calendar_does_not(self):
+        assert repeating_path(MODEL, "Day")["repeats"] == []
+
+    def test_the_candidates_are_the_few_valued_fields_beside_the_date(self):
+        [calendar] = repeating_calendars(MODEL)
+        assert calendar["table"] == "Accumulated"
+        assert calendar["dates_beside"] == ["MonthName"]
+        assert calendar["candidates"] == ["Layer", "Month"]
+
+
+class _SpreadEngine(_Engine):
+    """Month '2026-08' reaches 13 month keys, which belong to 9 months;
+    with the plain layer set, one key, one month."""
+
+    def __init__(self):
+        super().__init__(known=("Region", "Amount", "Month", "MonthKey", "Layer"))
+        self.probes = []
+
+    def _model_fields(self, app_handle):
+        return MODEL
+
+    def plain_layers(self, app_handle, raw_fields):
+        return PLAIN
+
+    def _evaluate(self, expression):
+        self.probes.append(expression)
+        plain = "[Layer]={'Month'}" in expression
+        if "P(" in expression:
+            count = 1 if plain else 9
+        elif "DISTINCT [MonthKey]" in expression:
+            count = 1 if plain else 13
+        elif "DISTINCT [Month]" in expression:
+            count = 1
+        else:
+            return super()._evaluate(expression)
+        return {"qText": str(count), "qNumber": count, "qIsNumeric": True}
+
+
+class TestTheWarning:
+    def test_a_value_list_on_a_repeating_calendar_is_said_first(self):
+        result = _SpreadEngine().run_queries(1, "app", [_query(
+            filters=[{"field": "Month", "values": ["2026-08"]}])])
+        reply = result["results"][0]
+        [spread] = reply["fan_out_check"]
+        assert spread == {"field": "Month", "table": "Facts", "key": "MonthKey",
+                          "key_values": 13, "per_value": 13.0,
+                          "belong_to_values": 9, "repeating_table": "Accumulated"}
+        note = reply["warnings"][0]
+        assert note.startswith("The filter on [Month] ('2026-08') reaches Facts "
+                               "through 13 values of [MonthKey]")
+        assert "Accumulated holds 669 rows for 21 dates of MonthKey" in note
+        assert "{<[Layer]={'Month'}>}" in note
+        assert result["warnings"][0].startswith("q1: The filter on [Month]")
+        assert reply["numbers_verified"] is False
+
+    def test_the_plain_layer_set_beside_it_quiets_it(self):
+        reply = _SpreadEngine().run_queries(1, "app", [_query(
+            filters=[{"field": "Month", "values": ["2026-08"]},
+                     {"field": "Layer", "values": ["Month"]}])])["results"][0]
+        assert "fan_out_check" not in reply
+        assert "warnings" not in reply
+
+    def test_a_set_written_by_hand_is_checked_too(self):
+        engine = _SpreadEngine()
+        engine.send_request = lambda method, params=None, handle=-1, timeout=None: \
+            _Cube.send_request(engine, method, params, handle, timeout)
+        engine.ws = object()
+        reply = engine.create_hypercube(1, [{"field": "Region"}], [
+            {"expression": "Sum({<Month={'2026-08'}>} Amount)", "label": "GGR"}], 10)
+        assert reply["warnings"][0].startswith(
+            "The set of measure 'GGR' on [Month] reaches Facts through 13 values")
+        assert reply["fan_out_check"][0]["measure"] == "GGR"
+
+    def test_a_field_on_an_ordinary_table_is_not_asked(self):
+        engine = _SpreadEngine()
+        engine.run_queries(1, "app", [_query(
+            filters=[{"field": "Region", "values": ["North"]}])])
+        assert not any("P(" in probe for probe in engine.probes)
+
+
+class _LayerEngine(EngineLayersMixin):
+    """Rows per value of the candidate fields of the calendar."""
+
+    ROWS = {
+        ("Layer",): [["Month", 21, 21, 21], ["YTD", 120, 21, 21],
+                     ["Shift", 21, 21, 0]],
+        ("Month",): [["2026-08", 8, 8, 1]],
+    }
+
+    def __init__(self):
+        self.asked = []
+
+    def create_hypercube(self, app_handle, dimensions, measures, max_rows=None, **kw):
+        fields = tuple(d["field"] for d in dimensions)
+        self.asked.append((fields, [m["expression"] for m in measures]))
+        return {"rows": self.ROWS.get(fields, [])}
+
+
+class TestThePlainLayer:
+    def test_one_row_per_date_that_is_the_date_itself(self):
+        engine = _LayerEngine()
+        [layer] = engine.plain_layers(1, MODEL)
+        assert layer["plain"] == [{"fields": ["Layer"], "values": ["Month"],
+                                   "condition": "[Layer]={'Month'}"}]
+        fields, measures = engine.asked[0]
+        assert measures == ["Count([Layer])", "Count(DISTINCT [MonthKey])",
+                            "Sum(If([MonthName]=[MonthKey],1,0))"]
+
+    def test_a_pair_of_fields_when_no_single_one_picks_it(self):
+        class _Pairs(_LayerEngine):
+            ROWS = {("Year shift", "Month shift"): [[0, 0, 21, 21, 21], [1, 0, 21, 21, 0]]}
+        model = [f for f in MODEL if f["field_name"] not in ("Layer", "Month")] + [
+            _field("Year shift", "Accumulated", 669, 2),
+            _field("Month shift", "Accumulated", 669, 2)]
+        [layer] = _Pairs().plain_layers(1, model)
+        assert layer["plain"][0]["fields"] == ["Year shift", "Month shift"]
+        assert layer["plain"][0]["values"] == ["0", "0"]
+
+    def test_the_sentence_names_the_condition(self):
+        text = layer_text(PLAIN[0])
+        assert text == ("Accumulated holds 669 rows for 21 dates of MonthKey: one "
+                        "date stands for several rows. One row per date, the date "
+                        "itself: [Layer] = 'Month' - set it with every filter on "
+                        "this calendar, e.g. {<[Layer]={'Month'}>}.")

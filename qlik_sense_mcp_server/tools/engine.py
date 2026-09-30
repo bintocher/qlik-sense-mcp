@@ -425,13 +425,14 @@ def engine_query(
             once. When present, the single-query arguments are ignored.
         measures: an escape hatch inside a query, for one expression this
             vocabulary cannot state — `[{"expression": "{filter} Sum(A) / "
-            "Count(B)", "label": "AOV"}]`. With `filters`, the expression
-            must mark where the filter goes. In front of the whole
-            expression, `{filter} (...)`, it is an outer set and reaches
-            every aggregation inside; inside one aggregation,
-            `Sum({filter} A)`, it narrows that one alone. Without the marker
-            the query is refused rather than answered with an unfiltered
-            number.
+            "Count(B)", "label": "AOV"}]`. With `filters`, the marker says
+            where they go. In front of the whole expression, `{filter}
+            (...)`, it is an outer set and reaches every aggregation
+            inside; inside one aggregation, `Sum({filter} A)`, it narrows
+            that one alone; next to a set of the expression's own,
+            `Sum({filter} {<F={1}>} A)`, it is merged into that set. Without
+            the marker the filters go in front of the whole expression and
+            `warnings` says so.
 
     RETURNS
         `results`, one entry per query, each with `id`, `columns`, `rows`
@@ -439,12 +440,17 @@ def engine_query(
         `grand_total` across all groups, and `sorted_by`.
         `filters_applied` states what each filter resolved to.
         `period_check` gives the earliest and latest value of each filtered
-        date field inside the result, so the period is verifiable from the
-        answer itself. `period_check.fan_out` names the date key the field
-        reaches the largest table through, when that key holds days outside
-        the period under the filter - a shifted or cumulative calendar -
-        with the number of key values and their ends; the figures then
-        cover more than the period, and `warnings` says so.
+        date field as each measure reads it, through the measure's own
+        sets, so the period is verifiable from the answer itself; a measure
+        the filter did not reach is named. `period_check.fan_out` names the
+        date key the field reaches the largest table through, when that key
+        holds days outside the period under the filter - a shifted or
+        cumulative calendar - with the number of key values and their ends.
+        `fan_out_check` does the same for any filter, value lists included,
+        on a calendar whose dates repeat: the key values it reached belong
+        to other values of its field too. Either way the figures cover more
+        than was named; `warnings` leads with it, per query and at the top
+        of the reply.
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
@@ -624,21 +630,30 @@ def engine_create_hypercube(
                            "label": "Revenue"}],
              "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-        The marker `{filter}` is required with `filters`. Put it in front
-        of the whole expression and it is an outer set, which reaches every
-        aggregation inside, master measures named by label included:
+        Put `{filter}` in front of the whole expression and it is an outer
+        set, which reaches every aggregation inside, master measures named
+        by label included:
 
             {"measures": [{"expression": "{filter} [Revenue] / [Orders]",
                            "label": "AOV"}],
              "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-        An expression that starts with its own outer set keeps it after the
-        filter - `{filter} {<Flag={1}>} Fractile(...)` - and wins on any
-        field both name. Inside one aggregation, `Sum({filter} Amount)`,
-        the marker narrows that aggregation alone. `warnings` says when the
-        expression sets a filtered field itself, counts over a set with an
-        identifier (`{1<...>}`), or holds `$(=...)`: the filter does not
-        reach that part.
+        Inside one aggregation, `Sum({filter} Amount)`, it narrows that
+        aggregation alone, and a measure without it is left unfiltered.
+        With no marker in any measure, every measure takes the filters in
+        front of it, and `warnings` says so.
+        Next to a set of the expression's own - `Sum({filter} {<Flag={1}>}
+        Amount)` or `Sum({filter <Flag={1}>} Amount)` - the filter is
+        merged into that set: Qlik reads one of two sets side by side and
+        drops the other without a word. A field named both in the set and
+        in `filters`, two sets of the expression's own, or a set joined by
+        an operator is refused. `warnings` says when the expression sets a
+        filtered field itself, counts over a set with an identifier
+        (`{1<...>}`), holds `$(=...)`, or picks values with P()/E() over
+        sets the filter does not reach.
+        `period_check` reads the ends of a bounded filter's field through
+        each measure's own sets, so a filter that did not reach the figure
+        shows as `filter_applied: false` with the measure named.
 
         Or write the set analysis yourself:
 
@@ -722,7 +737,8 @@ def engine_create_hypercube(
             times more tokens than `rows` and is rarely needed.
         max_rows: Alias for `limit`. If both are given, `max_rows` wins.
         filters: Filters described rather than written, applied wherever a
-            measure carries the `{filter}` marker. Same shapes as
+            measure carries the `{filter}` marker, or in front of every
+            measure when none does. Same shapes as
             `engine_query`: `{"field": "OrderDate", "from": "2024-01-01",
             "to": "2024-12-31"}` for a period, `{"field": "Discount",
             "from": 400}` for a range of any other field, or
@@ -742,6 +758,16 @@ def engine_create_hypercube(
           - `truncation_warning`: set when `total_rows > returned_rows`.
             For an unsorted query the rows are arbitrary; add `sort_by`.
           - `filters_applied`: what each described filter resolved to.
+          - `period_check`: per bounded filter and measure, the earliest and
+            latest value of the field as the measure read it, and
+            `filter_applied`.
+          - `fan_out_check`: a filter - described, or written by hand in a
+            measure's own set - on a calendar whose dates repeat (more rows
+            than dates: cumulative, as-of or shifted layers) whose key
+            values belong to other values of its field too: the `field`,
+            the fact `table` and `key`, how many `key_values` it reached,
+            `per_value`, and the `repeating_table`. `warnings` then leads
+            with it and names the rows that pick one per date.
           - `timings`: seconds per step.
 
     Does not return:

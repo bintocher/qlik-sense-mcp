@@ -73,15 +73,14 @@ class TestPlacement:
         placed = place_filter("{filter} [Revenue] / [Orders]", PERIOD)
         assert placed == "{&" + PERIOD[1:] + " [Revenue] / [Orders]"
 
-    def test_an_expression_with_its_own_outer_set_keeps_it_second(self):
-        """Applied left to right: the author's set comes after and wins on
-        a field both name - measured, a month followed by its first half
-        answered the half."""
+    def test_an_expression_with_its_own_outer_set_is_merged_into_one(self):
+        """Two sets side by side are one set too many for Qlik: the filter
+        and the author's set become one."""
         placed = place_filter(
             "={filter} {<LT_Flag={1}>} Fractile(Aggr(Sum(d), Id), 0.85)",
             PERIOD)
-        assert placed.startswith("{&<[OrderDate]")
-        assert placed.endswith("} {<LT_Flag={1}>} Fractile(Aggr(Sum(d), Id), 0.85)")
+        assert placed == ('{&<[OrderDate]={">=40544<40909"},LT_Flag={1}>} '
+                          'Fractile(Aggr(Sum(d), Id), 0.85)')
 
     def test_a_marker_inside_an_aggregation_stays_inner(self):
         assert place_filter("Sum({filter} Amount)", PERIOD) == \

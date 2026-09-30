@@ -351,15 +351,30 @@ by field name.
 places a filter in front of a whole expression - a master measure named
 by its label, or an expression whose `{filter}` marker stands first - as
 `{&<...>}`, and reads the expression for what keeps it out: a field the
-measure sets itself, a set with an identifier, `$(=...)`. It talks to
-nothing; `get_app_details` uses the same reading for
-`measures[].filter_limits`.
+measure sets itself, a set with an identifier, `$(=...)`, P()/E() over
+sets of their own. A marker next to a set of the expression's own is merged
+into it, since Qlik reads one of two sets side by side; what cannot be
+merged is refused. It also gives, per aggregation, the sets it reads
+through (`set_contexts`). It talks to nothing; `get_app_details` uses the
+same reading for `measures[].filter_limits`.
 
 The control values of a period (the field's first and last value in the
 result) go out in the batch that creates the cubes. When the filtered
 field reaches the largest table through a date key, the key's count and
 ends under the filter go in the same batch: key values outside the period
 are a shifted or cumulative calendar, reported as `period_check.fan_out`.
+Every probe is written through the sets of the measure it checks, exactly
+as the measure is sent, so whatever Qlik does with those sets the probe
+does too.
+
+[`engine/layers.py`](../qlik_sense_mcp_server/engine/layers.py) finds the
+calendars whose date key towards the facts has fewer values than the
+table has rows, and asks Engine, once per app and over the calendar alone,
+which value of a few-valued field (or pair of fields) keeps one row per
+date that is the date itself. A filter on such a calendar is checked for
+key values that belong to other values of its field
+(`fan_out_check`); `get_app_details` states the condition as
+`plain_layer`.
 
 [`engine/canonical.py`](../qlik_sense_mcp_server/engine/canonical.py)
 writes hand-written expressions in one form - function case, whitespace,

@@ -31,6 +31,7 @@ from .expressions import EngineExpressionsMixin
 from .fields import EngineFieldsMixin
 from .filters import EngineFiltersMixin
 from .hypercube import EngineHypercubeMixin
+from .layers import EngineLayersMixin
 from .queries import EngineQueriesMixin
 from .sheets import EngineSheetsMixin
 
@@ -46,6 +47,7 @@ class QlikEngineAPI(
     EngineFiltersMixin,
     EngineSheetsMixin,
     EngineAppModelMixin,
+    EngineLayersMixin,
 ):
     """Client for Qlik Sense Engine API using WebSocket."""
 
