@@ -113,7 +113,9 @@ def _ok(obj: Any) -> str:
     obj = _without_advice(obj)
     compact = {}
     for key, value in obj.items():
-        if key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
+        if key in _LINE_KEYS and isinstance(value, list) and len(value) > 1:
+            compact[key] = _LinesList(value)
+        elif key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
             compact[key] = _CompactList(value)
         elif key in _BULK_KEYS and isinstance(value, dict) and "rows" in value:
             # A bulk key answered as {columns, rows} — the wide-model form
@@ -133,6 +135,16 @@ def _ok(obj: Any) -> str:
 
 class _CompactList(list):
     """Marker: serialise this list without the indentation."""
+
+
+# Lists read an item at a time: one table with its fields, one measure,
+# one link per line. Indented, a measure spreads over eight lines of mostly
+# spaces; all on one line, a hundred of them are a wall.
+_LINE_KEYS = ("tables", "measures", "dimensions", "links", "islands", "bookmarks")
+
+
+class _LinesList(list):
+    """Marker: one compact item per line."""
 
 
 class _CompactEncoder(json.JSONEncoder):
@@ -155,6 +167,12 @@ class _CompactEncoder(json.JSONEncoder):
         placeholders = {}
 
         def swap(value):
+            if isinstance(value, _LinesList):
+                key = f"__compact_{len(placeholders)}__"
+                placeholders[key] = "[\n    " + ",\n    ".join(
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str)
+                    for item in value) + "\n  ]"
+                return key
             if isinstance(value, _CompactList):
                 key = f"__compact_{len(placeholders)}__"
                 placeholders[key] = json.dumps(

@@ -4,9 +4,9 @@
 "what is in this app" is the one question that spans both APIs.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from . import context
+from . import context, overview
 from .helpers import (
     _check,
     _tool,
@@ -23,28 +23,14 @@ from ..config import (
 
 logger = context.logger
 
-# A field with few enough distinct values to list them outright. Above this
-# the list stops being an aid and starts being a wall of text.
-SAMPLE_VALUES_MAX_CARDINALITY = 25
-# How many fields to sample in one reply. Sampling is one pipelined batch,
-# but the values still cost context.
-SAMPLE_VALUES_MAX_FIELDS = 20
-# For fields too wide to list, show the ends instead: five smallest and
-# five largest values, sorted by Qlik so text sorts as text.
-EDGE_VALUES_COUNT = 5
-EDGE_VALUES_MAX_FIELDS = 12
-
-# Past this many fields the reply switches from a list of objects to a
-# header plus rows. Measured: as objects, 33 fields cost 7.6k characters and
-# the repeated key names are most of it. Below the threshold the readable
-# form is worth its size; a 300-field warehouse model is not.
-WIDE_MODEL_FIELDS = 60
-WIDE_MODEL_COLUMNS = ["name", "table", "is_key", "distinct_values", "rows",
-                      "tags", "comment"]
+# Volume that deserves a warning: a table a query should filter, and a
+# field a query should not group by without a limit.
+BIG_TABLE_ROWS = 100_000_000
+HIGH_CARD_FIELD = 1_000_000
 
 # The finished `get_app_details` payload per app, keyed by the app's last
-# reload. Everything in it — tables, fields, sample values, edges — changes
-# only when the app reloads.
+# reload. Everything in it — tables, fields, values, master items, the
+# usage of published sheets — changes only when the app reloads.
 _DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -57,96 +43,51 @@ def forget_app_details(app_id: str = None) -> None:
 
 
 def _tags_text(tags: Any) -> str:
-    """Qlik's field tags as one plain string.
-
-    Qlik hands them out as `["$numeric", "$integer"]`. The `$` is on every
-    tag and carries no meaning of its own, and the brackets and quotes cost
-    more than the words. `"numeric integer"` says the same thing.
-    """
+    """Qlik's field tags as one plain string: `"numeric integer"` for
+    `["$numeric", "$integer"]` - the `$` carries no meaning of its own."""
     if isinstance(tags, str):
         return tags
     return " ".join(str(tag).lstrip("$") for tag in (tags or []))
 
 
 def _is_temporal(field: Dict[str, Any]) -> bool:
-    """Does this field hold a date or a timestamp?
+    """Does this field hold a date or a timestamp?"""
+    return overview.is_temporal(field.get("tags"))
 
-    Tags reach here as one string (`"numeric timestamp"`), so membership is
-    a word check, not a list lookup — and both spellings, with and without
-    Qlik's leading `$`, are accepted so the answer does not depend on where
-    the field came from.
+
+def _values_and_ranges(app_handle: int, raw_fields: List[Dict[str, Any]]
+                       ) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, List[str]]]]:
+    """Values of every field with few of them, and the ends of every date.
+
+    Both are list objects read in pipelined batches, whatever the number
+    of fields; neither computes anything over the data. Best effort: a
+    reply without them is still a correct reply.
     """
-    tags = field.get("tags") or ""
-    words = tags.split() if isinstance(tags, str) else [str(t) for t in tags]
-    return any(w.lstrip("$") in ("date", "timestamp") for w in words)
-
-
-def _attach_sample_values(app_handle: int, fields: List[Dict[str, Any]]) -> None:
-    """Add `values` to low-cardinality fields, and `sample` to date fields.
-
-    Filtering is written against the values Qlik holds, not against the
-    ones a caller assumes — and the two differ constantly: `Moskva` for
-    Moscow, `01.01.2024` for a date that a model will otherwise filter as
-    a serial number. Both mistakes return zeros rather than an error, so
-    the cheapest fix is to put the real values in front of the caller
-    before any expression is written.
-    """
-    candidates = [
-        f for f in fields
-        if 0 < (f.get("distinct_values") or 0) <= SAMPLE_VALUES_MAX_CARDINALITY
-    ]
-    # Dates are the other guessing trap, and they are never low-cardinality;
-    # a couple of values are enough to show the display format.
-    date_fields = [f for f in fields if f not in candidates and _is_temporal(f)]
-    wanted = (candidates + date_fields)[:SAMPLE_VALUES_MAX_FIELDS]
-    results = {}
-    if wanted:
-        try:
-            results = context.engine_api.get_field_values_batch(
-                app_handle,
-                [(f["name"], SAMPLE_VALUES_MAX_CARDINALITY if f in candidates else 3)
-                 for f in wanted],
-            )
-        except Exception as exc:
-            # An aid, not the answer: if it cannot be produced, the reply is
-            # still correct without it.
-            logger.debug("Could not sample field values: %s", exc)
-            results = {}
-
-    for field in wanted:
-        values = results.get(field["name"])
-        if not values:
+    distinct: Dict[str, int] = {}
+    temporal: Dict[str, bool] = {}
+    for f in raw_fields:
+        name = f.get("field_name")
+        if not name:
             continue
-        if field in candidates:
-            field["values"] = values
-        else:
-            field["sample"] = values[:3]
-
-    # Fields with too many values to list still need to show their shape.
-    # The two ends answer the questions that actually get asked — what does
-    # a value look like, and what range is it in — where a bare count of
-    # distinct values answers neither.
-    wide = [
-        f for f in fields
-        if (f.get("distinct_values") or 0) > SAMPLE_VALUES_MAX_CARDINALITY
-        and not f.get("sample")
-    ][:EDGE_VALUES_MAX_FIELDS]
-    if not wide:
-        return
+        distinct[name] = max(distinct.get(name, 0), int(f.get("distinct_values") or 0))
+        temporal[name] = temporal.get(name, False) or _is_temporal(f)
+    short = [(name, count) for name, count in distinct.items()
+             if 0 < count <= overview.LIST_VALUES_MAX]
+    dates = [name for name, count in distinct.items()
+             if temporal[name] and count > overview.LIST_VALUES_MAX]
+    values: Dict[str, List[str]] = {}
+    ranges: Dict[str, Dict[str, List[str]]] = {}
     try:
-        edges = context.engine_api.get_field_edges_batch(
-            app_handle, [f["name"] for f in wide], count=EDGE_VALUES_COUNT)
+        if short:
+            values = context.engine_api.get_field_values_batch(
+                app_handle, [(name, overview.LIST_VALUES_MAX) for name, _count in short]) or {}
+        if dates:
+            ranges = context.engine_api.get_field_edges_batch(app_handle, dates, count=1) or {}
     except Exception as exc:
-        logger.debug("Could not read field edges: %s", exc)
-        return
-    for field in wide:
-        ends = edges.get(field["name"])
-        if not ends:
-            continue
-        if ends.get("lowest"):
-            field["lowest_values"] = ends["lowest"]
-        if ends.get("highest"):
-            field["highest_values"] = ends["highest"]
+        if isinstance(exc, TimeoutError):
+            raise
+        logger.debug("Could not read field values: %s", exc)
+    return values, ranges
 
 
 @_tool()
@@ -164,12 +105,6 @@ def get_about() -> str:
         list apps or read a data model.
 
     Returns:
-        `library` - the measures and dimensions this app defines, with
-        their expressions and descriptions; a dimension comes as a
-        `definition` line, `name = field`, `name = A > B` for a drill-down
-        or `name = A | B` for a cyclic group. Reach for them before
-        assembling an aggregation by hand: `engine_query` takes
-        {"measures": [{"master": "<name>"}]}.
         `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
         `sharedPersistence`, `requiresBootstrap`.
 
@@ -279,20 +214,38 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
             partial one. At least one of the two is required.
 
     Returns:
-        `metainfo` (app_id, name, description, stream, modified_dttm,
-        reload_dttm).
-        `tables`, each with `name`, `fields_count`, `rows` and the load
-        script's `COMMENT TABLE` text where there is one.
-        `fields`, each with `name`, `table`, `distinct_values`, Qlik's
-        `tags` as one string, `is_key` where true, and `comment` — the
+        `app` - app_id, name, description, stream, reload_dttm.
+        `tables` - every linked table with its `role` (fact, dimension
+        table, calendar - decided from the model's shape, not from names),
+        `rows`, the script's `COMMENT TABLE` text where set, and `fields`:
+        `name`, `distinct` values, `type` (date, timestamp, number, text),
+        `key` for a field that links tables, `hidden`, `comment` (the
         script's `COMMENT FIELD` text, the only description a column
-        carries, worth reading before inferring meaning from a name.
-        Fields with few enough values list them in `values`; wider ones
-        show `lowest_values` and `highest_values`; a date field carries a
-        `sample`, which is the writing to match when naming a period.
-        `warnings` names the tables large enough to need a filter.
-        Past 60 fields the list becomes `columns` plus `rows` to keep the
-        reply small, and values and edges are left out.
+        carries), `values` when there are 25 or fewer, and `min`/`max` on a
+        date field. A key field is listed once, under the table nearest the
+        facts. A calendar carries `calendar`: its rows against its distinct
+        dates - fewer dates than rows means one date stands for several
+        rows (as-of, cumulative or shifted periods), and the fields with
+        few values next to the date say by what.
+        `links` - `Facts -Key-> Table`, from the facts outward; `A -Key- B`
+        closes a loop.
+        `islands` - tables linked to nothing, one line each with their
+        fields and values: selectors used by expressions, not data to join.
+        `dimensions` - master dimensions as `name = field` lines
+        (`A > B (drill-down)`, `A | B (cyclic)`, `=expr (calculated)`).
+        `measures` - master measures: `name`, `description`, `fields` they
+        read, `expression` cut at 150 characters with `expression_truncated`
+        and `id` when cut (`get_app_object` with that id returns it whole),
+        and `variants` - measures named "<name> Y-1", "<name> YoY, %",
+        "<name>, %" folded under their base, by exact name. `engine_query`
+        computes any of them by name: {"measures": [{"master": "<name>"}]}.
+        `bookmarks` - the approved bookmarks shipped with the app, title
+        and description. Bookmarks users saved are not listed.
+        `alternate_states` where the app defines them.
+        `warnings` - volume only: tables that need a filter, fields too
+        wide to group by without a limit.
+        `size_budget` - the estimated size in tokens against its limit,
+        and `trimmed` naming what was shortened to stay under it.
 
     Does not return:
         Data, aggregates, or the load script — `get_app_script` has that.
@@ -383,167 +336,102 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
     except Exception as ex:
         fields_data = {"error": str(ex)}
 
-    # Build tables summary from fields data
-    tables = []
-    fields = []
+    raw_fields: List[Dict[str, Any]] = []
     if isinstance(fields_data, dict) and "fields" in fields_data:
-        raw_fields = fields_data["fields"]
-        # Group fields by table
-        table_map: Dict[str, List[Dict[str, Any]]] = {}
-        for f in raw_fields:
-            if f.get("is_system") or f.get("is_hidden"):
-                continue
-            tname = f.get("table_name", "")
-            table_map.setdefault(tname, []).append(f)
-            # Only what this field does not share with its table. `rows` is
-            # the table's row count repeated on every field; `is_key` is
-            # false for most of them; empty tags say nothing. Each omission
-            # is ~20 characters per field, and a model reads a shorter list
-            # more reliably than a longer one saying the same thing.
-            entry = {
-                "name": f.get("field_name", ""),
-                "table": tname,
-                "distinct_values": f.get("distinct_values", 0),
-            }
-            if f.get("is_key"):
-                entry["is_key"] = True
-            # Qlik's own tags, minus the `$` every one of them carries and
-            # joined into one string: `["$numeric","$integer"]` is 26
-            # characters of JSON punctuation for 14 of meaning, and the same
-            # two words repeat down the whole model.
-            tags = _tags_text(f.get("tags", []))
-            if tags:
-                entry["tags"] = tags
-            # COMMENT FIELD text, when the load script sets one. Emitted only
-            # when non-empty: most apps comment a handful of fields, and an
-            # empty key on every field is pure noise in the LLM context.
-            if f.get("comment"):
-                entry["comment"] = f["comment"]
-            fields.append(entry)
+        raw_fields = [f for f in fields_data["fields"] if not f.get("is_system")]
 
-        # Show what the values actually look like. Without this the caller
-        # has to guess them, and Qlik answers a wrong guess with a number
-        # rather than an error: a filter on 'Moscow' where the data says
-        # 'Moskva' returns a clean table of zeros. Measured against a real
-        # LLM, guessing cost ten tool calls and two minutes on a question
-        # that needs two calls once the values are visible.
-        # Skipped on a wide model: the reply drops values and edges there
-        # anyway, and reading them would be two pipelined batches paid for
-        # nothing.
-        if len(fields) <= WIDE_MODEL_FIELDS:
-            _attach_sample_values(app_handle, fields)
-        for tname, tfields in table_map.items():
-            rows = max((f.get("rows_count", 0) for f in tfields), default=0)
-            entry = {
-                "name": tname,
-                "fields_count": len(tfields),
-                "rows": rows,
-            }
-            comment = next((f.get("table_comment") for f in tfields if f.get("table_comment")), "")
-            if comment:
-                entry["comment"] = comment
-            tables.append(entry)
+    # What the values look like, so filters are written against what Qlik
+    # holds: `Moskva` is not `Moscow`, and Qlik answers the wrong one with
+    # zeros rather than an error. Every field with few values lists them -
+    # on a 97-field app, leaving out 48 of them cost 34 extra calls - and a
+    # date field shows its first and last value, the period actually loaded.
+    values, ranges = _values_and_ranges(app_handle, raw_fields) if raw_fields else ({}, {})
+    model = overview.model_sections(raw_fields, values, ranges)
+    model_fields = {f.get("field_name") for f in raw_fields}
 
-    # Build performance warnings: huge tables / high-cardinality keys are
-    # the main source of hypercube timeouts on this app. Surface them so
-    # the LLM filters with set analysis BEFORE building heavy aggregates.
+    # Volume is the one thing worth a warning: a query over a billion-row
+    # table without a filter, or a group-by on a field with millions of
+    # values, is what runs into the time limit.
     warnings: List[str] = []
-    BIG_TABLE_ROWS = 100_000_000     # 100M
-    HUGE_TABLE_ROWS = 500_000_000    # 500M
-    HIGH_CARD_FIELD = 1_000_000      # 1M distinct
-    big_tables = [t for t in tables if t.get("rows", 0) >= BIG_TABLE_ROWS]
-    huge_tables = [t for t in tables if t.get("rows", 0) >= HUGE_TABLE_ROWS]
-    high_card_fields = [
-        f for f in fields if f.get("distinct_values", 0) >= HIGH_CARD_FIELD
-    ]
-    if huge_tables or big_tables:
-        found = huge_tables or big_tables
-        max_rows_found = max(t.get("rows", 0) for t in found)
+    big_tables = [t for t in model["tables"] if t.get("rows", 0) >= BIG_TABLE_ROWS]
+    if big_tables:
+        largest = max(t["rows"] for t in big_tables)
         warnings.append(
-            f"{len(found)} table(s) hold a lot of rows, the largest about "
-            f"{max_rows_found:,}. Give every query a filter — a period, a "
-            f"category, a key — so it reads part of the table rather than "
-            f"all of it. `filters` in engine_query is the shortest way to "
-            f"say so."
-        )
-    if high_card_fields:
-        max_card = max(f.get("distinct_values", 0) for f in high_card_fields)
+            f"{len(big_tables)} table(s) hold a lot of rows, the largest about "
+            f"{largest:,}. Give every query a filter — a period, a category, a "
+            f"key — so it reads part of the table rather than all of it. "
+            f"`filters` in engine_query is the shortest way to say so.")
+    wide = {f["field_name"]: int(f.get("distinct_values") or 0) for f in raw_fields
+            if int(f.get("distinct_values") or 0) >= HIGH_CARD_FIELD}
+    if wide:
         warnings.append(
-            f"{len(high_card_fields)} field(s) hold many different values, "
-            f"the widest about {max_card:,}. Grouping by one of these "
-            f"produces as many rows; rank with `sort_by` and a small "
-            f"`limit` instead of returning every group."
-        )
-    # No word about date fields. The hint that used to stand here named the
-    # first few fields that looked like dates and offered the first as the
-    # example filter; on an app with a shift calendar that was the shifted
-    # date, and a filter on it tripled the figures. Which date field means
-    # "the period" is the caller's choice, made from the table links and
-    # from how the published sheets use each date - the server does not
-    # pick one.
+            f"{len(wide)} field(s) hold many different values, the widest about "
+            f"{max(wide.values()):,}. Grouping by one of these produces as many "
+            f"rows; rank with `sort_by` and a small `limit` instead of returning "
+            f"every group.")
 
-    # The app's own library of measures and dimensions: what the author of
-    # this dashboard calls revenue, and how it is actually computed. Read
-    # once with the model and cached with it - a caller that assembles the
-    # aggregation itself may pick a neighbouring field and answer with a
-    # number nobody here would recognise.
+    # The app's own vocabulary: what the author calls revenue and how it is
+    # computed. A caller assembling the aggregation itself may pick a
+    # neighbouring field and answer with a number nobody here recognises.
     library = {"measures": [], "dimensions": []}
     try:
         read_library = getattr(context.engine_api, "get_master_items", None)
-        if read_library is not None:
+        if read_library is not None and raw_fields:
             library = read_library(app_handle)
     except Exception as ex:
+        if isinstance(ex, TimeoutError):
+            raise
         logger.debug("Could not read the library of %s: %s", aid, ex)
 
-    # The named sets this app holds. Without them a caller asking for a
-    # bookmark by name has nowhere to read the right spelling.
-    named_sets = {}
+    # Bookmarks the author approved: the named selections that are part of
+    # the app. Users' own bookmarks are left out entirely - on one app 698
+    # of them, half named by a GUID, were a third of the reply.
+    bookmarks: List[str] = []
+    states: List[str] = []
     try:
+        read_bookmarks = getattr(context.engine_api, "approved_bookmarks", None)
+        if read_bookmarks is not None and raw_fields:
+            bookmarks = [b["title"] + (f" - {b['description']}" if b.get("description") else "")
+                         for b in read_bookmarks(app_handle)]
         read_sets = getattr(context.engine_api, "_known_sets", None)
-        if read_sets is not None:
-            known = read_sets(app_handle) or {}
-            named_sets = {key: sorted(known.get(key) or ())
-                          for key in ("bookmarks", "states")
-                          if known.get(key)}
+        if read_sets is not None and raw_fields:
+            states = sorted((read_sets(app_handle) or {}).get("states") or ())
     except Exception as ex:
-        logger.debug("Could not read the named sets of %s: %s", aid, ex)
+        if isinstance(ex, TimeoutError):
+            raise
+        logger.debug("Could not read the bookmarks of %s: %s", aid, ex)
 
-    result = {
-        "metainfo": {
+    result: Dict[str, Any] = {
+        "app": {
             "app_id": aid,
             "name": resolved.get("name", ""),
             "description": resolved.get("description", ""),
             "stream": resolved.get("stream", ""),
-            "modified_dttm": resolved.get("modified_dttm", ""),
             "reload_dttm": resolved.get("reload_dttm", ""),
         },
         "warnings": warnings,
-        **({"library": library}
-           if library.get("measures") or library.get("dimensions") else {}),
-        **({"named_sets": named_sets} if named_sets else {}),
-        "tables": tables,
-        "fields": fields,
-        "tables_count": len(tables),
-        "fields_count": len(fields),
+        "tables": model["tables"],
+        "links": model["links"],
     }
-    if len(fields) > WIDE_MODEL_FIELDS:
-        # A model this wide spends most of the reply repeating the same keys.
-        # Measured: 33 fields cost 7.6k characters as objects, and the key
-        # names are two thirds of that. Past the threshold the same content
-        # goes out as a header plus rows — no information lost, and the
-        # narrow models that make up the normal case keep the readable form.
-        result["fields"] = {
-            "columns": WIDE_MODEL_COLUMNS,
-            "rows": [[field.get(key) for key in WIDE_MODEL_COLUMNS]
-                     for field in fields],
-            "note": ("Wide model, so fields come back as a table: "
-                     "columns gives the order of values in every rows entry."),
-        }
-        result.setdefault("warnings", []).append(
-            f"{len(fields)} fields — listed as columns+rows to keep the reply "
-            f"small. Values and edges are omitted for the same reason; ask "
-            f"about a specific field with get_app_field."
-        )
+    if model["islands"]:
+        result["islands"] = model["islands"]
+    dimensions = overview.dimension_lines(library.get("dimensions") or [])
+    if dimensions:
+        result["dimensions"] = dimensions
+    measures = overview.measure_entries(library.get("measures") or [], model_fields)
+    if measures:
+        result["measures"] = measures
+    if bookmarks:
+        result["bookmarks"] = bookmarks
+    if states:
+        result["alternate_states"] = states
+
+    result = overview.fit_budget(result, [
+        (f"values of short fields cut to the first {overview.TRIMMED_VALUES}",
+         overview.trim_values),
+        (f"measure expressions cut to {overview.TRIMMED_EXPRESSION_CHARS} characters",
+         overview.trim_measures),
+    ])
     if isinstance(fields_data, dict) and "error" in fields_data:
         result["engine_error"] = fields_data["error"]
     else:

@@ -119,7 +119,7 @@ Qlik rejected the expression. The full Engine error is in the `error`
 field. Common causes:
 
 - Field name is misspelled or in the wrong case. Always copy field
-  names from `get_app_details` (`fields[*].name`) — they are
+  names from `get_app_details` (`tables[*].fields[*].name`) — they are
   case-sensitive.
 - Set-analysis values use the wrong quoting. Numbers go without
   quotes, text in single quotes, wildcards in double quotes. See the

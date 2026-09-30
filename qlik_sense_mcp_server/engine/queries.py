@@ -958,7 +958,7 @@ class EngineQueriesMixin:
                             item.get("name", "")
                             for item in known.get("measures") or [])[:20],
                         "hint": ("The library of the app is in "
-                                 "get_app_details under `library`.")}
+                                 "get_app_details under `measures`.")}
                 measure = dict(measure, expression=found["expression"],
                                label=measure.get("label") or found["name"])
                 measure.pop("master", None)

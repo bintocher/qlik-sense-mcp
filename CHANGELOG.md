@@ -57,6 +57,32 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   object's own expressions - typically a branch of `if()` a variable
   switches off - no longer refuses the whole object: the cube runs as the
   object runs and `data.warnings` names the field.
+- `get_app_details` has a new shape, held under 20k tokens (characters /
+  2.5). On a 97-field, 67-measure app with 698 bookmarks the reply was
+  57k characters; a client moved it to a file and the model never read it.
+  Now: `app` (name, description, stream, reload time); `tables`, each with
+  a `role` read from the model's shape - the largest table and any of at
+  least a tenth of its rows are facts, a table reached through a date key
+  is a calendar, the rest are dimension tables - its `rows`, and its
+  `fields` (`distinct`, `type`, `key`, `hidden`, `comment`, `values` for
+  every field with 25 or fewer, `min`/`max` for a date field; a key field
+  once, on the fact side); a calendar says `rows N, distinct dates M` and
+  names the fields with few values next to the date, so a calendar where
+  one date stands for several rows shows as one; `links` as
+  `Facts -Key-> Table` walked from the facts; `islands` one line each;
+  `dimensions` as `name = field`; `measures` with their `fields`, the
+  expression cut at 150 characters with `expression_truncated` and `id`,
+  and `Y-1` / `YoY, %` / `, %` variants folded under their base by exact
+  name; `bookmarks` - approved ones only, title and description, nothing
+  about the rest; `alternate_states`; `warnings` about volume;
+  `size_budget` with the estimate and what was `trimmed` (values to 10,
+  expressions to 80 characters) when over. `metainfo`, `library`,
+  `named_sets`, the flat `fields` list, its `columns`+`rows` form past 60
+  fields, `lowest_values`/`highest_values` and `sample` are gone. Lists
+  read an item at a time (tables, measures, links) go one item per line.
+- `get_app_object` takes the id of a master measure or dimension and
+  returns its whole expression or definition, without data - where the
+  `id` of a cut measure in `get_app_details` leads.
 - Tools are registered without structured output. With the SDK inferring
   it from `-> str`, every reply also went out as `structuredContent:
   {"result": "<json>"}`, and a client preferring that copy showed the model

@@ -23,7 +23,8 @@ def app(request):
 def a_real_field(call, app):
     """Any field with data — the tests below need one that exists."""
     details = call("get_app_details", app_id=app)
-    fields = [f["name"] for f in details.get("fields", []) if f.get("distinct_values")]
+    fields = [f["name"] for t in details.get("tables", []) for f in t["fields"]
+              if f.get("distinct")]
     if not fields:
         pytest.skip("the configured app has no fields with data")
     return fields[0]

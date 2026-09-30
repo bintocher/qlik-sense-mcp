@@ -440,7 +440,7 @@ def engine_query(
         in the batch still answer.
 
     THE APP'S OWN MEASURES
-        `get_app_details` carries `library`: the measures and dimensions
+        `get_app_details` carries `measures` and `dimensions`: the ones
         the author of this app defined, with their expressions and their
         descriptions. When one of them answers the question, name it
         instead of assembling the aggregation yourself:
@@ -1079,6 +1079,26 @@ def _sheet_object_entry(obj: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 
+def _master_item(app_handle: int, item_id: str) -> Optional[Dict[str, Any]]:
+    """A master measure or dimension by id, whole.
+
+    `get_app_details` cuts measure expressions at 150 characters and gives
+    the id of each one it cut; this is where the id leads.
+    """
+    read = getattr(context.engine_api, "_library_items_by_id", None)
+    if read is None:
+        return None
+    found = read(app_handle, [item_id])
+    for kind, entries in (("measure", found.get("measures")),
+                          ("dimension", found.get("dimensions"))):
+        for entry in entries or []:
+            item = {"object_id": item_id, "object_type": f"master {kind}",
+                    "title": entry.get("name", "")}
+            item.update({k: v for k, v in entry.items() if k not in ("id", "name")})
+            return item
+    return None
+
+
 def _variables_of(described: Dict[str, Any]) -> List[str]:
     names = list(described.get("variables") or [])
     for child in described.get("children") or []:
@@ -1170,7 +1190,9 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
 
     Args:
         app_id: application GUID.
-        object_id: from `get_app_sheet_objects`.
+        object_id: from `get_app_sheet_objects`; or the `id` of a master
+            measure or dimension from `get_app_details`, which returns that
+            item's whole expression or definition, without data.
         limit: rows of data to return, 50 by default; the same limits as
             `engine_create_hypercube` apply (at most 5000 rows and 9900
             cells).
@@ -1235,6 +1257,9 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         described = context.engine_api.describe_app_object(app_handle, object_id)
         if described is None:
+            item = _master_item(app_handle, object_id)
+            if item:
+                return _ok(item)
             return _err(
                 f"Object {object_id} cannot be opened",
                 error_category="object_not_available",

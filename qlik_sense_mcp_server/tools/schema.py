@@ -117,7 +117,7 @@ class Measure(BaseModel):
         None, description="Qlik expression; mark where a filter goes with "
                           "{filter}.")
     master: Optional[str] = Field(
-        None, description="Name of a measure this app defines; see `library` "
+        None, description="Name of a measure this app defines; see `measures` "
                           "in get_app_details.")
     label: Optional[str] = None
     filters: Optional[List[Filter]] = None

@@ -35,7 +35,7 @@ class _Repo:
 def _details(monkeypatch, fields):
     monkeypatch.setattr(repository.context, "engine_api", _Engine(fields))
     monkeypatch.setattr(repository.context, "repo_api", _Repo())
-    monkeypatch.setattr(repository, "_attach_sample_values", lambda handle, fields: None)
+    monkeypatch.setattr(repository, "_values_and_ranges", lambda handle, fields: ({}, {}))
     repository._DETAILS_CACHE.clear()
     return json.loads(repository.get_app_details("app-1"))
 

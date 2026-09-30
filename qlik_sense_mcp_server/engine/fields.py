@@ -77,6 +77,7 @@ class EngineFieldsMixin:
                                     "qnPresentDistinctValues", 0
                                 ),
                                 "rows_count": field.get("qnRows", 0),
+                                "table_rows": table.get("qNoOfRows", 0),
                                 "subset_ratio": field.get("qSubsetRatio", 0),
                                 "key_type": field.get("qKeyType", ""),
                                 "tags": field.get("qTags", []),

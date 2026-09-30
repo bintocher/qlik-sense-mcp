@@ -249,7 +249,7 @@ def data_model(call, app_id):
 @pytest.fixture(scope="session")
 def text_field(data_model):
     """A real non-system field of the test app."""
-    for field in data_model.get("fields") or []:
+    for field in (f for t in data_model.get("tables") or [] for f in t.get("fields") or []):
         name = field.get("name", "")
         if name and not name.startswith("$"):
             return field

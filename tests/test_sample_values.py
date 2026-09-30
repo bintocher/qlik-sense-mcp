@@ -67,18 +67,28 @@ class TestAttachToFields:
     @staticmethod
     def _fields():
         return [
-            {"name": "region_name", "distinct_values": 10, "tags": ["$text"]},
-            {"name": "client_id", "distinct_values": 200_000, "tags": ["$text"]},
-            {"name": "order_date", "distinct_values": 730, "tags": ["$date", "$numeric"]},
-            {"name": "empty_field", "distinct_values": 0, "tags": []},
+            {"field_name": f"flag_{i}", "distinct_values": 2, "tags": ["$numeric"]}
+            for i in range(40)
+        ] + [
+            {"field_name": "region_name", "distinct_values": 10, "tags": ["$text"]},
+            {"field_name": "client_id", "distinct_values": 200_000, "tags": ["$text"]},
+            {"field_name": "order_date", "distinct_values": 730, "tags": ["$date", "$numeric"]},
+            {"field_name": "empty_field", "distinct_values": 0, "tags": []},
         ]
 
-    def test_a_small_field_gets_its_values(self, monkeypatch):
-        engine = _Engine({"region_name": ["Moskva", "Kazan"], "order_date": ["01.01.2024"]})
+    def test_every_short_field_gets_its_values(self, monkeypatch):
+        """No cap on how many: 48 short fields left out cost 34 extra calls."""
+        engine = _Engine({"region_name": ["Moskva", "Kazan"]})
         monkeypatch.setattr(repository.context, "engine_api", engine)
-        fields = self._fields()
-        repository._attach_sample_values(1, fields)
-        assert fields[0]["values"] == ["Moskva", "Kazan"]
+        monkeypatch.setattr(engine, "get_field_edges_batch",
+                            lambda handle, names, count=5: {"order_date": {
+                                "lowest": ["01.01.2024"], "highest": ["31.12.2025"]}},
+                            raising=False)
+        values, ranges = repository._values_and_ranges(1, self._fields())
+        assert values["region_name"] == ["Moskva", "Kazan"]
+        asked = [name for name, _height in engine.asked]
+        assert len(asked) == 41 and "client_id" not in asked and "empty_field" not in asked
+        assert ranges == {"order_date": {"lowest": ["01.01.2024"], "highest": ["31.12.2025"]}}
 
 
 

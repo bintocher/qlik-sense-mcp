@@ -256,6 +256,37 @@ class EngineSheetsMixin:
                 entry.setdefault("definition", entry["name"])
         return library
 
+    def approved_bookmarks(self, app_handle: int) -> List[Dict[str, str]]:
+        """The bookmarks the app's author shipped with it, and no others.
+
+        An approved bookmark is part of the published app, like a base
+        sheet; the rest are what users saved for themselves or shared
+        with each other - on one live app 698 of them, half named by a
+        GUID. Only title and description are read.
+        """
+        definition = {
+            "qInfo": {"qId": "approved-bookmarks", "qType": "BookmarkList"},
+            "qBookmarkListDef": {"qType": "bookmark",
+                                 "qData": {"title": "/qMetaDef/title",
+                                           "description": "/qMetaDef/description"}},
+        }
+        with self.session_object(app_handle, definition) as handle:
+            layout = (self.send_request("GetLayout", [], handle=handle) or {}).get("qLayout") or {}
+        found = []
+        for item in (layout.get("qBookmarkList") or {}).get("qItems") or []:
+            meta, data = item.get("qMeta") or {}, item.get("qData") or {}
+            if not meta.get("approved"):
+                continue
+            title = str(data.get("title") or meta.get("title") or "").strip()
+            if not title:
+                continue
+            entry = {"title": title}
+            description = str(data.get("description") or meta.get("description") or "").strip()
+            if description:
+                entry["description"] = description
+            found.append(entry)
+        return found
+
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
         """The objects on a sheet, read from their definitions alone.
 
