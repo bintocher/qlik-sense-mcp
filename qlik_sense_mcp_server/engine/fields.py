@@ -147,8 +147,8 @@ class EngineFieldsMixin:
         else:
             store.pop(app_id, None)
 
-    def _search_model(self, app_handle: int) -> Dict[str, int]:
-        """Field name -> distinct values, from the cached data model.
+    def _model_fields(self, app_handle: int) -> List[Dict[str, Any]]:
+        """The fields of the data model, one entry per field and table.
 
         Reuses whatever `get_app_details` already read for this app rather
         than asking for a stamp this call does not have. Empty when the
@@ -164,10 +164,14 @@ class EngineFieldsMixin:
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 raise
-            logger.debug("Could not read the model for search: %s", exc)
-            return {}
+            logger.debug("Could not read the model: %s", exc)
+            return []
+        return list((model or {}).get("fields") or []) if isinstance(model, dict) else []
+
+    def _search_model(self, app_handle: int) -> Dict[str, int]:
+        """Field name -> distinct values, from the cached data model."""
         sizes: Dict[str, int] = {}
-        for field in (model or {}).get("fields") or []:
+        for field in self._model_fields(app_handle):
             name = field.get("field_name")
             if not name or field.get("is_system"):
                 continue

@@ -230,6 +230,57 @@ def _filter_cost(query: Any, depth: int = 0) -> int:
     return total
 
 
+def fan_out_key(raw_fields: List[Dict[str, Any]], field: str
+                ) -> Optional[Dict[str, Any]]:
+    """The key through which a field reaches the largest table.
+
+    Walked over the model's shared fields from the field's own table to
+    the table with the most rows; the key is the one the walk enters that
+    table by. None when the field sits in that table itself or reaches it
+    by no key. Nothing is chosen for the caller: this only says through
+    what a filter on the field narrows the facts.
+    """
+    tables_of: Dict[str, List[str]] = {}
+    fields_of: Dict[str, List[str]] = {}
+    rows: Dict[str, int] = {}
+    tags: Dict[str, Any] = {}
+    for entry in raw_fields or []:
+        name, table = entry.get("field_name"), entry.get("table_name")
+        if not name or not table or entry.get("is_system"):
+            continue
+        tables_of.setdefault(name, [])
+        if table not in tables_of[name]:
+            tables_of[name].append(table)
+        fields_of.setdefault(table, []).append(name)
+        rows[table] = max(rows.get(table, 0), int(entry.get("table_rows") or 0),
+                          int(entry.get("rows_count") or 0))
+        tags.setdefault(name, entry.get("tags"))
+    start = tables_of.get(field)
+    if not start or not rows:
+        return None
+    facts = max(rows, key=lambda table: rows[table])
+    if facts in start:
+        return None
+    entered: Dict[str, str] = {}
+    visited = set(start)
+    queue = list(start)
+    while queue:
+        table = queue.pop(0)
+        for name in fields_of.get(table, []):
+            for other in tables_of.get(name, []):
+                if other in visited:
+                    continue
+                visited.add(other)
+                entered[other] = name
+                queue.append(other)
+    key = entered.get(facts)
+    if not key:
+        return None
+    words = {str(tag).lstrip("$").lower() for tag in (tags.get(key) or [])}
+    return {"key": key, "table": facts,
+            "temporal": bool(words & {"date", "timestamp"})}
+
+
 def _as_number(value: Any) -> Optional[float]:
     """A stated bound as a number, or None when there is no bound."""
     if value is None or isinstance(value, bool):
@@ -274,6 +325,13 @@ OUTER_AGGREGATIONS = {
     "stdev": "Stdev({inner})",
     "fractile": "Fractile({inner}, {p})",
 }
+
+# The control values of a period, in the order they are asked: the ends of
+# the field inside the result, then - when the field reaches the facts
+# through a date key - how many key values it reached and their ends.
+_PROBE_KEYS = ("earliest", "latest", "earliest_number", "latest_number",
+               "key_values", "key_earliest", "key_latest",
+               "key_earliest_number", "key_latest_number")
 
 # Rows returned per query unless the caller says otherwise. Smaller than
 # the hypercube default: a typed query is normally a ranking or a total,
@@ -1092,7 +1150,8 @@ class EngineQueriesMixin:
             measures.append(written)
         return measures, None
 
-    def _control_probes(self, plan: Dict[str, Any]) -> List[Dict[str, str]]:
+    def _control_probes(self, plan: Dict[str, Any],
+                        app_handle: Optional[int] = None) -> List[Dict[str, Any]]:
         """Expressions that show whether a period filter really applied.
 
         For each period filter: the earliest and latest value of that field
@@ -1117,6 +1176,12 @@ class EngineQueriesMixin:
 
         probes = []
         seen = set()
+        # The model is read only when a period is there to be checked.
+        links: Dict[str, Any] = {}
+        model = None
+        if any("serial_from" in applied for _, applied in stated):
+            reader = getattr(self, "_model_fields", None)
+            model = reader(app_handle) if reader else None
         for modifier_for_probe, applied in stated:
             signature = (modifier_for_probe, applied.get("field"),
                          str(applied.get("from")), str(applied.get("to")))
@@ -1142,7 +1207,7 @@ class EngineQueriesMixin:
                          else _as_number(applied.get("from")))
             high_bound = (applied["serial_to_exclusive"] if is_period
                           else _as_number(applied.get("to")))
-            probes.append({
+            probe = {
                 "field": applied["field"],
                 "expected_from": applied["from"],
                 "expected_to": applied["to"],
@@ -1154,14 +1219,36 @@ class EngineQueriesMixin:
                 "latest": f"=Text(Max({inner}))",
                 "earliest_number": f"=Num(Min({inner}))",
                 "latest_number": f"=Num(Max({inner}))",
-            })
+            }
+            # A period on a calendar reaches the facts through a key. When
+            # that key is a date too, its values under the filter show
+            # whether one day of the calendar stands for days outside the
+            # period - a shifted or cumulative calendar does exactly that,
+            # and the figures grow with no error. Asked in the same batch.
+            link = links.get(applied["field"]) if is_period else None
+            if link is None and is_period and model is not None:
+                link = links[applied["field"]] = fan_out_key(
+                    model, applied["field"])
+            if link and link.get("temporal"):
+                key = escape_qlik_field_name(link["key"])
+                keyed = (f"{modifier_for_probe} {key}"
+                         if modifier_for_probe else key)
+                probe["fan_out"] = dict(link)
+                probe["key_values"] = (
+                    f"=Count({modifier_for_probe} DISTINCT {key})"
+                    if modifier_for_probe else f"=Count(DISTINCT {key})")
+                probe["key_earliest"] = f"=Text(Min({keyed}))"
+                probe["key_latest"] = f"=Text(Max({keyed}))"
+                probe["key_earliest_number"] = f"=Num(Min({keyed}))"
+                probe["key_latest_number"] = f"=Num(Max({keyed}))"
+            probes.append(probe)
         return probes
 
     @staticmethod
-    def _read_controls(probe: Dict[str, str],
+    def _read_controls(probe: Dict[str, Any],
                        values: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Turn four evaluated probes into one statement about the period."""
-        earliest, latest, earliest_num, latest_num = values
+        """Turn the evaluated probes into one statement about the period."""
+        earliest, latest, earliest_num, latest_num = values[:4]
         check: Dict[str, Any] = {
             "field": probe["field"],
             "requested_from": probe["expected_from"],
@@ -1210,7 +1297,48 @@ class EngineQueriesMixin:
                 f"{probe['expected_from']}..{probe['expected_to']}, so the "
                 f"period did not narrow it. Treat the numbers as unfiltered."
             )
+        fan = EngineQueriesMixin._read_fan_out(probe, values[4:])
+        if fan:
+            check["fan_out"] = fan
         return check
+
+    @staticmethod
+    def _read_fan_out(probe: Dict[str, Any],
+                      values: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Whether the period reached the facts through days outside it.
+
+        The field is filtered, the facts are narrowed by the key between
+        them. When that key is a date and holds values outside the period
+        under the filter, one day of the field stands for several days of
+        facts - a shifted or cumulative calendar. The filter did apply and
+        the figures still cover more than the period. Measured: one month
+        of a year-shift calendar reached three months of facts and the
+        figure grew 3.2 times while the period check passed.
+        """
+        link = probe.get("fan_out")
+        if not link or len(values) < 5:
+            return None
+        count, low_text, high_text, low, high = values[:5]
+        low, high = low.get("number"), high.get("number")
+        if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+            return None
+        lower = probe.get("serial_from")
+        upper = probe.get("serial_to_exclusive")
+        if ((lower is None or low >= lower)
+                and (upper is None or high < upper)):
+            return None
+        values_count = count.get("number")
+        fan = {"key": link["key"], "table": link["table"],
+               "values": int(values_count) if isinstance(values_count, (int, float)) else None,
+               "min": low_text.get("text"), "max": high_text.get("text")}
+        fan["note"] = (
+            f"The filter on {probe['field']} for "
+            f"{probe['expected_from']}..{probe['expected_to']} reaches "
+            f"{link['table']} through {fan['values']} values of "
+            f"{link['key']}, from {fan['min']} to {fan['max']}: a value of "
+            f"{probe['field']} links to key values outside the period, so "
+            f"the figures cover more than it.")
+        return fan
 
     def run_queries(self, app_handle: int, app_id: str,
                     queries: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1353,14 +1481,14 @@ class EngineQueriesMixin:
         probe_map: List[tuple] = []
         probe_requests = []
         for plan, _ in prepared:
-            for probe in self._control_probes(plan):
+            for probe in self._control_probes(plan, app_handle):
                 start = len(probe_requests)
-                for key in ("earliest", "latest", "earliest_number",
-                            "latest_number"):
+                keys = [key for key in _PROBE_KEYS if key in probe]
+                for key in keys:
                     probe_requests.append(
                         {"method": "EvaluateEx", "params": [probe[key]],
                          "handle": app_handle})
-                probe_map.append((plan, probe, start))
+                probe_map.append((plan, probe, start, len(keys)))
 
         outcomes = self.send_requests_pipelined(
             creates + probe_requests, raise_on_error=False,
@@ -1368,9 +1496,9 @@ class EngineQueriesMixin:
         create_outcomes = outcomes[:len(creates)]
         probe_outcomes = outcomes[len(creates):]
 
-        for plan, probe, start in probe_map:
+        for plan, probe, start, count in probe_map:
             values = []
-            for outcome in probe_outcomes[start:start + 4]:
+            for outcome in probe_outcomes[start:start + count]:
                 if isinstance(outcome, Exception):
                     # The text matters: it is what tells a check that could
                     # not run from filters that select nothing together.
@@ -1671,6 +1799,8 @@ class EngineQueriesMixin:
                 "these filters."
             )
         for check in plan.get("period_check", []):
+            if check.get("fan_out"):
+                warnings.append(check["fan_out"]["note"])
             if check.get("filter_applied") is False:
                 warnings.append(check["note"])
             elif check.get("filter_applied") is None and check.get("note"):

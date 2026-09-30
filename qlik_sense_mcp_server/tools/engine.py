@@ -437,7 +437,11 @@ def engine_query(
         `filters_applied` states what each filter resolved to.
         `period_check` gives the earliest and latest value of each filtered
         date field inside the result, so the period is verifiable from the
-        answer itself.
+        answer itself. `period_check.fan_out` names the date key the field
+        reaches the largest table through, when that key holds days outside
+        the period under the filter - a shifted or cumulative calendar -
+        with the number of key values and their ends; the figures then
+        cover more than the period, and `warnings` says so.
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 

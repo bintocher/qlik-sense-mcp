@@ -69,6 +69,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark), and
   `$(=...)`, computed before the filter. `get_app_details` gives the same as
   `measures[].filter_limits`.
+- `period_check` sees a period that reached the facts through days outside
+  it. For a period on a date field outside the largest table, the server
+  finds the key the field reaches that table through (walked over the
+  model's shared fields), and when the key is a date it asks, in the same
+  batch as the other control values, how many key values the filter
+  reached and their first and last. Key values outside the period give
+  `period_check.fan_out` (`key`, `table`, `values`, `min`, `max`) and a
+  warning: one value of the field stands for several days of facts, as in
+  a shifted or cumulative calendar. Measured on a 1.16-billion-row app: a
+  filter on the date of a year-shift calendar for August 2026 passed
+  `filter_applied` and summed turnover 3.04 times the month's, over three
+  key values from 01.08.2025 to 01.08.2026; the reply now says so. The
+  server does not pick the right field.
 
 ### Changed
 
