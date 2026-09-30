@@ -171,6 +171,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   earliest and latest value that reached the result. Measured on a
   1.16-billion-row app: GGR and turnover for August 2026 matched the
   reference figures; on its 637-value calendar field both forms took 0.15 s.
+- Past the 200-expression cap of `engine_query`, a batch whose queries
+  differ only in the filter on one field is refused with `one_query`: the
+  first query with that field added to `group_by` and one filter covering
+  all of theirs (the span of their periods, or the union of their values),
+  and the error says it answers all of them in one cube. A model had asked
+  twelve months as twelve queries of twenty measures and hit the cap four
+  times.
 
 ### Fixed
 

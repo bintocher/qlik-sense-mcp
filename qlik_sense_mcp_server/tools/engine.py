@@ -309,7 +309,10 @@ def engine_query(
         Up to 25 queries in one call, and up to 200 grouping fields,
         measures and filter values between them — every one of those is
         checked by Qlik before the batch runs. Plan the whole question in
-        one call rather than discovering it one round-trip at a time.
+        one call rather than discovering it one round-trip at a time. A
+        period per query is one query grouped by the period field: a batch
+        past the cap whose queries differ only in one filter is refused
+        with `one_query`, the query that answers all of them.
 
     WHEN NOT TO USE
         A calculation this vocabulary cannot state — a nested aggregation,

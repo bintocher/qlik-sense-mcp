@@ -18,7 +18,7 @@ import time
 import uuid
 
 from ..utils import bare_field_name, escape_qlik_field_name
-from .filters import _set_identifier, _too_much
+from .filters import _parse_bound, _set_identifier, _too_much
 from .outer_set import (FILTER_MARKER, filter_limits, in_front,
                         limit_warnings, marks_outer, master_reference,
                         place_filter)
@@ -279,6 +279,72 @@ def fan_out_key(raw_fields: List[Dict[str, Any]], field: str
     words = {str(tag).lstrip("$").lower() for tag in (tags.get(key) or [])}
     return {"key": key, "table": facts,
             "temporal": bool(words & {"date", "timestamp"})}
+
+
+_BOUND_KEYS = ("from", "to", "period", "greater_than", "less_than")
+
+
+def one_query_instead(queries: List[Any]) -> Optional[Dict[str, Any]]:
+    """One grouped query for a batch that differs only in one filter.
+
+    A question per month asked as twelve queries repeats every measure
+    twelve times; grouped by the field that differs, it is one cube with a
+    row per value. Returns the field, how many queries it replaces and the
+    query that does, built from the batch itself - or None when the
+    queries differ in more than one filter.
+    """
+    shaped = [q for q in queries if isinstance(q, dict)]
+    if len(shaped) < 2 or len(shaped) != len(queries):
+        return None
+
+    def filters_of(query):
+        stated = query.get("filters")
+        return [f for f in stated if isinstance(f, dict)] if isinstance(
+            stated, list) else []
+
+    def rest(query, field):
+        kept = {k: v for k, v in query.items() if k not in ("id", "filters")}
+        kept["filters"] = [f for f in filters_of(query)
+                           if bare_field_name(str(f.get("field") or "")) != field]
+        return json.dumps(kept, sort_keys=True, ensure_ascii=False, default=str)
+
+    fields = None
+    for query in shaped:
+        named = {bare_field_name(str(f.get("field") or "")) for f in filters_of(query)}
+        fields = named if fields is None else fields & named
+    for field in sorted(fields or ()):
+        if len({rest(q, field) for q in shaped}) != 1:
+            continue
+        stated = [f for q in shaped for f in filters_of(q)
+                  if bare_field_name(str(f.get("field") or "")) == field]
+        combined: Dict[str, Any] = {"field": field}
+        if all(any(f.get(k) is not None for k in _BOUND_KEYS) for f in stated):
+            lows = [_parse_bound(next((f[k] for k in ("from", "greater_than", "period")
+                                       if f.get(k) is not None), None), upper=False)
+                    for f in stated]
+            highs = [_parse_bound(next((f[k] for k in ("to", "less_than", "period")
+                                        if f.get(k) is not None), None), upper=True)
+                     for f in stated]
+            if any(d is None for d in lows + highs):
+                continue
+            combined["from"] = min(lows).isoformat()
+            combined["to"] = max(highs).isoformat()
+        elif all(isinstance(f.get("values"), list) for f in stated):
+            values: List[Any] = []
+            for f in stated:
+                values += [v for v in f["values"] if v not in values]
+            combined["values"] = values
+        else:
+            continue
+        example = {k: v for k, v in shaped[0].items() if k not in ("id", "filters")}
+        grouping = example.get("group_by") or example.get("dimensions") or []
+        grouping = [grouping] if isinstance(grouping, str) else list(grouping)
+        example.pop("dimensions", None)
+        example["group_by"] = grouping + [field]
+        example["filters"] = [f for f in filters_of(shaped[0])
+                              if bare_field_name(str(f.get("field") or "")) != field] + [combined]
+        return {"field": field, "queries": len(shaped), "query": example}
+    return None
 
 
 def _as_number(value: Any) -> Optional[float]:
@@ -1376,7 +1442,7 @@ class EngineQueriesMixin:
             + _filter_cost(q)
             for q in queries if isinstance(q, dict))
         if expressions > MAX_EXPRESSIONS_PER_CALL:
-            return {
+            refusal = {
                 "error": (
                     f"{expressions} grouping fields and measures in one call; "
                     f"the cap is {MAX_EXPRESSIONS_PER_CALL}."
@@ -1385,6 +1451,21 @@ class EngineQueriesMixin:
                 "hint": ("Every one of them is checked by Engine before the "
                          "batch runs. Ask fewer things at a time."),
             }
+            # Measured: a model asked twelve months as twelve queries of
+            # twenty measures and hit the cap four times. When the queries
+            # differ only in one filter, the reply carries the one query
+            # that answers all of them.
+            instead = one_query_instead(queries)
+            if instead:
+                refusal["error"] += (
+                    f" These {instead['queries']} queries differ only in the "
+                    f"filter on {escape_qlik_field_name(instead['field'])}: "
+                    f"one query with that field in `group_by` answers all "
+                    f"of them, a row per value, in one cube - see "
+                    f"`one_query`. Group by a coarser field of the same "
+                    f"calendar (a month) when each query was a month.")
+                refusal["one_query"] = instead["query"]
+            return refusal
         plans: List[Dict[str, Any]] = []
         for position, query in enumerate(queries):
             if not isinstance(query, dict):
