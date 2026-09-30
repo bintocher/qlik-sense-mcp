@@ -1,0 +1,94 @@
+{
+ "description": "A filter pane: the fields are in its listboxes, one of them a master drill-down, one with a title of its own.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "fp1",
+    "qType": "filterpane"
+   },
+   "visualization": "filterpane",
+   "version": "1.0.0",
+   "showTitles": true,
+   "qChildListDef": {
+    "qData": {}
+   }
+  },
+  "qChildren": [
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "lb1",
+      "qType": "listbox"
+     },
+     "visualization": "listbox",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "",
+     "qListObjectDef": {
+      "qDef": {
+       "qFieldDefs": [
+        "Region"
+       ],
+       "qFieldLabels": [
+        ""
+       ]
+      },
+      "qFrequencyMode": "V"
+     }
+    },
+    "qChildren": []
+   },
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "lb2",
+      "qType": "listbox"
+     },
+     "visualization": "listbox",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Time",
+     "qListObjectDef": {
+      "qLibraryId": "dPeriod",
+      "qDef": {
+       "qFieldDefs": []
+      }
+     }
+    },
+    "qChildren": []
+   },
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "lb3",
+      "qType": "listbox"
+     },
+     "visualization": "listbox",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Customer type",
+     "qListObjectDef": {
+      "qDef": {
+       "qFieldDefs": [
+        "=If(IsVIP, 'VIP', 'Other')"
+       ]
+      }
+     }
+    },
+    "qChildren": []
+   }
+  ]
+ },
+ "expect": {
+  "summary": "filterpane: fields Region, [Time]=master dPeriod \"Period\" = Year > Month (drill-down), [Customer type]==If(IsVIP, 'VIP', 'Other')",
+  "checks": {
+   "dimensions.1.master_name": "Period"
+  },
+  "fields_used": [
+   "IsVIP",
+   "Month",
+   "Region",
+   "Year"
+  ]
+ }
+}

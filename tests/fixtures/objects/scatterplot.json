@@ -1,0 +1,135 @@
+{
+ "description": "A scatter plot: the role of each measure is its position.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "sc1",
+    "qType": "scatterplot"
+   },
+   "visualization": "scatterplot",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Price and volume",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Product"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Price",
+       "qDef": "Avg(UnitPrice)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     },
+     {
+      "qLibraryId": "5c1f0c2e-8d0a-4b7e-9a51-3f2d6c7b8e90",
+      "qDef": {
+       "qLabel": "",
+       "qGrouping": "N"
+      },
+      "qCalcCondition": {}
+     },
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "qTrendLines": []
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     2,
+     3
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "scatterplot \"Price and volume\": points Product; x \"Price\" = Avg(UnitPrice), y master 5c1f0c2e-8d0a-4b7e-9a51-3f2d6c7b8e90 \"Orders\" = Count(distinct OrderID), size \"Revenue\" = Sum(Amount)",
+  "checks": {
+   "measures.0.role": "x",
+   "measures.2.role": "size"
+  },
+  "fields_used": [
+   "Amount",
+   "OrderID",
+   "Product",
+   "UnitPrice"
+  ]
+ }
+}

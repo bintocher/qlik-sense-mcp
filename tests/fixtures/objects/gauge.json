@@ -1,0 +1,90 @@
+{
+ "description": "A gauge: the target is the maximum of the axis, written with a commented-out old version.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "g1",
+    "qType": "gauge"
+   },
+   "visualization": "gauge",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Plan",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Actual",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "measureAxis": {
+    "min": 0,
+    "max": {
+     "qValueExpression": {
+      "qExpr": "=//=Sum(OldPlan)\r\n\nSum(PlanAmount)"
+     }
+    }
+   },
+   "useSegments": false,
+   "angle": 0.7
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "gauge \"Plan\": measure \"Actual\" = Sum(Amount); scale 0 .. =Sum(PlanAmount)",
+  "checks": {
+   "options.scale": [
+    "0",
+    "=Sum(PlanAmount)"
+   ]
+  },
+  "fields_used": [
+   "Amount"
+  ]
+ }
+}

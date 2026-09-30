@@ -1,0 +1,130 @@
+{
+ "description": "An extension without a rule: the universal reader finds the cube, a label expression and a condition, and drops colours, URLs and a copy of the measure.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "ux1",
+    "qType": "acme-radial-chart"
+   },
+   "visualization": "acme-radial-chart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": {
+    "qStringExpression": {
+     "qExpr": "'Radial view'"
+    }
+   },
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Segment"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      },
+      "qAttributeDimensions": [
+       {
+        "qDef": "SegmentColour"
+       }
+      ]
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "qAttributeExpressions": [
+        {
+         "qExpression": "'#ff0000'",
+         "id": "colour"
+        }
+       ]
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1
+    ]
+   },
+   "settings": {
+    "centerLabel": {
+     "qStringExpression": {
+      "qExpr": "='Total: ' & Sum(Amount)"
+     }
+    },
+    "ringColorExpression": "=If(Sum(Amount)>0, RGB(0,128,0), RGB(128,0,0))",
+    "linkUrl": "=https://example.com/report",
+    "tooltipExpression": "=Sum(Amount)",
+    "threshold": "=Avg(total Amount)"
+   },
+   "extensionMeta": {
+    "name": "Acme Radial",
+    "icon": "<svg/>"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "acme-radial-chart \"Radial view\": dims Segment; measure \"Revenue\" = Sum(Amount); expressions settings.centerLabel = ='Total: ' & Sum(Amount), settings.threshold = =Avg(total Amount)",
+  "checks": {
+   "expressions.1.path": "settings.threshold"
+  },
+  "fields_used": [
+   "Amount",
+   "Segment"
+  ]
+ }
+}

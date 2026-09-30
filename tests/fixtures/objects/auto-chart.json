@@ -1,0 +1,70 @@
+{
+ "description": "An auto-chart: the type Qlik chose sits in qUndoExclude.generated.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "ac1",
+    "qType": "auto-chart"
+   },
+   "visualization": "auto-chart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qLibraryId": "mRevenue",
+      "qDef": {
+       "qLabel": "",
+       "qGrouping": "N"
+      },
+      "qCalcCondition": {}
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "qUndoExclude": {
+    "generated": {
+     "visualization": "kpi",
+     "qStateName": "$"
+    }
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "auto-chart: shown as kpi; measure master mRevenue \"Revenue\" = Sum(Amount)",
+  "checks": {
+   "options.shown_as": "kpi"
+  },
+  "fields_used": [
+   "Amount"
+  ]
+ }
+}

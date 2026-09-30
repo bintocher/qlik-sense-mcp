@@ -1,0 +1,68 @@
+{
+ "description": "A text object with a measure placed in the text as =[](cId).",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "tx1",
+    "qType": "text-image"
+   },
+   "visualization": "text-image",
+   "version": "1.0.0",
+   "showTitles": true,
+   "markdown": "^[**%[Revenue this month:](4)**](center) =[](cRev) \\(net\\)",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qLibraryId": "mRevenue",
+      "qDef": {
+       "qLabel": "",
+       "qGrouping": "N",
+       "cId": "cRev"
+      },
+      "qCalcCondition": {}
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "background": {
+    "size": "auto"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "text-image: \"Revenue this month: {Revenue} (net)\"; measure master mRevenue \"Revenue\" = Sum(Amount)",
+  "checks": {
+   "text": "Revenue this month: {Revenue} (net)"
+  },
+  "fields_used": [
+   "Amount"
+  ]
+ }
+}

@@ -1,0 +1,131 @@
+{
+ "description": "A waterfall: the sign lives in valueType, not in the expression.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "wf1",
+    "qType": "waterfallchart"
+   },
+   "visualization": "waterfallchart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Profit bridge",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Sales",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "valueType": "NORMAL"
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     },
+     {
+      "qDef": {
+       "qLabel": "Cost",
+       "qDef": "Sum(Cost)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "valueType": "INVERSE"
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     },
+     {
+      "qDef": {
+       "qLabel": "Tax",
+       "qDef": "Sum(Tax)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "valueType": "INVERSE",
+       "subtotal": {
+        "enable": true,
+        "label": "Profit"
+       }
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     2
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "waterfallchart \"Profit bridge\": + \"Sales\" = Sum(Amount), - \"Cost\" = Sum(Cost), - \"Tax\" = Sum(Tax), then subtotal \"Profit\"",
+  "checks": {
+   "measures.1.role": "-",
+   "measures.2.subtotal": "Profit"
+  },
+  "fields_used": [
+   "Amount",
+   "Cost",
+   "Tax"
+  ]
+ }
+}

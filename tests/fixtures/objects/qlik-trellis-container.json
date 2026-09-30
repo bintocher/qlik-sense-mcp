@@ -1,0 +1,83 @@
+{
+ "description": "A trellis repeats a master visualization by a dimension.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "tr1",
+    "qType": "qlik-trellis-container"
+   },
+   "visualization": "qlik-trellis-container",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "By category",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Category"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "prop": {
+    "vizId": "vShare",
+    "maxCharts": "6",
+    "columns": "3"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "qlik-trellis-container \"By category\": repeats master vShare \"Share by channel\" by Category up to 6 charts; chart: piechart \"Share by channel\": dims Channel; measure master mRevenue \"Revenue\" = Sum(Amount)",
+  "checks": {
+   "children.0.object_type": "piechart"
+  },
+  "fields_used": [
+   "Amount",
+   "Category",
+   "Channel"
+  ]
+ }
+}

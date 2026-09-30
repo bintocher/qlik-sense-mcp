@@ -1,0 +1,156 @@
+{
+ "description": "A straight table: a field, a labelled field, a calculated dimension, a conditional column, sorted by the measure.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "tbl1",
+    "qType": "table"
+   },
+   "visualization": "table",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Customers",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "CustomerName"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     },
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Country"
+       ],
+       "qFieldLabels": [
+        "Market"
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     },
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "=If(Amount>1000,'Large','Small')"
+       ],
+       "qFieldLabels": [
+        "Size"
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {
+        "qv": "$(vShowSize)=1"
+       },
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     3,
+     0,
+     1,
+     2
+    ]
+   },
+   "columnWidths": [
+    -1,
+    -1,
+    -1,
+    -1
+   ],
+   "totals": {
+    "show": true,
+    "position": "noTotals"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "table \"Customers\": dims CustomerName, [Market]=Country, [Size]==If(Amount>1000,'Large','Small') [if $(vShowSize)=1]; measure \"Revenue\" = Sum(Amount); sorted by Revenue desc; variables vShowSize",
+  "checks": {
+   "dimensions.2.condition": "$(vShowSize)=1",
+   "dimensions.1.label": "Market"
+  },
+  "fields_used": [
+   "Amount",
+   "Country",
+   "CustomerName"
+  ]
+ }
+}

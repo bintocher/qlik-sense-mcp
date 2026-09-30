@@ -1,0 +1,78 @@
+{
+ "description": "An sn-text object: the text is a JSON document inside a string; text and measures are given separately.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "st1",
+    "qType": "sn-text"
+   },
+   "visualization": "sn-text",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "text": "{\"root\": {\"children\": [{\"type\": \"paragraph\", \"children\": [{\"type\": \"text\", \"text\": \"Revenue\", \"format\": 1}, {\"type\": \"text\", \"text\": \" - net of returns.\"}]}, {\"type\": \"paragraph\", \"children\": []}, {\"type\": \"paragraph\", \"children\": [{\"type\": \"text\", \"text\": \"Updated daily.\"}]}]}}",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "sn-text: \"Revenue - net of returns. / Updated daily.\"; measure \"Revenue\" = Sum(Amount)",
+  "checks": {
+   "text": "Revenue - net of returns.\nUpdated daily."
+  },
+  "fields_used": [
+   "Amount"
+  ]
+ }
+}

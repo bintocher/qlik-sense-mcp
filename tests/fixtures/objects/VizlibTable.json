@@ -1,0 +1,125 @@
+{
+ "description": "A Vizlib table: a column shown on a condition, a commented-out old formula, a hundred styling keys per column.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "vt1",
+    "qType": "VizlibTable"
+   },
+   "visualization": "VizlibTable",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Product"
+       ],
+       "qFieldLabels": [
+        "Item"
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "//Sum(OldAmount)\nSum(Amount)",
+       "qShowHide": "",
+       "titleColorPicker": {
+        "color": "#333"
+       },
+       "columnWidth": 120,
+       "iconSize": 12,
+       "sparklineMode": false,
+       "progressBarColor": "#00f",
+       "showMeasure": false,
+       "showDimension": false
+      }
+     },
+     {
+      "qDef": {
+       "qLabel": "Margin",
+       "qDef": "Sum(Amount)-Sum(Cost)",
+       "qShowHide": "=$(vShowMargin)",
+       "titleColorPicker": {
+        "color": "#333"
+       },
+       "columnWidth": 120,
+       "iconSize": 12,
+       "sparklineMode": false,
+       "progressBarColor": "#00f",
+       "showMeasure": false,
+       "showDimension": false
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     2
+    ],
+    "columnOrder": [
+     0,
+     2,
+     1
+    ]
+   },
+   "extensionMeta": {
+    "name": "Vizlib Table v9.9.9"
+   },
+   "props": {
+    "header": {}
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "VizlibTable: dims [Item]=Product; measures \"Revenue\" = Sum(Amount), \"Margin\" = Sum(Amount)-Sum(Cost) [if =$(vShowMargin)]; variables vShowMargin",
+  "checks": {
+   "measures.0.expression": "Sum(Amount)",
+   "measures.1.condition": "=$(vShowMargin)"
+  },
+  "fields_used": [
+   "Amount",
+   "Cost",
+   "Product"
+  ]
+ }
+}

@@ -1,0 +1,102 @@
+{
+ "description": "A bullet chart: the target is a property of the measure.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "bu1",
+    "qType": "bulletchart"
+   },
+   "visualization": "bulletchart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Against target",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Team"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Sales",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "target": "Sum(TargetAmount)"
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "bulletchart \"Against target\": dims Team; measure \"Sales\" = Sum(Amount), target = Sum(TargetAmount)",
+  "checks": {
+   "measures.0.target": "Sum(TargetAmount)"
+  },
+  "fields_used": [
+   "Amount",
+   "TargetAmount",
+   "Team"
+  ]
+ }
+}

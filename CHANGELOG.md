@@ -8,6 +8,29 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [2.4.0] - unreleased
 
+### Added
+
+- Sheet objects are read by a rule per type, from their properties alone
+  (`engine/objects.py`): the native charts, containers, master
+  visualizations and controls, the Vizlib extensions, the Dashboard bundle,
+  GeoAnalytics and other common extensions, and a universal reader for an
+  extension without a rule, which walks the properties for cubes, list
+  objects and expressions and drops colours, styles, URLs and constants.
+  Stored cubes, ODAG records, colour maps and other objects that never
+  stand on a sheet are skipped. Every object comes back in one shape - type,
+  title, dimensions (field, `=expression` or master item with its
+  definition), measures (expression or master item, label or label
+  expression, format), roles the expression does not show (bar or line and
+  axis, x/y/size, target, the sign of a waterfall step, rows and columns of
+  a pivot), show and calculation conditions, alternative measures, top N,
+  alternate state, `$(variables)`, controls (fields a filter selects,
+  values a variable input offers, what a button selects or sets) and
+  children - plus a one-line `summary` for a model. Expressions shown lose
+  their `//` and `/* */` comments and are cut at 300 characters; defaults
+  an extension ships ("Button 1", "Click Here", `http://`) are dropped.
+  Measures placed in a text object as `=[](cId)` are shown by their label,
+  and the text of an sn-text object is decoded from the JSON stored in it.
+
 ### Fixed
 
 - JWT mode: the re-login after the 25-minute session TTL no longer fails with

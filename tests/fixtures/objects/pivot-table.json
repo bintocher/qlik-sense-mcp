@@ -1,0 +1,154 @@
+{
+ "description": "A pivot table: two dimensions in rows, one in columns, one row dimension shown on a condition.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "pv1",
+    "qType": "pivot-table"
+   },
+   "visualization": "pivot-table",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Revenue matrix",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "P",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": 2,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Region"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     },
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Product"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {
+        "qv": "=$(vDetail)"
+       }
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     },
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Year"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     -1,
+     2
+    ]
+   },
+   "qLayoutExclude": {
+    "quarantine": {
+     "columnWidths": [
+      1,
+      2
+     ]
+    }
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "pivot-table \"Revenue matrix\": rows Region, Product [if =$(vDetail)]; columns Year; measure \"Revenue\" = Sum(Amount); variables vDetail",
+  "checks": {
+   "dimensions.1.role": "rows",
+   "dimensions.2.role": "columns"
+  },
+  "fields_used": [
+   "Amount",
+   "Product",
+   "Region",
+   "Year"
+  ]
+ }
+}
