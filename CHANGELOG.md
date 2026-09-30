@@ -43,6 +43,17 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   raises `WebSocketTimeoutException`, which is not a `TimeoutError`, so
   every timeout took the generic "recv() failed" path, and a greeting that
   did not arrive in time failed the connect instead of being skipped.
+- `search_app` checks named `fields` against the data model and refuses an
+  unknown one as `field_not_found` with `unknown_fields`. Engine answers
+  such a name with a bare "Invalid parameters" on `Options.SearchFields`,
+  which is the error seen in practice (a guessed field name, not the empty
+  list or `max_fields`). Without `fields` it searches only fields of up to
+  100000 distinct values and lists the rest in `fields_not_searched`: on a
+  1.16-billion-row app a search that ran past a minute now takes seconds.
+  `qSearchFields` is sent only when it names something, `max_fields` and
+  `max_values` must be positive, and `search_notes` says that the search
+  sees the current selections and that the first one on an app is slow
+  unless the script sets `CreateSearchIndexOnReload`.
 
 ## [2.3.1] - 2026-09-25
 

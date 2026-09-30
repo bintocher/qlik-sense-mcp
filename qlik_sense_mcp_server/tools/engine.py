@@ -1231,15 +1231,21 @@ def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
         app_id: application GUID.
         term: what to look for. Qlik matches it as a prefix, case
             insensitively, so "Mos" finds "Moskva".
-        fields: field names to search. Omit to search the whole app.
+        fields: field names to search. Omit to search every field with up
+            to 100000 distinct values; the larger ones are skipped and
+            listed in `fields_not_searched`. A name the app does not have
+            is refused as `field_not_found`.
         max_fields: matching fields to report. Default 8.
         max_values: matching values per field. Default 5.
 
     Returns:
         `matches`, each naming a field and the values it holds that match,
-        spelled as Qlik stores them; plus `fields_matched`. An empty
-        `matches` means the app does not hold this value — an answer, not
-        a failure, and it comes with a hint on what to try next.
+        spelled as Qlik stores them; plus `fields_matched`,
+        `fields_not_searched` when fields were skipped, and `search_notes`
+        (the search sees only the current selections, and the first
+        search on an app is slow while Engine builds its index). An empty
+        `matches` means the searched fields do not hold this value — an
+        answer, not a failure, and it comes with a hint on what to try next.
 
     Does not return:
         How often a value occurs, or which rows contain it.
@@ -1252,6 +1258,8 @@ def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
         result = context.engine_api.search_app(
             app_handle, term, fields=fields,
             max_fields=max_fields, max_values=max_values)
+        if result.get("error"):
+            return _err(result.pop("error"), **result)
         if not result.get("matches"):
             result["hint"] = (
                 f"Nothing in this app matches {term!r}. Check the spelling "
