@@ -130,6 +130,7 @@ def repeating_calendars(raw_fields: List[Dict[str, Any]]
              and 1 < info.get(other, {}).get("distinct", 0) <= LAYER_FIELD_MAX),
             key=lambda other: info[other]["distinct"])
         found.append(dict(repeat, dates_beside=dates,
+                          days=max([info[d]["distinct"] for d in dates] or [0]),
                           candidates=candidates[:LAYER_CANDIDATES_MAX],
                           distinct={c: info[c]["distinct"] for c in candidates}))
     return found
@@ -210,10 +211,18 @@ class EngineLayersMixin:
                 "label": f"same{position}"})
         reply = self.create_hypercube(
             app_handle, [{"field": field} for field in fields], measures,
-            max_rows=LAYER_FIELD_MAX * LAYER_FIELD_MAX)
+            max_rows=LAYER_FIELD_MAX * LAYER_FIELD_MAX, include_raw_layout=True)
         if reply.get("error"):
             raise RuntimeError(reply["error"])
-        return reply.get("rows") or []
+        rows = reply.get("rows") or []
+        # A value as Qlik shows it: a dual field (a fiscal year `24-25`
+        # over the number 2025) is selected by its text.
+        pages = (reply.get("hypercube_data") or {}).get("qDataPages") or []
+        shown = [cells for page in pages for cells in page.get("qMatrix") or []]
+        if len(shown) == len(rows):
+            rows = [[cell.get("qText") for cell in cells[:len(fields)]]
+                    + row[len(fields):] for cells, row in zip(shown, rows)]
+        return rows
 
     def _plain_values(self, app_handle: int,
                       calendar: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -229,7 +238,10 @@ class EngineLayersMixin:
             if rows <= 0 or rows != keys:
                 return False
             if dates:
-                return any(same == rows for same in counts[2:])
+                # Every date once: a layer filled for some dates only - a
+                # field set on the plain rows of one year - is not it.
+                return (keys >= calendar.get("days", 0)
+                        and any(same == rows for same in counts[2:]))
             return keys == calendar["dates"]
 
         def text(value):

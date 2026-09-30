@@ -135,8 +135,10 @@ class _LayerEngine(EngineLayersMixin):
     """Rows per value of the candidate fields of the calendar."""
 
     ROWS = {
+        # "Part" holds the plain rows of 12 of the 21 dates only, as a
+        # fiscal-year field set on one year's plain rows did live.
         ("Layer",): [["Month", 21, 21, 21], ["YTD", 120, 21, 21],
-                     ["Shift", 21, 21, 0]],
+                     ["Shift", 21, 21, 0], ["Part", 12, 12, 12]],
         ("Month",): [["2026-08", 8, 8, 1]],
     }
 
@@ -168,6 +170,19 @@ class TestThePlainLayer:
         [layer] = _Pairs().plain_layers(1, model)
         assert layer["plain"][0]["fields"] == ["Year shift", "Month shift"]
         assert layer["plain"][0]["values"] == ["0", "0"]
+
+    def test_a_dual_value_is_named_by_its_text(self):
+        """Live, a fiscal year shown as `24-25` came back as the number 2025,
+        and a condition on '2025' would select nothing."""
+        class _Dual(_LayerEngine):
+            def create_hypercube(self, app_handle, dimensions, measures,
+                                 max_rows=None, **kw):
+                if dimensions[0]["field"] != "Layer":
+                    return {"rows": []}
+                return {"rows": [[2025, 21, 21, 21]], "hypercube_data": {
+                    "qDataPages": [{"qMatrix": [[{"qText": "24-25", "qNum": 2025}]]}]}}
+        [layer] = _Dual().plain_layers(1, MODEL)
+        assert layer["plain"][0]["values"] == ["24-25"]
 
     def test_the_sentence_names_the_condition(self):
         text = layer_text(PLAIN[0])

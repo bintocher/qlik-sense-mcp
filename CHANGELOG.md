@@ -65,7 +65,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   that set: Qlik reads one of two sets side by side in an aggregation and
   drops the other without a word. Measured on a 1.16-billion-row app, the
   filter for 2025 written that way summed two years, 719.3 billion against
-  418.6, while `filters_applied` reported 365 days. A field named both in
+  418.6, while `filters_applied` reported 365 days; merged, it answers
+  418 613 839 776, the reference, and the same filter over a master GGR
+  for August 2026 answers 2 905 309 486. A field named both in
   that set and in `filters`, two sets of the expression's own, a set joined
   by an operator or two different identifiers are refused with the reason.
   Measured on the same app: the outer set over a master measure, over its
@@ -83,7 +85,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   sets, exactly as the measure is sent - `={outer} Text(Min({inner}
   [Field]))` per aggregation - instead of through the filter alone, so a
   filter that did not reach a hand-written or library measure shows as
-  `filter_applied: false` with the `measure` named. `engine_create_hypercube`
+  `filter_applied: false` with the `measure` named: measured, under two
+  sets side by side the date field's latest value read 29.09.2026 for a
+  2025 filter, where the filter alone read 31.12.2025. `engine_create_hypercube`
   carries `period_check` too, and both tools put such a result first in
   `warnings`; `engine_query` repeats it at the top of the reply.
 - A filter on a calendar whose dates repeat is checked for what it
@@ -98,17 +102,24 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   leads `warnings`, per query and at the top of the reply, with the
   condition for one row per date where one was found. Measured on a
   1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a
-  cumulative calendar gave a month's GGR of 60.9 billion against 2.9 with
-  no warning; the fan-out check ran for periods only.
+  cumulative calendar gave a month's GGR of 38.3 billion against
+  2 905 309 486 with no warning, the fan-out check running for periods
+  only; now the reply leads with 12 key values reached that belong to 13
+  months, and with the plain layer added the figure is 2 905 309 486 and
+  the reply is quiet. A set written by hand on the same calendar
+  (9.28 billion, three key values) is named the same way.
 - `get_app_details` names the rows of a repeating calendar that keep one
   row per date. For each such calendar the server asks Engine, once per
   app and over the calendar alone, which value of a field with few values
-  - or of a pair of them - holds every date once with the date itself; the
+  - or of a pair of them - holds every date once with the date itself,
+  read by its displayed text (a dual fiscal year `24-25` is not `2025`); the
   calendar gets `plain_layer` (`{<[Aggregation]={'Date'}>}`, and
   `{<[PrevYear]={'0'},[PrevMonth]={'0'}>}` for a shift calendar), the field
   `picks_plain_layer`, listed with its values even when hidden, and
   `warnings` opens with one line per calendar. Nothing is named by its
-  name; a model had filtered such a calendar nine times out of nineteen
+  name. Measured on a 1.16-billion-row app: the cumulative calendar's plain
+  rows and the shift calendar's pair were found in about 4 seconds of a
+  20-second first call, and the reply stayed at 17.3k tokens; a model had filtered such a calendar nine times out of nineteen
   without the hidden field that picks the plain rows.
 - `period_check` sees a period that reached the facts through days outside
   it. For a period on a date field outside the largest table, the server
