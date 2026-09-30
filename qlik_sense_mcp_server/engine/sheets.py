@@ -1,24 +1,19 @@
-"""Sheets and the objects on them, plus the fields those objects use."""
+"""Sheets and the objects on them, plus the fields those objects use.
 
-from typing import Dict, List, Any, Optional
+How each type of object is read lives in `objects.py`; this module fetches
+what the parser needs from Engine - definitions, never layouts - and
+computes an object's data on request.
+"""
+
+from typing import Dict, List, Any, Optional, Tuple
 import logging
 
 from ..exceptions import QlikEngineError
+from .objects import (CONTAINER_TYPES, MAX_CONTAINER_DEPTH, Library, ObjectParser,
+                      fields_in_expression, fields_used, library_ids, master_references,
+                      tree_references)
 
 logger = logging.getLogger(__name__)
-
-# Words that appear where a field name could, but never name a field:
-# operators, set-analysis syntax, constants, and the aggregation modifiers
-# that are written without parentheses.
-_EXPRESSION_KEYWORDS = frozenset("""
-    and or not xor like precedes follows
-    if then else elseif end
-    total distinct all aggr
-    null true false
-    as in when
-    intervalmatch resident inline autogenerate
-    e pi
-""".split())
 
 # A calculated dimension can run to pages; the line that names it only has
 # to say what it is.
@@ -63,98 +58,52 @@ def describe_master_dimension(name: str, field_defs: Any, field_labels: Any,
     return result
 
 
-def _plain_text(value: Any) -> str:
-    """A title as stored: literal text, or the expression that computes it.
+def _first_def(values: Any) -> str:
+    defs = [str(v).strip() for v in values or [] if str(v or "").strip()]
+    return defs[0] if defs else ""
 
-    The expression is not evaluated - that would be a calculation - so a
-    computed title comes back as `=...`, which still says what it shows.
+
+def _cell_order(sheet: Dict[str, Any], children: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The sheet's own objects, in reading order.
+
+    `cells` names what stands on the sheet; the tree also holds the
+    children of containers and objects left over from earlier edits. A
+    sheet without cells (as some extensions build them) keeps every child.
     """
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, dict):
-        expr = (value.get("qStringExpression") or {}).get("qExpr")
-        if isinstance(expr, str) and expr.strip():
-            text = expr.strip()
-            return text if text.startswith("=") else f"={text}"
-    return ""
+    cells = [c for c in sheet.get("cells") or [] if isinstance(c, dict) and c.get("name")]
+    if not cells:
+        return children
+    by_id = {(c.get("qProperty") or {}).get("qInfo", {}).get("qId"): c for c in children}
+    cells.sort(key=lambda c: (c.get("row") or 0, c.get("col") or 0))
+    return [by_id[c["name"]] for c in cells if c["name"] in by_id]
 
 
-def _list_object_dimension(prop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The one field a listbox (or date picker, or filter) is built on."""
-    list_def = prop.get("qListObjectDef")
-    if not isinstance(list_def, dict):
-        return None
-    inner = list_def.get("qDef") or {}
-    fields = [f for f in (inner.get("qFieldDefs") or []) if f]
-    library_id = list_def.get("qLibraryId") or inner.get("qLibraryId")
-    if not fields and not library_id:
-        return None
-    labels = inner.get("qFieldLabels") or []
-    return {"fields": fields, "label": (labels[0] or "") if labels else "",
-            "library_id": library_id or None}
+def _walk_nodes(nodes: List[Dict[str, Any]], depth: int = 0):
+    for node in nodes:
+        yield node
+        if depth < MAX_CONTAINER_DEPTH:
+            yield from _walk_nodes([c for c in node.get("qChildren") or []
+                                    if isinstance(c, dict)], depth + 1)
 
 
-def _calculation_context(prop: Dict[str, Any]) -> Dict[str, Any]:
-    """What makes an object's numbers differ from the main selection.
+# Keys of a computed result that belong in an object's `data`.
+_DATA_KEYS = ("columns", "rows", "total_rows", "returned_rows", "grand_total", "sorted_by",
+              "sort_order", "has_more", "next_offset", "truncation_warning", "warnings")
 
-    An alternate state, a condition that hides the calculation, a set
-    expression applied to the whole cube: each changes what a figure means,
-    and none of them is visible in the measure expressions.
-    """
-    found: Dict[str, Any] = {}
-    state = prop.get("qStateName")
-    if isinstance(state, str) and state not in ("", "$"):
-        found["state"] = state
-    cube = prop.get("qHyperCubeDef") or {}
-    if isinstance(cube, dict):
-        # qCalcCondition is the current form, qCalcCond the older one.
-        condition, text = cube.get("qCalcCondition"), None
-        if isinstance(condition, dict):
-            text = (condition.get("qCond") or {}).get("qv")
-        if not text and isinstance(cube.get("qCalcCond"), dict):
-            text = cube["qCalcCond"].get("qv")
-        if isinstance(text, str) and text.strip() not in ("", "1", "=1"):
-            found["calc_condition"] = text.strip()
-        context_set = cube.get("qContextSetExpression")
-        if isinstance(context_set, str) and context_set.strip():
-            found["context_set"] = context_set.strip()
-    return found
+# Why an object that computes nothing has no data, and where to look instead.
+_NO_DATA_NOTE = {
+    "filterpane": "A filter pane computes no data; read the values of its fields with get_app_field.",
+    "listbox": "A listbox computes no data; read the values of its field with get_app_field.",
+    "qlik-date-picker": "A date picker computes no data; read its field with get_app_field.",
+    "VizlibFilter": "A filter computes no data; read the values of its field with get_app_field.",
+    "VizlibCalendar": "A calendar computes no data; read its field with get_app_field.",
+    "container": "A container computes no data; read its children by their object_id.",
+    "sn-tabbed-container": "A container computes no data; read its children by their object_id.",
+    "sn-layout-container": "A container computes no data; read its children by their object_id.",
+    "VizlibContainer": "A container computes no data; read its master visualizations by id.",
+    "qlik-trellis-container": "A trellis repeats a master visualization; read that one by id.",
+}
 
-
-def _all_expressions(objects: Dict[int, Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    """Every object and nested child, indexed, for one library resolution."""
-    flat: Dict[int, Dict[str, Any]] = {}
-
-    def walk(obj: Dict[str, Any]) -> None:
-        flat[len(flat)] = obj
-        for child in obj.get("children") or []:
-            walk(child)
-
-    for obj in objects.values():
-        walk(obj)
-    return flat
-
-
-def _fill_fields_used(reader: Any, obj: Dict[str, Any]) -> List[str]:
-    """Set `fields_used` on an object and its children; a container's
-    fields include those of everything inside it."""
-    fields = set()
-    for measure in obj.get("measures") or []:
-        fields.update(reader._extract_fields_from_expression(measure.get("expression", "")))
-    for dimension in obj.get("dimensions") or []:
-        for field_def in dimension.get("fields") or []:
-            text = str(field_def or "").strip()
-            if text.startswith("="):
-                fields.update(reader._extract_fields_from_expression(text))
-            elif text:
-                # Without "=" a qFieldDefs entry is a field name, spaces and
-                # all; read as an expression, `Sport (detail)` became the
-                # fields "Sport" and "detail".
-                fields.add(text[1:-1] if text.startswith("[") and text.endswith("]") else text)
-    for child in obj.get("children") or []:
-        fields.update(_fill_fields_used(reader, child))
-    obj["fields_used"] = sorted(fields)
-    return obj["fields_used"]
 
 
 class EngineSheetsMixin:
@@ -302,9 +251,12 @@ class EngineSheetsMixin:
         set expression exist only in the properties, never in the layout.
 
         `GetFullPropertyTree` on the sheet returns every object on it and
-        the children of every container in one request. Objects linked to a
-        master visualization hold only `qExtendsId`; their definitions come
-        from the master's properties, read in one more batch.
+        the children of every container in one request. The walk starts
+        from the sheet's `cells`: a container's children are in the tree
+        but not in the cells, and they are reported inside their container
+        rather than as objects of the sheet. Master visualizations and
+        master items the objects point at are read in batches, once per
+        app.
         """
         # A failure to reach the sheet itself is reported; a failure on one
         # of its objects is not, because the other objects are still worth
@@ -321,256 +273,445 @@ class EngineSheetsMixin:
         if not children:
             logger.info("Sheet %s has no child objects", sheet_id)
             return []
+        top = _cell_order(tree.get("qProperty") or {}, children)
 
-        masters = self._master_visualizations(app_handle, children)
-        objects = []
-        for node in children:
+        parser = self._object_parser(app_handle, top)
+        objects, seen = [], set()
+        for node in top:
             try:
-                described = self._describe_object(node, masters, depth=0, seen=set())
+                described = parser.describe_node(node, 0, seen)
             except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    raise
                 logger.warning("Could not describe an object on sheet %s: %s", sheet_id, exc)
                 continue
             if described:
+                described["fields_used"] = fields_used(described)
                 objects.append(described)
-
-        by_index = {i: obj for i, obj in enumerate(objects)}
-        self._resolve_library_items(app_handle, _all_expressions(by_index))
-        for obj in objects:
-            _fill_fields_used(self, obj)
         return objects
 
-    # Container children are read to this depth. Deeper nesting exists in
-    # theory; in practice a sheet does not go past a container of tabs
-    # holding a filter pane.
-    _MAX_CONTAINER_DEPTH = 3
+    def describe_app_object(self, app_handle: int, object_id: str) -> Optional[Dict[str, Any]]:
+        """One object, read from its definition; None when Engine will not
+        open it.
 
-    def _master_visualizations(self, app_handle: int,
-                               nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """Properties of the master visualizations the given objects link to.
-
-        Keyed by master id. Two pipelined batches whatever the number of
-        linked objects; a master that cannot be read is simply absent, and
-        its linked object is reported with what it has.
+        A linked object's own properties hold only `qExtendsId`, so it is
+        read with `GetEffectiveProperties` - the master's properties merged
+        in, still without calculation. A container or filter pane is read
+        with `GetFullPropertyTree` for its children.
         """
-        wanted: List[str] = []
+        opened = self.send_request("GetObject", {"qId": object_id}, handle=app_handle)
+        handle = (opened.get("qReturn") or {}).get("qHandle")
+        if handle is None:
+            return None
+        props = (self.send_request("GetProperties", [], handle=handle) or {}).get("qProp") or {}
+        node: Dict[str, Any] = {"qProperty": props, "qChildren": []}
+        kind = (props.get("qInfo") or {}).get("qType", "")
+        if kind in CONTAINER_TYPES or kind == "filterpane":
+            tree = (self.send_request("GetFullPropertyTree", [], handle=handle)
+                    or {}).get("qPropEntry") or {}
+            node = {"qProperty": tree.get("qProperty") or props,
+                    "qChildren": tree.get("qChildren") or []}
+        effective = {}
+        if props.get("qExtendsId"):
+            merged = (self.send_request("GetEffectiveProperties", [], handle=handle)
+                      or {}).get("qProp")
+            if isinstance(merged, dict):
+                effective[object_id] = merged
+                node["qProperty"] = {**merged, **{k: v for k, v in props.items()
+                                                  if k in ("qInfo", "qExtendsId")}}
+        parser = self._object_parser(app_handle, [node], effective)
+        described = parser.describe_node(node)
+        if described is None:
+            kind = parser._kind(kind, node["qProperty"])
+            described = {"object_id": object_id, "object_type": kind,
+                         "summary": f"{kind}: not a visualization shown to users"}
+        described["fields_used"] = fields_used(described)
+        return described
 
-        def collect(node: Dict[str, Any], depth: int) -> None:
-            prop = node.get("qProperty") or {}
-            extends = prop.get("qExtendsId")
-            if extends and extends not in wanted:
-                wanted.append(extends)
-            if depth < self._MAX_CONTAINER_DEPTH:
-                for child in node.get("qChildren") or []:
-                    if isinstance(child, dict):
-                        collect(child, depth + 1)
-
+    def _object_parser(self, app_handle: int, nodes: List[Dict[str, Any]],
+                       effective: Optional[Dict[str, Dict[str, Any]]] = None) -> ObjectParser:
+        """A parser that knows everything the given objects point at."""
+        master_ids: List[str] = []
+        item_ids: List[str] = []
         for node in nodes:
-            collect(node, 0)
-        if not wanted:
+            more_masters, more_items = tree_references(node)
+            master_ids += [m for m in more_masters if m not in master_ids]
+            item_ids += [i for i in more_items if i not in item_ids]
+        masters = self._master_visualizations(app_handle, master_ids)
+        for props in masters.values():
+            item_ids += [i for i in library_ids(props) if i not in item_ids]
+        if effective is None:
+            effective = self._effective_properties(
+                app_handle, [n for n in _walk_nodes(nodes)
+                             if (n.get("qProperty") or {}).get("qExtendsId")
+                             and n["qProperty"]["qExtendsId"] not in masters])
+        library = Library(self._library_with(app_handle, item_ids), masters, effective)
+
+        titles: Dict[str, Optional[Dict[str, str]]] = {"sheets": None}
+
+        def sheet_title(sheet_id: str) -> Optional[str]:
+            if titles["sheets"] is None:
+                try:
+                    titles["sheets"] = {
+                        (s.get("qInfo") or {}).get("qId", ""): (s.get("qMeta") or {}).get("title", "")
+                        for s in self.get_sheets(app_handle)}
+                except Exception as exc:
+                    if isinstance(exc, TimeoutError):
+                        raise
+                    logger.debug("Could not read sheet titles: %s", exc)
+                    titles["sheets"] = {}
+            return titles["sheets"].get(sheet_id) or None
+
+        return ObjectParser(library, sheet_title=sheet_title,
+                            map_layers=lambda map_id: self._map_layers(app_handle).get(map_id, []))
+
+    def _app_cache(self, name: str) -> Dict[str, Any]:
+        """A per-app store on this client, keyed like the library cache:
+        by the app, never by the handle, which Engine reuses across apps."""
+        store = self.__dict__.setdefault(name, {})
+        identity = getattr(self, "_cached_app_id", None) or ""
+        return store.setdefault(identity, {})
+
+    def _read_properties(self, app_handle: int, object_ids: List[str],
+                         method: str = "GetProperties") -> Dict[str, Dict[str, Any]]:
+        """Properties of several objects in two pipelined batches; an
+        object that cannot be read is simply absent."""
+        if not object_ids:
             return {}
         try:
             opened = self.send_requests_pipelined(
-                [{"method": "GetObject", "params": {"qId": master_id}, "handle": app_handle}
-                 for master_id in wanted],
+                [{"method": "GetObject", "params": {"qId": object_id}, "handle": app_handle}
+                 for object_id in object_ids],
                 raise_on_error=False)
             handles = [None if isinstance(o, Exception)
                        else ((o or {}).get("qReturn") or {}).get("qHandle")
                        for o in opened]
             positions = [i for i, handle in enumerate(handles) if handle is not None]
-            properties = self.send_requests_pipelined(
-                [{"method": "GetProperties", "params": [], "handle": handles[i]}
-                 for i in positions],
+            replies = self.send_requests_pipelined(
+                [{"method": method, "params": [], "handle": handles[i]} for i in positions],
                 raise_on_error=False) if positions else []
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 raise
-            logger.debug("Could not read master visualizations: %s", exc)
+            logger.debug("Could not read %s of %d objects: %s", method, len(object_ids), exc)
             return {}
-        masters = {}
-        for position, outcome in zip(positions, properties):
-            if isinstance(outcome, dict) and isinstance(outcome.get("qProp"), dict):
-                masters[wanted[position]] = outcome["qProp"]
-        return masters
+        found = {}
+        for position, reply in zip(positions, replies):
+            if isinstance(reply, dict) and isinstance(reply.get("qProp"), dict):
+                found[object_ids[position]] = reply["qProp"]
+        return found
 
-    def _describe_object(self, node: Dict[str, Any], masters: Dict[str, Dict[str, Any]],
-                         depth: int, seen: set) -> Optional[Dict[str, Any]]:
-        """One object from its property tree node: what it shows and how."""
-        prop = node.get("qProperty") or {}
-        info = prop.get("qInfo") or {}
-        object_id = info.get("qId", "")
-        if not object_id or object_id in seen:
-            return None
-        seen.add(object_id)
+    def _master_visualizations(self, app_handle: int,
+                               master_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Properties of master visualizations by id, remembered per app.
 
-        master_id = prop.get("qExtendsId")
-        definition = prop
-        if master_id and master_id in masters:
-            # The linked object's own properties are an empty shell; what
-            # it shows is the master's. Its own title, when set, still wins.
-            definition = {**masters[master_id],
-                          **{k: v for k, v in prop.items() if v not in (None, "", {}, [])}}
-        object_type = (info.get("qType") or definition.get("visualization")
-                       or (definition.get("qInfo") or {}).get("qType") or "")
-        expressions = self._object_expressions({"qProp": definition})
-        list_dimension = _list_object_dimension(definition)
-        if list_dimension:
-            expressions["dimensions"].append(list_dimension)
-
-        described: Dict[str, Any] = {
-            "object_id": object_id,
-            "object_type": object_type,
-            "object_title": _plain_text(definition.get("title"))
-                            or _plain_text((definition.get("qMetaDef") or {}).get("title")),
-            "measures": expressions["measures"],
-            "dimensions": expressions["dimensions"],
-        }
-        subtitle = _plain_text(definition.get("subtitle"))
-        if subtitle:
-            described["object_subtitle"] = subtitle
-        if master_id:
-            described["master_object"] = master_id
-        described.update(_calculation_context(definition))
-
-        nested = []
-        if depth < self._MAX_CONTAINER_DEPTH:
-            for child in node.get("qChildren") or []:
-                if not isinstance(child, dict):
-                    continue
-                child_described = self._describe_object(child, masters, depth + 1, seen)
-                if not child_described:
-                    continue
-                if (child_described["object_type"] == "listbox"
-                        and not child_described["measures"]):
-                    # A filter pane is its listboxes: their fields are what
-                    # it filters by, so they belong to the pane itself.
-                    described["dimensions"].extend(child_described["dimensions"])
-                else:
-                    nested.append(child_described)
-        if nested:
-            described["children"] = nested
-        return described
-
-    @staticmethod
-    def _object_expressions(properties: Any) -> Dict[str, List[Dict[str, Any]]]:
-        """Measure and dimension definitions from an object's properties.
-
-        Returns them in the shape a reader wants — expression plus label —
-        rather than Qlik's doubly-nested `qDef.qDef`. A master item has no
-        expression here, only `qLibraryId`; those are filled in afterwards
-        by `_resolve_library_items`.
+        One master often stands on several sheets; it is read once. A
+        master can itself show masters (a container of master tabs), so
+        what it points at is read too, one level more.
         """
-        empty: Dict[str, List[Dict[str, Any]]] = {"measures": [], "dimensions": []}
-        if isinstance(properties, Exception) or not isinstance(properties, dict):
-            return empty
-        cube = ((properties.get("qProp") or {}).get("qHyperCubeDef")) or {}
-        if not isinstance(cube, dict):
-            return empty
-
-        measures = []
-        for measure in cube.get("qMeasures", []) or []:
-            if not isinstance(measure, dict):
+        cache = self._app_cache("_master_viz_cache")
+        wanted = [m for m in master_ids if m and m not in cache]
+        for _round in range(2):
+            if not wanted:
+                break
+            read = self._read_properties(app_handle, wanted)
+            for master_id in wanted:
+                cache[master_id] = read.get(master_id)
+            wanted = [m for props in read.values() for m in master_references(props)
+                      if m not in cache]
+        found = {}
+        pending = list(master_ids)
+        while pending:
+            master_id = pending.pop()
+            if master_id in found or cache.get(master_id) is None:
                 continue
-            inner = measure.get("qDef") or {}
-            measures.append({
-                "expression": (inner.get("qDef") or "") if isinstance(inner, dict) else "",
-                "label": (inner.get("qLabel") or "") if isinstance(inner, dict) else "",
-                "library_id": measure.get("qLibraryId")
-                              or (inner.get("qLibraryId") if isinstance(inner, dict) else None),
-            })
+            found[master_id] = cache[master_id]
+            pending += master_references(cache[master_id])
+        return found
 
-        dimensions = []
-        for dimension in cube.get("qDimensions", []) or []:
-            if not isinstance(dimension, dict):
-                continue
-            inner = dimension.get("qDef") or {}
-            dimensions.append({
-                "fields": (inner.get("qFieldDefs") or []) if isinstance(inner, dict) else [],
-                "label": ((inner.get("qFieldLabels") or [""])[0]
-                          if isinstance(inner, dict) and inner.get("qFieldLabels") else ""),
-                "library_id": dimension.get("qLibraryId")
-                              or (inner.get("qLibraryId") if isinstance(inner, dict) else None),
-            })
+    def _effective_properties(self, app_handle: int,
+                              nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Merged properties of linked objects whose master could not be
+        read on its own - still definitions, never a layout."""
+        ids = [(n.get("qProperty") or {}).get("qInfo", {}).get("qId") for n in nodes]
+        return self._read_properties(app_handle, [i for i in ids if i],
+                                     method="GetEffectiveProperties")
 
-        return {"measures": measures, "dimensions": dimensions}
+    def _library_with(self, app_handle: int, item_ids: List[str]) -> Dict[str, Any]:
+        """The app library, plus any item it did not list, read by id.
 
-    def _resolve_library_items(self, app_handle: int,
-                               expressions_by_index: Dict[int, Dict[str, Any]]) -> None:
-        """Fill in the expressions of master measures and dimensions.
-
-        A chart built from the library stores only `qLibraryId`, so without
-        this step exactly the charts a modeller took the trouble to
-        standardise are the ones reporting no fields.
+        The list comes from one session object per app. An id missing from
+        it is asked for both as a measure and as a dimension, since the
+        property it was found under does not always say which it is.
         """
-        wanted_measures, wanted_dimensions = [], []
-        for entry in expressions_by_index.values():
-            for measure in entry["measures"]:
-                if measure.get("library_id") and not measure.get("expression"):
-                    wanted_measures.append(measure["library_id"])
-            for dimension in entry["dimensions"]:
-                if dimension.get("library_id") and not dimension.get("fields"):
-                    wanted_dimensions.append(dimension["library_id"])
+        if not item_ids:
+            return {}
+        library = self._library_for(app_handle)
+        known ={e.get("id") for e in library.get("measures", []) + library.get("dimensions", [])}
+        missing = [i for i in item_ids if i not in known]
+        if not missing:
+            return library
+        extra = self._library_items_by_id(app_handle, missing)
+        return {"measures": library.get("measures", []) + extra["measures"],
+                "dimensions": library.get("dimensions", []) + extra["dimensions"]}
 
-        wanted_measures = list(dict.fromkeys(wanted_measures))
-        wanted_dimensions = list(dict.fromkeys(wanted_dimensions))
-        if not wanted_measures and not wanted_dimensions:
-            return
-
+    def _library_items_by_id(self, app_handle: int,
+                             item_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Master items read one by one, in the shape `get_master_items` uses."""
+        found: Dict[str, List[Dict[str, Any]]] = {"measures": [], "dimensions": []}
+        requests = ([{"method": "GetMeasure", "params": {"qId": i}, "handle": app_handle}
+                     for i in item_ids]
+                    + [{"method": "GetDimension", "params": {"qId": i}, "handle": app_handle}
+                       for i in item_ids])
         try:
-            handles = self.send_requests_pipelined(
-                [{"method": "GetMeasure", "params": {"qId": lib_id}, "handle": app_handle}
-                 for lib_id in wanted_measures]
-                + [{"method": "GetDimension", "params": {"qId": lib_id}, "handle": app_handle}
-                   for lib_id in wanted_dimensions],
-                raise_on_error=False,
-            )
-        except Exception as exc:
-            logger.debug("Could not resolve master items: %s", exc)
-            return
-
-        resolved_handles = []
-        for outcome in handles:
-            if isinstance(outcome, Exception):
-                resolved_handles.append(None)
-                continue
-            resolved_handles.append(((outcome or {}).get("qReturn") or {}).get("qHandle"))
-
-        # The definition, not the layout: a master dimension's layout makes
-        # Engine count its values, and the definition is all that is used.
-        layout_indices = [i for i, h in enumerate(resolved_handles) if h is not None]
-        try:
-            layouts = self.send_requests_pipelined(
-                [{"method": "GetProperties", "params": [], "handle": resolved_handles[i]}
-                 for i in layout_indices],
-                raise_on_error=False,
-            ) if layout_indices else []
+            opened = self.send_requests_pipelined(requests, raise_on_error=False)
+            handles = [None if isinstance(o, Exception)
+                       else ((o or {}).get("qReturn") or {}).get("qHandle") for o in opened]
+            positions = [i for i, handle in enumerate(handles) if handle is not None]
+            # The definition, not the layout: a master dimension's layout
+            # makes Engine count its values.
+            replies = self.send_requests_pipelined(
+                [{"method": "GetProperties", "params": [], "handle": handles[i]}
+                 for i in positions], raise_on_error=False) if positions else []
         except Exception as exc:
             if isinstance(exc, TimeoutError):
                 raise
-            logger.debug("Could not read master item definitions: %s", exc)
-            return
-
-        measure_expressions: Dict[str, str] = {}
-        dimension_fields: Dict[str, List[str]] = {}
-        for position, layout in zip(layout_indices, layouts):
-            if isinstance(layout, Exception):
+            logger.debug("Could not resolve master items: %s", exc)
+            return found
+        for position, reply in zip(positions, replies):
+            body = (reply or {}).get("qProp") if isinstance(reply, dict) else None
+            if not isinstance(body, dict):
                 continue
-            body = (layout or {}).get("qProp") or {}
-            if position < len(wanted_measures):
-                lib_id = wanted_measures[position]
-                measure_expressions[lib_id] = ((body.get("qMeasure") or {}).get("qDef") or "")
-            else:
-                lib_id = wanted_dimensions[position - len(wanted_measures)]
-                dimension_fields[lib_id] = ((body.get("qDim") or {}).get("qFieldDefs") or [])
+            item_id = item_ids[position % len(item_ids)]
+            name = ((body.get("qMetaDef") or {}).get("title") or "").strip()
+            if position < len(item_ids) and isinstance(body.get("qMeasure"), dict):
+                measure = body["qMeasure"]
+                found["measures"].append({
+                    "id": item_id, "name": name or str(measure.get("qLabel") or ""),
+                    "expression": str(measure.get("qDef") or "").strip()})
+            elif position >= len(item_ids) and isinstance(body.get("qDim"), dict):
+                dim = body["qDim"]
+                entry = {"id": item_id, "name": name}
+                entry.update(describe_master_dimension(
+                    name, dim.get("qFieldDefs"), dim.get("qFieldLabels"), dim.get("qGrouping")))
+                found["dimensions"].append(entry)
+        return found
 
-        for entry in expressions_by_index.values():
-            for measure in entry["measures"]:
-                lib_id = measure.get("library_id")
-                if lib_id and not measure.get("expression"):
-                    measure["expression"] = measure_expressions.get(lib_id, "")
-            for dimension in entry["dimensions"]:
-                lib_id = dimension.get("library_id")
-                if lib_id and not dimension.get("fields"):
-                    dimension["fields"] = dimension_fields.get(lib_id, [])
+    def _map_layers(self, app_handle: int) -> Dict[str, List[Dict[str, Any]]]:
+        """GeoAnalytics layers by map id, read once per app.
+
+        A layer is an object of the app, not a child of its map; the two
+        are linked only by the map's numeric `mapId` and the layer's
+        string `mapid`.
+        """
+        cache = self._app_cache("_map_layer_cache")
+        if "layers" in cache:
+            return cache["layers"]
+        cache["layers"] = {}
+        try:
+            infos = (self.send_request("GetAllInfos", [], handle=app_handle) or {}).get("qInfos") or []
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not list app objects: %s", exc)
+            return cache["layers"]
+        ids = [i.get("qId") for i in infos if isinstance(i, dict)
+               and str(i.get("qType", "")).startswith("idevio")
+               and str(i.get("qType", "")).endswith("layer")]
+        for props in self._read_properties(app_handle, [i for i in ids if i]).values():
+            cache["layers"].setdefault(str(props.get("mapid", "")), []).append(props)
+        return cache["layers"]
+
+    def _master_dimension_first_def(self, app_handle: int, library_id: str) -> str:
+        """The first field or expression of a master dimension, whole.
+
+        The library carries a calculated dimension cut for display; a cube
+        needs all of it, so it is read from the definition itself.
+        """
+        read = self._library_items_by_id(app_handle, [library_id])
+        for entry in read["dimensions"]:
+            if entry.get("fields"):
+                return entry["fields"][0]
+        try:
+            opened = self.send_request("GetDimension", {"qId": library_id}, handle=app_handle)
+            handle = (opened.get("qReturn") or {}).get("qHandle")
+            if handle is None:
+                return ""
+            body = (self.send_request("GetProperties", [], handle=handle) or {}).get("qProp") or {}
+            return _first_def((body.get("qDim") or {}).get("qFieldDefs"))
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            return ""
+
+    def object_data(self, app_handle: int, described: Dict[str, Any],
+                    limit: int, offset: int) -> Dict[str, Any]:
+        """An object's own data, computed as a flat table.
+
+        Not the object's layout: a stacked chart ("K") or a pivot ("P")
+        answers with a tree of nodes, and a map computes each layer twice.
+        The object's dimensions and measures are sent to Engine as one
+        straight hypercube (`qMode: "S"`) under the limits of
+        `engine_create_hypercube`, with the row whose dimension is empty
+        (Qlik's "-") kept, since without it the totals do not match the
+        chart. A column whose show condition is false is left out, as the
+        chart leaves it out.
+        """
+        plan = described.get("_cube") or {}
+        notes: List[str] = []
+        dims_plan = list(plan.get("dimensions") or [])
+        measures_plan = list(plan.get("measures") or []) + list(plan.get("extra_measures") or [])
+        if not dims_plan and not measures_plan:
+            return {"note": _NO_DATA_NOTE.get(described.get("object_type"),
+                                              "This object computes no data of its own.")}
+
+        columns = [("dimension", i, entry, column) for i, (entry, column) in
+                   enumerate(zip(dims_plan, described.get("dimensions") or []))]
+        columns += [("measure", i, entry, column) for i, (entry, column) in
+                    enumerate(zip(plan.get("measures") or [], described.get("measures") or []))]
+        object_conditions = [c for c in described.get("conditions") or [] if c.get("on") == "object"]
+        false_now = self._false_conditions(
+            app_handle, [c.get("condition") for *_x, c in columns]
+            + [c["condition"] for c in object_conditions])
+        hidden = {p for p in false_now if p < len(columns)}
+        for position in sorted(p - len(columns) for p in false_now if p >= len(columns)):
+            condition = object_conditions[position]
+            shows = repr(condition["message"]) if condition.get("message") else "nothing"
+            notes.append(f"the object's calculation condition {condition['condition']} is "
+                         f"false now: it shows {shows} instead of these numbers")
+        library: Dict[str, Any] = {}
+        if any(entry.get("master_id") for _k, _i, entry, _c in columns):
+            library = self._library_for(app_handle)
+        master_measures = {m.get("id"): m for m in library.get("measures", [])}
+        master_dims = {d.get("id"): d for d in library.get("dimensions", [])}
+
+        dimensions: List[Dict[str, Any]] = []
+        measures: List[Dict[str, Any]] = []
+        labels: Dict[Tuple[str, int], str] = {}
+        taken: set = set()
+        left_out: List[str] = []
+
+        def unique(label: str) -> str:
+            label = label or "column"
+            candidate, n = label, 2
+            while candidate in taken:
+                candidate, n = f"{label} ({n})", n + 1
+            taken.add(candidate)
+            return candidate
+
+        for position, (kind, index, entry, _column) in enumerate(columns):
+            if position in hidden:
+                left_out.append(str(entry.get("label")))
+                continue
+            if kind == "dimension":
+                field = entry.get("field") or ""
+                if entry.get("master_id"):
+                    master = master_dims.get(entry["master_id"]) or {}
+                    field = (master.get("fields") or [""])[0] \
+                        or self._master_dimension_first_def(app_handle, entry["master_id"])
+                    if len(master.get("fields") or []) > 1:
+                        notes.append(f"master dimension {entry['master_id']} is a group; "
+                                     f"its first field {field!r} is used")
+                if not field.strip():
+                    notes.append(f"dimension {entry.get('label')!r} could not be resolved "
+                                 f"and is left out")
+                    continue
+                labels[(kind, index)] = unique(str(entry.get("label") or field))
+                dimensions.append({"field": field.strip(), "label": labels[(kind, index)]})
+            else:
+                expression = entry.get("expression") or ""
+                if entry.get("master_id"):
+                    expression = (master_measures.get(entry["master_id"]) or {}).get(
+                        "expression") or expression
+                if not str(expression).strip():
+                    notes.append(f"measure {entry.get('label')!r} could not be resolved "
+                                 f"and is left out")
+                    continue
+                labels[(kind, index)] = unique(str(entry.get("label") or expression)[:80])
+                measures.append({"expression": expression, "label": labels[(kind, index)]})
+        if left_out:
+            notes.append("left out, as the object does, because their show condition is "
+                         "false now: " + ", ".join(left_out))
+        for extra in plan.get("extra_measures") or []:
+            measures.append({"expression": extra["expression"], "label": unique(extra["label"])})
+
+        sort = plan.get("sort") or {}
+        sort_by, sort_order = None, sort.get("order", "desc")
+        for kind in ("dimension", "measure"):
+            if kind in sort and (kind, sort[kind]) in labels:
+                sort_by = labels[(kind, sort[kind])]
+
+        histogram = plan.get("histogram")
+        if histogram and dimensions:
+            built = self._histogram_columns(app_handle, dimensions[0]["field"], histogram)
+            if built.get("error"):
+                return built
+            dimensions, measures = built["dimensions"], built["measures"]
+            notes.append(built["note"])
+        if not measures and not dimensions:
+            return {"note": "No column of this object could be computed.", "notes": notes}
+
+        result = self.create_hypercube(
+            app_handle, dimensions, measures, max_rows=limit, sort_by=sort_by,
+            sort_order=sort_order, suppress_zero=bool(plan.get("suppress_zero")),
+            exclude_null_dimensions=False, offset=offset)
+        if not isinstance(result, dict) or result.get("error"):
+            return result if isinstance(result, dict) else {"error": str(result)}
+        data = {key: result.get(key) for key in _DATA_KEYS if result.get(key) not in (None, [], "")}
+        data.setdefault("rows", result.get("rows", []))
+        if notes:
+            data["notes"] = notes
+        return data
+
+    def _false_conditions(self, app_handle: int, conditions: List[Optional[str]]) -> set:
+        """Positions whose show condition evaluates to false right now.
+
+        A scalar evaluation per condition, pipelined; a condition Engine
+        cannot evaluate keeps its column rather than hiding it.
+        """
+        positions = [i for i, c in enumerate(conditions) if c]
+        if not positions:
+            return set()
+        try:
+            replies = self.send_requests_pipelined(
+                [{"method": "EvaluateEx",
+                  "params": {"qExpression": conditions[i][1:] if conditions[i].startswith("=")
+                             else conditions[i]}, "handle": app_handle}
+                 for i in positions], raise_on_error=False)
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            return set()
+        hidden = set()
+        for position, reply in zip(positions, replies):
+            value = (reply or {}).get("qValue") if isinstance(reply, dict) else None
+            if isinstance(value, dict) and value.get("qIsNumeric") and value.get("qNumber") == 0:
+                hidden.add(position)
+        return hidden
+
+    def _histogram_columns(self, app_handle: int, field: str,
+                           spec: Dict[str, Any]) -> Dict[str, Any]:
+        """A histogram has no measure of its own: its bars are `Class()`
+        of the field and a count per class."""
+        bare = field.strip()
+        name = bare if bare.startswith("=") or bare.startswith("[") else f"[{bare}]"
+        name = name[1:] if name.startswith("=") else name
+        step = spec.get("size")
+        if not step:
+            bounds = self.create_hypercube(
+                app_handle, [], [{"expression": f"Min({name})", "label": "min"},
+                                 {"expression": f"Max({name})", "label": "max"}], max_rows=1)
+            row = (bounds.get("rows") or [[None, None]])[0] if isinstance(bounds, dict) else [None, None]
+            low, high = (row + [None, None])[:2]
+            if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+                return {"error": f"Could not read the range of {field!r} to form bins.",
+                        "error_category": "engine_api_error"}
+            step = (high - low) / max(1, int(spec.get("count") or 10)) or 1
+        count = f"Count(distinct {name})" if spec.get("count_distinct") else f"Count({name})"
+        return {"dimensions": [{"field": f"=Class({name}, {step:g})", "label": "bin"}],
+                "measures": [{"expression": count, "label": "count"}],
+                "note": f"bins are Class({name}, {step:g})"}
+
 
     def _extract_fields_from_object(self, obj_layout: Dict[str, Any]) -> List[str]:
         """Extract field names used in an object layout.
@@ -633,51 +774,5 @@ class EngineSheetsMixin:
         return None
 
     def _extract_fields_from_expression(self, expression: str) -> List[str]:
-        """Extract field names from a Qlik expression.
-
-        Bracketed names are unambiguous. Bare ones are not, so the rule is
-        structural: an identifier followed by `(` is a function call, and
-        everything else that is not a keyword is taken as a field. Matching
-        only `[...]` — as this did — meant `Sum(Sales)` reported no fields at
-        all, and most real measures are written without brackets.
-
-        This is a lexical guess, not a parser: an unusual function name would
-        be reported as a field. That is the tolerable direction of error for
-        "which fields does this object touch".
-        """
-        import re
-
-        if not expression:
-            return []
-
-        fields = set(re.findall(r"\[([^\]]+)\]", expression))
-
-        text = expression
-        # Dollar expansion is resolved by Qlik before evaluation; the name
-        # inside is a variable, not a field.
-        text = re.sub(r"\$\([^)]*\)", " ", text)
-        # Both quote styles are values inside a set modifier: single quotes
-        # are a literal, double quotes are a *search* —
-        # `Country={"New Zealand"}` matched "New" and "Zealand" as fields
-        # until this line existed.
-        text = re.sub(r"'[^']*'", " ", text)
-        text = re.sub(r'"[^"]*"', " ", text)
-        # Bracketed names, already collected above.
-        text = re.sub(r"\[[^\]]*\]", " ", text)
-
-        # Field names are routinely non-Latin — `Год` and `Месяц` are the
-        # dimensions of a chart on the stand this was measured against — so
-        # the identifier pattern has to be Unicode-aware rather than A-Za-z.
-        for match in re.finditer(r"(?<![\w.])(\w[\w.]*)\s*(\()?", text, re.UNICODE):
-            name, is_call = match.group(1), match.group(2)
-            if is_call or name.lower() in _EXPRESSION_KEYWORDS:
-                continue
-            # A name cannot start with a digit in an unbracketed reference,
-            # so anything that does is a literal — including the scientific
-            # notation `1e3`, which was being reported as a field.
-            if name[0].isdigit():
-                continue
-            fields.add(name)
-
-        return sorted(fields)
-
+        """Field names a Qlik expression refers to; see `fields_in_expression`."""
+        return fields_in_expression(expression)

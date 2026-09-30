@@ -132,10 +132,12 @@ secrets), and login/password against a "Form based" virtual proxy
 - **A measure can narrow itself.** Its own `filters` override the
   query's, so a KPI carries its numerator and its denominator in one
   answer.
-- **Objects say which fields they use.** `get_app_sheet_objects` returns
-  `fields_used`, including fields reached through master measures and the
+- **Objects say what they show.** `get_app_sheet_objects` gives each object
+  one line - its dimensions, its measures with their expressions, the
+  conditions and variables it depends on, what a filter or button does -
+  and `fields_used`, including fields reached through master items and the
   ones inside a filter pane's listboxes — so "what does this sheet work
-  with" is one call.
+  with" is one call, with nothing calculated.
 - **Paging is done by Qlik, not after it.** App and task listings read
   `/{entity}/table` with `skip`/`take` and take the total from
   `/{entity}/count`, so nothing past the QRS record limit goes missing

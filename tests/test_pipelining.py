@@ -109,7 +109,7 @@ class TestSheetObjectsUsesPipelining:
 
         result = eng._get_sheet_objects_detailed(app_handle=1, sheet_id="SH01")
 
-        assert [r["object_title"] for r in result] == ["master0", "master1", "master2"]
+        assert [r["title"] for r in result] == ["master0", "master1", "master2"]
         assert single_calls == ["GetObject", "GetFullPropertyTree"]
         assert [batch[0] for batch in pipelined_calls] == ["GetObject", "GetProperties"]
         assert [len(batch) for batch in pipelined_calls] == [3, 3]

@@ -31,6 +31,30 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   Measures placed in a text object as `=[](cId)` are shown by their label,
   and the text of an sn-text object is decoded from the JSON stored in it.
 
+### Changed
+
+- `get_app_sheet_objects` answers with one `summary` line per object, read
+  by the per-type rules, next to `object_id`, `object_type`, `title` and
+  `fields_used`; the structured `measures` and `dimensions` moved to
+  `get_app_object`, and `object_description` is now `title`. The walk
+  starts from the sheet's `cells`, so objects left in the tree by earlier
+  edits are no longer listed, and container children stay inside their
+  container with `tab`, `shown_if` and `default_tab`. Master
+  visualizations, master items and GeoAnalytics layers are read once per
+  app; the library is read only when an object uses it.
+- `get_app_object` no longer returns the object's layout. A stacked chart
+  or a pivot sent its data as a tree of nodes, a map computed each layer
+  twice, and the expressions were not in the layout at all. The reply is
+  the definition in structured form, the `variables` the object uses with
+  their definitions, and `data` computed by the server as one flat
+  hypercube (`qMode: "S"`) from the object's own dimensions and measures,
+  under the limits of `engine_create_hypercube` and with the empty-dimension
+  row kept. A histogram is counted per `Class()`, a bullet chart's target is
+  a column, a map is computed from its first layer; a column whose show
+  condition is false now is left out and named in `data.notes`, and a false
+  calculation condition of the object is said there too. A linked object
+  is read with `GetEffectiveProperties`.
+
 ### Fixed
 
 - JWT mode: the re-login after the 25-minute session TTL no longer fails with
@@ -51,9 +75,7 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   large app a sheet ran past 300 seconds until the client dropped the MCP
   session. Objects are now read from definitions only: the sheet's
   `GetFullPropertyTree` in one request, linked objects from their master
-  visualization's properties, master items with `GetProperties`. Container
-  objects list theirs in `children`; `master_object`, `state`,
-  `calc_condition` and `context_set` appear where set.
+  visualization's properties, master items with `GetProperties`.
 - A tool call now has a time limit, `QLIK_TOOL_TIMEOUT` (default 120 s,
   `0` turns it off). Tools used to run on the server's event loop, so a
   slow Engine call froze the server for every client and sent nothing.

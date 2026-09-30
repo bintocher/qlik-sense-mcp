@@ -302,6 +302,37 @@ compute each chart. The sheet's `GetFullPropertyTree` returns every object
 and every container's children as definitions in one request; objects
 linked to a master visualization are read from the master's properties.
 
+#### Reading objects by type
+
+[`engine/objects.py`](../qlik_sense_mcp_server/engine/objects.py) turns
+properties into a description without talking to Engine. It reads a
+whitelist of paths per type, because most of the bytes of a definition are
+formatting and leftovers of a type the object used to be: `qLayoutExclude`,
+`qUndoExclude`, `qMiniChartDef` in every measure, `extensionMeta`. Roles the
+expression does not carry are written out - the axis of a combo measure,
+the position of a scatter measure, the sign of a waterfall step, the target
+of a bullet chart that lives in the measure, the plan of a gauge that lives
+in its axis. An extension without a rule goes through a universal reader
+that walks the tree for cubes, list objects and expressions and drops what
+is colour, style, a URL or a constant.
+
+The walk starts from the sheet's `cells`. A container's children are in
+the tree but not in the cells; they are reported inside their container,
+three levels deep at most, each object once. What objects point at is
+read in batches and remembered per app: master visualizations by
+`qExtendsId`, a trellis' `vizId` or a Vizlib container's `masterItemId`
+(`GetEffectiveProperties` when a master cannot be read on its own), master
+items from the library, GeoAnalytics layers, which are separate objects
+linked to their map only by its id.
+
+`get_app_object` computes an object's data from the same description: its
+dimensions and measures go to `create_hypercube` as one straight cube
+(`qMode: "S"`), whatever the chart - a pivot or a stacked chart would
+otherwise come back as a tree of nodes. A histogram becomes `Class()` and
+a count, a bullet chart's target a column of its own, a map its first
+layer's measures. Show conditions are evaluated as scalars first, and a
+column the object hides now is left out, as the object leaves it out.
+
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 
 The host object comes from the

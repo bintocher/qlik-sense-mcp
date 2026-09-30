@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from . import context
 from .schema import (Filter, Measure, Metric, Query, Scope)
+from ..engine.objects import public as public_object
 from .helpers import (
     _check,
     _tool,
@@ -989,22 +990,32 @@ def get_app_sheets(app_id: str) -> str:
 def _sheet_object_entry(obj: Dict[str, Any]) -> Dict[str, Any]:
     """One object of `get_app_sheet_objects`, children in the same shape.
 
-    Fields, measures and dimensions are all there is to it: dropping any of
-    them meant answering "which fields does this sheet work with" took one
-    get_app_object call per object.
+    The `summary` line carries what the object shows - dimensions,
+    measures with their expressions, conditions, alternatives, roles - in
+    a fraction of the structured form's size; `get_app_object` has the
+    structure. `fields_used` of a container includes everything inside it,
+    so a child does not repeat it.
     """
     entry = {"object_id": obj.get("object_id", ""),
-             "object_type": obj.get("object_type", ""),
-             "object_description": obj.get("object_title", ""),
-             "fields_used": obj.get("fields_used", []),
-             "measures": obj.get("measures", []),
-             "dimensions": obj.get("dimensions", [])}
-    for key in ("master_object", "state", "calc_condition", "context_set"):
+             "object_type": obj.get("object_type", "")}
+    if obj.get("title"):
+        entry["title"] = obj["title"]
+    entry["summary"] = obj.get("summary", "")
+    for key in ("tab", "shown_if", "default_tab", "fields_used"):
         if obj.get(key):
             entry[key] = obj[key]
     if obj.get("children"):
-        entry["children"] = [_sheet_object_entry(c) for c in obj["children"]]
+        entry["children"] = [
+            {k: v for k, v in _sheet_object_entry(child).items() if k != "fields_used"}
+            for child in obj["children"]]
     return entry
+
+
+def _variables_of(described: Dict[str, Any]) -> List[str]:
+    names = list(described.get("variables") or [])
+    for child in described.get("children") or []:
+        names += [n for n in _variables_of(child) if n not in names]
+    return names
 
 
 @_tool()
@@ -1012,38 +1023,49 @@ def _sheet_object_entry(obj: Dict[str, Any]) -> Dict[str, Any]:
 @_engine_serialised
 def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
     """
-    List the charts on one sheet, with the fields and expressions behind
-    them.
+    List the objects on one sheet, each as one line saying what it shows.
 
     WHEN TO USE
-        To see what a sheet works with, in one call: `fields_used` covers
-        the fields reached through master items and through a filter
-        pane's listboxes as well as the obvious ones. Also to find the
-        `object_id` of a chart mentioned by title.
-        The `measures` here are the authors' own expressions — the closest
-        thing to a definition of what a figure means in this app.
+        To see what a sheet works with, in one call, and to find the
+        `object_id` of a chart mentioned by title. Each `summary` names the
+        dimensions (`[label]=field`, `[label]==expression`, or
+        `master <id> "<name>" = field`) and the measures with their
+        expressions - the authors' own formulas, the closest thing to a
+        definition of what a figure means in this app. Measure roles that
+        the expression does not show are written out: bar or line and the
+        axis of a combo chart, x/y/size of a scatter plot, the target of a
+        bullet chart, the sign of a waterfall step. Also shown: alternative
+        measures a user can switch to, show and calculation conditions,
+        top-N limits, alternate states, `$(variables)` the formulas depend
+        on, the fields of filters and date pickers, the values a variable
+        input offers, what buttons select or set.
 
     WHEN NOT TO USE
-        For a chart's current data — `get_app_object` returns that.
+        For a chart's data - `get_app_object` computes it.
 
     Args:
         app_id: application GUID.
         sheet_id: from `get_app_sheets`.
 
     Returns:
-        `objects`, each with `object_id`, `object_type` (`barchart`,
-        `table`, `kpi`, `filterpane`), `object_description` (its title, or
-        the `=...` expression that computes it), `fields_used`, `measures`
-        and `dimensions`; plus `total_objects`. Where they apply:
-        `master_object` (the master visualization it is linked to),
-        `state` (an alternate state), `calc_condition`, `context_set` (a
-        set expression over the whole object) and `children` (the objects
-        inside a container, same shape). A filter pane lists its fields as
-        `dimensions`.
+        `objects` in reading order, each with `object_id`, `object_type`,
+        `title` when it has one, `summary` and `fields_used` (fields
+        reached through master items and filter panes included). A
+        container lists its tabs in `children`, each with `tab` (the tab
+        label) and `shown_if` (the condition that picks the tab) where set;
+        children are not repeated at the top level. Plus `total_objects`.
 
     Does not return:
         Computed values, formatting, or layout position. Nothing is
         calculated to answer this, so it stays fast on any app size.
+
+    Example:
+        Call: {"app_id": "...", "sheet_id": "..."}
+        Returns: {"objects": [{"object_id": "a1b2", "object_type": "combochart",
+                  "title": "Sales and orders",
+                  "summary": "combochart \\"Sales and orders\\": dims [Month]=OrderMonth; bar \\"Sales\\" = Sum(Amount), line (axis 2) \\"Orders\\" = Count(distinct OrderID); alt measures \\"Margin\\" = Sum(Margin)",
+                  "fields_used": ["Amount", "Margin", "OrderID", "OrderMonth"]}],
+                  "total_objects": 1}
     """
     e = _check()
     if e:
@@ -1065,13 +1087,12 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
 def get_app_object(app_id: str, object_id: str, limit: int = 50,
                    offset: int = 0) -> str:
     """
-    Read one chart in full: its definition and the data it currently
-    shows.
+    Read one object in full: its definition and the data it shows.
 
     WHEN TO USE
         When a figure on a dashboard has to be explained or reproduced.
-        Compare the chart's own expressions with yours rather than
-        comparing the two numbers — where they differ it is almost always
+        Compare the object's own expressions with yours rather than
+        comparing the two numbers - where they differ it is almost always
         the filters, not the arithmetic.
 
     WHEN NOT TO USE
@@ -1082,125 +1103,104 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
     Args:
         app_id: application GUID.
         object_id: from `get_app_sheet_objects`.
-        limit: rows of the object's own data to return, 50 by default.
-            The definition and the expressions come back whole; it is the
-            data that is paged, because a live table holds thousands of
-            rows and the answer stops being readable long before it stops
-            being complete.
-        offset: row to start from. The reply carries `data_rows`,
-            `data_rows_total` and, while there is more, `next_offset`.
+        limit: rows of data to return, 50 by default; the same limits as
+            `engine_create_hypercube` apply (at most 5000 rows and 9900
+            cells).
+        offset: row to start from. `data.has_more` and `data.next_offset`
+            say whether there is another page.
 
     Returns:
-        The object's `qLayout` with one page of its data, plus `measures`,
-        `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does
-        not put them in the layout, where `qMeasureInfo` carries only the
-        fallback title, formatting and statistics. Master items are
-        resolved to their library definitions. Computed data sits in
-        `qLayout.qHyperCube.qDataPages`.
+        The definition read without calculation: `object_type`, `title`,
+        `summary` (the line `get_app_sheet_objects` shows), `dimensions`
+        (`field`, `expression` or `master_id` with `master_name` and
+        `definition`; `label`, `role`, `condition`, `top_n` where set),
+        `measures` (`expression` or `master_id` with its expression;
+        `label` or `label_expression`, `role`, `condition`, `format`,
+        `target`), and where they apply `alt_measures`, `conditions`,
+        `state`, `context_set`, `controls`, `children`, `text`,
+        `variables` (each `$(name)` used, with its definition, null when
+        the app has no such variable) and `fields_used`.
+
+        `data` is computed by the server as one flat table (`columns`,
+        `rows`, `total_rows`, `grand_total`, `has_more`, `next_offset`)
+        from the object's own dimensions and measures - a pivot or a
+        stacked chart included, whose layout Engine would send as a tree.
+        The row whose dimension is empty (Qlik's "-") is kept. A column
+        whose show condition is false now is left out and named in
+        `data.notes`, as are the bins of a histogram. A bullet chart's
+        target comes as its own column; a map is computed from its first
+        layer. Objects that compute nothing (filters, containers, text)
+        say so in `data.note`. A failed computation leaves the definition
+        intact and adds `data_error`.
         An object Engine will not open is reported as
-        `object_not_available`; a failure to read its properties leaves
-        the layout intact and adds `properties_error`.
+        `object_not_available`.
 
     Does not return:
-        Data beyond what the chart itself displays.
+        The object's layout, formatting, or data beyond what it shows.
+
+    Example:
+        Call: {"app_id": "...", "object_id": "a1b2", "limit": 3}
+        Returns: {"object_id": "a1b2", "object_type": "barchart",
+                  "title": "Sales by region",
+                  "summary": "barchart \\"Sales by region\\": dims Region; measure \\"Sales\\" = Sum(Amount)",
+                  "dimensions": [{"field": "Region"}],
+                  "measures": [{"expression": "Sum(Amount)", "label": "Sales"}],
+                  "fields_used": ["Amount", "Region"],
+                  "data": {"columns": ["Region", "Sales"],
+                           "rows": [["North", 1200.5], ["South", 980.0], ["-", 12.0]],
+                           "total_rows": 3, "returned_rows": 3, "grand_total": [2192.5],
+                           "has_more": false}}
     """
     e = _check()
     if e:
         return e
+    if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)
+                               or offset < 0):
+        return _err(f"offset={offset!r} is not a row number.",
+                    error_category="invalid_argument",
+                    hint="Pass 0 or a positive integer, or omit it.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _err(f"limit={limit!r} is not a number of rows.",
+                    error_category="invalid_argument",
+                    hint="Pass a positive integer, or omit it.")
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
-        obj_result = context.engine_api.send_request("GetObject", {"qId": object_id}, handle=app_handle)
-        # An object Engine knows about but hands back without a handle
-        # (a type it will not open, or one the user may not read) used to
-        # raise KeyError here and surface as an opaque failure.
-        obj_handle = (obj_result.get("qReturn") or {}).get("qHandle")
-        if obj_handle is None:
+        described = context.engine_api.describe_app_object(app_handle, object_id)
+        if described is None:
             return _err(
                 f"Object {object_id} cannot be opened",
                 error_category="object_not_available",
-                hint="Check the id against get_app_sheet_objects — Engine "
+                hint="Check the id against get_app_sheet_objects - Engine "
                      "returns no handle for an unknown object, and for some "
-                     "object types it refuses to open one.",
-                response=obj_result,
-            )
-        layout_result = context.engine_api.send_request("GetLayout", [], handle=obj_handle)
-        if "qLayout" not in layout_result:
-            return _err("Failed to get object layout",
-                        error_category="engine_api_error")
-        # The layout does not contain the measure expressions — Engine puts
-        # qFallbackTitle, formatting and statistics in qMeasureInfo and
-        # nothing else. Since reverse-engineering a chart is what this tool
-        # is for, fetch the properties too and resolve any master items.
-        try:
-            properties = context.engine_api.send_request(
-                "GetProperties", [], handle=obj_handle)
-            expressions = context.engine_api._object_expressions(properties)
-            by_index = {0: expressions}
-            context.engine_api._resolve_library_items(app_handle, by_index)
-            layout_result["measures"] = expressions["measures"]
-            layout_result["dimensions"] = expressions["dimensions"]
-            layout_result["fields_used"] = sorted(
-                set(context.engine_api._extract_fields_from_object(layout_result["qLayout"]))
-                | {f for m in expressions["measures"]
-                   for f in context.engine_api._extract_fields_from_expression(
-                       m.get("expression", ""))}
-                | {f for d in expressions["dimensions"] for f in d.get("fields", [])}
-            )
-        except Exception as prop_error:
-            # The layout is still worth returning; say what is missing
-            # rather than pretending the object has no measures.
-            logger.warning("GetProperties failed for %s: %s", object_id, prop_error)
-            layout_result["properties_error"] = str(prop_error)
-        # The definition is what this tool is for and comes back whole;
-        # the data is paged. Measured on a live table: the whole reply ran
-        # to 111 thousand characters, nearly all of it rows.
-        if offset is not None and (isinstance(offset, bool)
-                                   or not isinstance(offset, int)
-                                   or offset < 0):
-            return _err(f"offset={offset!r} is not a row number.",
-                        error_category="invalid_argument",
-                        hint="Pass 0 or a positive integer, or omit it.")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            return _err(f"limit={limit!r} is not a number of rows.",
-                        error_category="invalid_argument",
-                        hint="Pass a positive integer, or omit it.")
-        cube = ((layout_result.get("qLayout") or {}).get("qHyperCube") or {})
-        pages = cube.get("qDataPages") or []
-        total_rows = (cube.get("qSize") or {}).get("qcy", 0)
-        width = len((cube.get("qDimensionInfo") or [])) + len(
-            (cube.get("qMeasureInfo") or []))
-        rows = [row for page in pages for row in (page.get("qMatrix") or [])]
-        # The layout carries only the first page Engine chose to send, so a
-        # page past it has to be asked for rather than sliced out of what
-        # is already here.
-        if offset + limit > len(rows) and offset + limit <= total_rows:
+                     "object types it refuses to open one.")
+        definition = public_object(described)
+        # What the object is and the line that says so come first.
+        reply = {key: definition[key] for key in ("object_id", "object_type", "title", "summary")
+                 if key in definition}
+        reply.update({k: v for k, v in definition.items() if k not in reply})
+        names = _variables_of(described)
+        if names:
             try:
-                more = context.engine_api.send_request(
-                    "GetHyperCubeData",
-                    ["/qHyperCubeDef",
-                     [{"qTop": offset, "qLeft": 0, "qHeight": limit,
-                       "qWidth": width or len((rows[0] if rows else []))}]],
-                    handle=obj_handle)
-                fetched = [row for page in (more or {}).get("qDataPages") or []
-                           for row in (page.get("qMatrix") or [])]
-                if fetched:
-                    rows = [None] * offset + fetched
-            except Exception as page_error:
-                logger.debug("Could not read page %s of %s: %s",
-                             offset, object_id, page_error)
-        if pages:
-            shown = rows[offset:offset + limit]
-            cube["qDataPages"] = [{"qArea": {"qTop": offset, "qLeft": 0,
-                                             "qHeight": len(shown),
-                                             "qWidth": len(shown[0]) if shown
-                                             else 0},
-                                   "qMatrix": shown}]
-            layout_result["data_rows"] = len(shown)
-            layout_result["data_rows_total"] = (
-                (cube.get("qSize") or {}).get("qcy", len(rows)))
-            if offset + len(shown) < len(rows):
-                layout_result["next_offset"] = offset + len(shown)
-        return _ok(layout_result)
+                defined = {v["name"]: v.get("text_value")
+                           for v in context.engine_api._get_user_variables(app_handle)}
+            except Exception as variable_error:
+                if isinstance(variable_error, TimeoutError):
+                    raise
+                logger.debug("Could not read variables: %s", variable_error)
+                defined = {}
+            reply["variables"] = {name: defined.get(name) for name in names}
+        try:
+            data = context.engine_api.object_data(app_handle, described, limit, offset or 0)
+        except Exception as data_error:
+            if isinstance(data_error, TimeoutError):
+                raise
+            logger.warning("Could not compute data of %s: %s", object_id, data_error)
+            data = {"error": str(data_error), "error_category": "engine_api_error"}
+        if isinstance(data, dict) and data.get("error"):
+            reply["data_error"] = data
+        else:
+            reply["data"] = data
+        return _ok(reply)
     except Exception as ex:
         return _err(str(ex), app_id=app_id, object_id=object_id)
 
