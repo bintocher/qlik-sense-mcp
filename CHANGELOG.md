@@ -17,6 +17,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   dropped from the shared jar and the new one copied in; a 204 for a cookie
   the request carried keeps that session; the QMC advice is given only when
   the very first login returns no cookie.
+- Master dimensions in the app library no longer come back with an empty
+  `expression`: it was read from `/qDim/qDef`, which dimensions do not have.
+  Each dimension now carries a `definition` line built from `qFieldDefs`,
+  `qFieldLabels` and `qGrouping` - `name = field`, `name = A > B (drill-down)`,
+  `name = A | B (cyclic)`, or `name = =expr (calculated)` cut at 150
+  characters with `expression_truncated` - plus `fields` for field-based ones.
 
 ## [2.3.1] - 2026-09-25
 

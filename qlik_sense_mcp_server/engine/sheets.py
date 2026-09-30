@@ -20,6 +20,48 @@ _EXPRESSION_KEYWORDS = frozenset("""
     e pi
 """.split())
 
+# A calculated dimension can run to pages; the line that names it only has
+# to say what it is.
+MASTER_DIMENSION_EXPRESSION_CHARS = 150
+
+
+def describe_master_dimension(name: str, field_defs: Any, field_labels: Any,
+                              grouping: Any) -> Dict[str, Any]:
+    """A master dimension as one line: `name = what it is built from`.
+
+    Qlik stores the fields in `qFieldDefs` and how they combine in
+    `qGrouping`: "N" a single field or expression, "H" a drill-down whose
+    levels are read top to bottom, "C" a cyclic group the user switches
+    between. A definition starting with "=" is an expression, not a field.
+    A level label that differs from its field is kept as `[label]=field`,
+    since the label is the word people use for it.
+    """
+    defs = [str(d).strip() for d in (field_defs or []) if str(d or "").strip()]
+    labels = list(field_labels or [])
+    levels = []
+    for index, field in enumerate(defs):
+        label = str(labels[index]).strip() if index < len(labels) and labels[index] else ""
+        levels.append(f"[{label}]={field}" if label and label != field and len(defs) > 1
+                      else field)
+
+    result: Dict[str, Any] = {}
+    kind = str(grouping or "N").upper()[:1]
+    if kind == "H" and len(defs) > 1:
+        body, suffix = " > ".join(levels), " (drill-down)"
+    elif kind == "C" and len(defs) > 1:
+        body, suffix = " | ".join(levels), " (cyclic)"
+    elif defs and defs[0].startswith("="):
+        body, suffix = " ".join(defs[0].split()), " (calculated)"
+        if len(body) > MASTER_DIMENSION_EXPRESSION_CHARS:
+            body = body[:MASTER_DIMENSION_EXPRESSION_CHARS] + "..."
+            result["expression_truncated"] = True
+    else:
+        body, suffix = ", ".join(levels), ""
+    result["definition"] = f"{name} = {body}{suffix}" if body else name
+    if defs and not defs[0].startswith("="):
+        result["fields"] = defs
+    return result
+
 
 class EngineSheetsMixin:
     def get_script(self, app_handle: int) -> str:
@@ -93,15 +135,24 @@ class EngineSheetsMixin:
 
         Both lists come back in one round trip, and an app with no library
         answers with two empty lists rather than an error.
+
+        A dimension has no `qDef` expression; its body is `qFieldDefs`,
+        `qFieldLabels` and `qGrouping`. Reading `/qDim/qDef` returned an
+        empty expression for every dimension, and the name people see
+        ("Trader") often differs from the field it stands for
+        (`TraderName`), so the model could not connect the two. Each
+        dimension therefore carries a `definition` line: `name = field`.
         """
         wanted = [
             ("measures", "MeasureList", "qMeasureListDef", "qMeasureList",
-             "qMeasure"),
+             {"expression": "/qMeasure/qDef"}),
             ("dimensions", "DimensionList", "qDimensionListDef",
-             "qDimensionList", "qDim"),
+             "qDimensionList", {"field_defs": "/qDim/qFieldDefs",
+                                "field_labels": "/qDim/qFieldLabels",
+                                "grouping": "/qDim/qGrouping"}),
         ]
         library: Dict[str, Any] = {"measures": [], "dimensions": []}
-        for key, kind, definition_key, layout_key, body_key in wanted:
+        for key, kind, definition_key, layout_key, body_paths in wanted:
             object_id = f"library-{key}"
             definition = {
                 "qInfo": {"qId": object_id, "qType": kind},
@@ -110,7 +161,7 @@ class EngineSheetsMixin:
                     "qData": {"title": "/qMetaDef/title",
                               "description": "/qMetaDef/description",
                               "tags": "/qMetaDef/tags",
-                              "expression": f"/{body_key}/qDef"},
+                              **body_paths},
                 },
             }
             try:
@@ -126,9 +177,14 @@ class EngineSheetsMixin:
                 entry = {
                     "name": (data.get("title") or meta.get("title")
                              or "").strip(),
-                    "expression": str(data.get("expression") or "").strip(),
                     "id": (item.get("qInfo") or {}).get("qId", ""),
                 }
+                if key == "measures":
+                    entry["expression"] = str(data.get("expression") or "").strip()
+                else:
+                    entry.update(describe_master_dimension(
+                        entry["name"], data.get("field_defs"),
+                        data.get("field_labels"), data.get("grouping")))
                 description = (data.get("description")
                                or meta.get("description") or "").strip()
                 if description:
@@ -137,7 +193,7 @@ class EngineSheetsMixin:
                                              or meta.get("tags") or []) if tag]
                 if tags:
                     entry["tags"] = tags
-                if entry["name"] or entry["expression"]:
+                if entry["name"] or entry.get("expression") or entry.get("definition"):
                     library[key].append(entry)
         return library
 

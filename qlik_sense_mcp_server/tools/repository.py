@@ -165,7 +165,9 @@ def get_about() -> str:
 
     Returns:
         `library` - the measures and dimensions this app defines, with
-        their expressions and descriptions. Reach for them before
+        their expressions and descriptions; a dimension comes as a
+        `definition` line, `name = field`, `name = A > B` for a drill-down
+        or `name = A | B` for a cyclic group. Reach for them before
         assembling an aggregation by hand: `engine_query` takes
         {"measures": [{"master": "<name>"}]}.
         `buildVersion`, `buildDate`, `databaseProvider`, `nodeType`,
