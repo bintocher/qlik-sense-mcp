@@ -108,7 +108,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `plain_key_values` or `belong_to_values`, and `repeating_tables` - the
   calendars that do repeat) and a warning that
   leads `warnings`, per query and at the top of the reply, with the
-  condition for one row per date where one was found. Measured on a
+  condition for one row per date where one was found, each statement and
+  each condition once (a refusal for two measures grouped by month said
+  the filter twice and the condition three times, 1665 characters against
+  889 now). Measured on a
   1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a
   cumulative calendar gave a month's GGR of 38.3 billion against
   2 905 309 486 with no warning, the fan-out check running for periods

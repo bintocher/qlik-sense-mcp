@@ -20,6 +20,7 @@ import uuid
 from ..utils import bare_field_name, escape_qlik_field_name
 from .canonical import canonical_expression
 from .filters import _parse_bound, _set_identifier, _too_much
+from .fan_out_text import fan_out_notes, fan_out_public
 from .layers import layer_text, repeating_path
 from .outer_set import (FILTER_MARKER, FilterPlacementError,
                         element_set_warning, repeated_conditions,
@@ -1580,11 +1581,11 @@ class EngineQueriesMixin:
                 f"{' and '.join(tables)}, whose dates repeat, and the measures "
                 f"do not keep one row per date: each row sums every layer its "
                 f"value stands for (cumulative, as-of or shifted rows), not "
-                f"that value alone. "
-                + " ".join(layer_text(layer) for layer in probe["layers"]))
+                f"that value alone.")
         return {"field": probe["field"], "grouped_by": True,
                 "table": probe["link"]["table"], "key": probe["link"]["key"],
-                "repeating_tables": tables, "note": note}
+                "repeating_tables": tables, "note": note,
+                "_layers": [layer_text(layer) for layer in probe["layers"]]}
 
     @staticmethod
     def _read_spread(probe: Dict[str, Any],
@@ -1652,11 +1653,9 @@ class EngineQueriesMixin:
             f"{key}{span}, {compared}: {shown}, so the value stands for "
             f"dates outside it (cumulative, as-of or shifted rows). The "
             f"figures cover more than the value named.")
-        layers = [layer_text(layer) for layer in probe.get("layers") or []
-                  if layer.get("plain")
-                  and layer["table"] in spread["repeating_tables"]]
-        if layers:
-            spread["note"] += " " + " ".join(layers)
+        spread["_layers"] = [layer_text(layer) for layer in probe.get("layers") or []
+                             if layer.get("plain")
+                             and layer["table"] in spread["repeating_tables"]]
         return spread
 
     def _cube_checks(self, app_handle: int, measures: List[Dict[str, Any]],
@@ -2006,7 +2005,7 @@ class EngineQueriesMixin:
             # 1.16-billion-row app), unless the caller accepts it.
             if plan.get("fan_out_check") and not plan.get("accept_fan_out"):
                 plan["error"] = (
-                    " ".join(spread["note"] for spread in plan["fan_out_check"])
+                    " ".join(fan_out_notes(plan["fan_out_check"]))
                     + " Not computed: add the condition for one row per date, "
                       "or set accept_fan_out to compute it as written.")
                 plan["error_category"] = "fan_out"
@@ -2141,8 +2140,8 @@ class EngineQueriesMixin:
         # did not reach a measure, or reached more dates than it named.
         alarms = []
         for plan in plans:
-            for spread in plan.get("fan_out_check", []):
-                alarms.append(f"{plan.get('id')}: {spread['note']}")
+            for note in fan_out_notes(plan.get("fan_out_check", [])):
+                alarms.append(f"{plan.get('id')}: {note}")
             for check in plan.get("period_check", []):
                 if check.get("filter_applied") is False:
                     alarms.append(f"{plan.get('id')}: {check['note']}")
@@ -2278,9 +2277,7 @@ class EngineQueriesMixin:
                               "invalid_expressions", "available_columns",
                               "available_values", "note")}
             if plan.get("error_category") == "fan_out":
-                reply["fan_out_check"] = [
-                    {k: v for k, v in spread.items() if k != "note"}
-                    for spread in plan.get("fan_out_check", [])]
+                reply["fan_out_check"] = fan_out_public(plan.get("fan_out_check", []))
             return reply
         if cube is None or shaped is None:
             return {"id": plan.get("id"),
@@ -2315,7 +2312,7 @@ class EngineQueriesMixin:
             )
         # First: a figure over more dates than asked for looks as right as
         # any other.
-        warnings[:0] = [spread["note"] for spread in plan.get("fan_out_check", [])]
+        warnings[:0] = fan_out_notes(plan.get("fan_out_check", []))
         for check in plan.get("period_check", []):
             if check.get("fan_out"):
                 warnings.append(check["fan_out"]["note"])
@@ -2411,9 +2408,7 @@ class EngineQueriesMixin:
         if plan.get("period_check"):
             reply["period_check"] = plan["period_check"]
         if plan.get("fan_out_check"):
-            reply["fan_out_check"] = [
-                {k: v for k, v in spread.items() if k != "note"}
-                for spread in plan["fan_out_check"]]
+            reply["fan_out_check"] = fan_out_public(plan["fan_out_check"])
         if shaped["offset"] + len(rows) < total_rows:
             reply["has_more"] = True
             reply["next_offset"] = shaped["offset"] + len(rows)

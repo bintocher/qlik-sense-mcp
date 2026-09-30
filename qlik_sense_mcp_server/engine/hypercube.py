@@ -12,6 +12,7 @@ from ..config import (
 from ..utils import bare_field_name, escape_qlik_field_name
 from .canonical import canonical_expression
 # Where a described filter is written into a hand-written expression.
+from .fan_out_text import fan_out_notes, fan_out_public
 from .outer_set import (FILTER_MARKER as _FILTER_MARKER, FilterPlacementError,
                         element_set_warning, filter_limits, has_marker,
                         repeated_conditions, repeated_notes,
@@ -1047,14 +1048,13 @@ class EngineHypercubeMixin:
                 timings["checks_seconds"] = round(time.monotonic() - t_step, 3)
             if checks.get("fan_out_check") and not accept_fan_out:
                 return {
-                    "error": " ".join(spread["note"] for spread in checks["fan_out_check"])
+                    "error": " ".join(fan_out_notes(checks["fan_out_check"]))
                              + " Not computed: add the condition for one row per "
                                "date, or pass accept_fan_out=true to compute it as "
                                "written.",
                     "error_category": "fan_out",
                     "failed_step": "checks",
-                    "fan_out_check": [{k: v for k, v in spread.items() if k != "note"}
-                                      for spread in checks["fan_out_check"]],
+                    "fan_out_check": fan_out_public(checks["fan_out_check"]),
                     "timings": timings,
                 }
 
@@ -1210,7 +1210,7 @@ class EngineHypercubeMixin:
                 )
 
             # What the checks before the cube said, first among the warnings.
-            alarms =[spread["note"] for spread in checks.get("fan_out_check", [])]
+            alarms = fan_out_notes(checks.get("fan_out_check", []))
             for check in checks.get("period_check", []):
                 if check.get("filter_applied") is False:
                     alarms.append(check["note"])
@@ -1279,9 +1279,7 @@ class EngineHypercubeMixin:
             if checks.get("period_check"):
                 response["period_check"] = checks["period_check"]
             if checks.get("fan_out_check"):
-                response["fan_out_check"] = [
-                    {k: v for k, v in spread.items() if k != "note"}
-                    for spread in checks["fan_out_check"]]
+                response["fan_out_check"] = fan_out_public(checks["fan_out_check"])
             if include_raw_layout:
                 # Opt-in: the full qHyperCube (qDimensionInfo, qMeasureInfo,
                 # qDataPages with qElemNumber/qState per cell). Costs several

@@ -107,7 +107,7 @@ class TestTheWarning:
         assert note.startswith("The filter on [Month] ('2026-08') reaches Facts "
                                "through 13 values of [MonthKey]")
         assert "Accumulated holds 669 rows for 21 dates of MonthKey" in note
-        assert "{<[Layer]={'Month'}>}" in note
+        assert "{<[Layer]={'Month'}>}" in " ".join(reply["warnings"])
         assert result["warnings"][0].startswith("q1: The filter on [Month]")
         assert reply["numbers_verified"] is False
 
@@ -167,6 +167,20 @@ class TestTheWarning:
         assert answered["rows"]
         layouts = [b for b in engine.batches if b[0] == "GetLayout"]
         assert layouts == [["GetLayout"]]
+
+    def test_the_refusal_says_each_thing_once(self):
+        """Live, a refusal for two measures grouped by month repeated the
+        statement about the filter twice and the plain rows three times."""
+        engine = _SpreadEngine()
+        engine.known.update({"Flag", "Kind"})
+        reply = engine.run_queries(1, "app", [_query(
+            group_by=["Month"], metrics=[],
+            measures=[{"expression": "Sum({filter} {<Flag={1}>} Amount)", "label": "A"},
+                      {"expression": "Sum({filter} {<Kind={2}>} Amount)", "label": "B"}],
+            filters=[{"field": "Month", "values": ["2026-08"]}])])["results"][0]
+        sentences = [s for s in reply["error"].split(". ") if s]
+        assert len(sentences) == len(set(sentences))
+        assert reply["error"].count("One row per date") == 1
 
     def test_a_hypercube_that_fans_out_is_not_computed(self):
         engine = _SpreadEngine()
