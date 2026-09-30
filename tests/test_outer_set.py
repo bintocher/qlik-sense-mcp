@@ -212,3 +212,43 @@ class TestRepeatedCondition:
     def test_a_repeat_next_to_the_marker_is_merged_not_refused(self):
         assert place_filter("Sum({filter} {<Flag={1}>} A)", "{<[Flag]={1},[Region]={'N'}>}") == (
             "Sum({<[Region]={'N'},Flag={1}>} A)")
+
+
+class _SheetEngine(_LibraryEngine):
+    """Sheets that show "Revenue" as "Turnover", and "Mixed" for both."""
+
+    def published_sheets(self, app_handle):
+        return [{"id": "s1", "objects": [
+            {"measures": [{"master_id": "m1", "master_name": "Revenue", "label": "Turnover"},
+                          {"master_id": "m1", "label": "Mixed"}]},
+            {"children": [{"measures": [{"master_id": "m2", "label": "Mixed"}]}]},
+            {"measures": [{"expression": "sum( {<Flag={1}>}Amount )", "label": "Stakes"}]},
+        ]}], "approved sheets"
+
+
+class TestSheetLabels:
+    """A model asked for "Turnover", the label on every sheet, of a measure
+    the library names otherwise, and was told there is none."""
+
+    def test_a_sheet_label_finds_the_library_measure(self):
+        engine = _SheetEngine()
+        engine.known.update({"Revenue", "Flag"})
+        reply = engine.run_queries(1, "app", [_query(
+            metrics=[], measures=[{"master": "turnover"}])])["results"][0]
+        assert reply["columns"][-1] == "turnover"
+        assert "library measure 'Revenue' under that label" in reply["notes"][0]
+
+    def test_a_sheet_formula_that_is_a_library_measure_finds_it(self):
+        """Live the sheets write the library measure's own text under
+        their label rather than naming it."""
+        engine = _SheetEngine()
+        engine.known.update({"Revenue", "Flag"})
+        reply = engine.run_queries(1, "app", [_query(
+            metrics=[], measures=[{"master": "Stakes"}])])["results"][0]
+        assert "library measure 'Revenue'" in reply["notes"][0]
+
+    def test_a_label_on_two_measures_names_both(self):
+        reply = _SheetEngine().run_queries(1, "app", [_query(
+            metrics=[], measures=[{"master": "Mixed"}])])["results"][0]
+        assert reply["error_category"] == "not_found"
+        assert "'All time', 'Revenue'" in reply["error"]

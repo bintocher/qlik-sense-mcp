@@ -14,6 +14,7 @@ plausible number rather than an error.
 
 import json
 import logging
+import re
 import time
 import uuid
 
@@ -382,6 +383,12 @@ MAX_CONTEXTS_PER_FILTER = 4
 MAX_SPREAD_CHECKS = 4
 
 
+def _same_text(expression: Any) -> str:
+    """An expression as compared with another: case, spaces and a leading
+    `=` do not make two expressions different."""
+    return re.sub(r"\s+", "", str(expression or "")).lstrip("=").casefold()
+
+
 def _in_context(context, function: str, field: str, distinct: bool = False,
                 wrap: str = "") -> str:
     """`={outer} wrap(function({inner} [DISTINCT] field))`: an aggregation
@@ -544,6 +551,15 @@ class EngineQueriesMixin:
                for m in query.get("measures") or []):
             reader = getattr(self, "_library_for", None)
             library = reader(app_handle, app_id) if reader else {}
+            known = {str(item.get("name", "")).strip().casefold()
+                     for item in library.get("measures") or []} | {
+                item.get("id") for item in library.get("measures") or []}
+            wanted = [str(m["master"]).strip() for m in query.get("measures") or []
+                      if isinstance(m, dict) and m.get("master")]
+            if any(name.casefold() not in known and name not in known
+                   for name in wanted):
+                library = dict(library, aliases=self._aliases(
+                    self._sheet_labels(app_handle), library))
             sizes = getattr(self, "_search_model", None)
             field_names = set(sizes(app_handle)) if sizes else set()
         measures, error = self._build_measures(
@@ -1078,6 +1094,7 @@ class EngineQueriesMixin:
         # engine_create_hypercube.
         for measure in query.get("measures") or []:
             master = None
+            alias_note = None
             if isinstance(measure, str):
                 measure = {"expression": measure}
             if isinstance(measure, dict) and measure.get("master"):
@@ -1088,9 +1105,28 @@ class EngineQueriesMixin:
                      if item.get("name", "").strip().casefold()
                      == wanted.casefold()
                      or item.get("id") == wanted), None)
+                # The name a sheet shows for a library measure: "Turnover"
+                # on the sheets for a measure the library calls "Settled
+                # stakes". One library measure behind the label is taken.
+                aliases = (known.get("aliases") or {}).get(wanted.casefold()) or []
+                alias_note = None
+                if found is None and len(aliases) == 1:
+                    found = next((item for item in known.get("measures") or []
+                                  if item.get("id") == aliases[0]), None)
+                    if found is not None:
+                        alias_note = (
+                            f"No library measure is named {wanted!r}; the "
+                            f"sheets show library measure "
+                            f"{found.get('name')!r} under that label, and it "
+                            f"was used.")
                 if found is None:
+                    named = sorted({str(item.get("name")) for item in known.get("measures") or []
+                                    if item.get("id") in aliases})
                     return [], {"id": query_id, "error": (
-                        f"This app defines no measure named {wanted!r}."),
+                        f"This app defines no measure named {wanted!r}."
+                        + (f" The sheets use that label for library measures "
+                           + ", ".join(repr(n) for n in named) + "; name one."
+                           if named else "")),
                         "error_category": "not_found",
                         "available_values": sorted(
                             item.get("name", "")
@@ -1102,7 +1138,8 @@ class EngineQueriesMixin:
                 # it asked for.
                 master = found
                 measure = dict(measure, expression=found["expression"],
-                               label=measure.get("label") or found["name"])
+                               label=measure.get("label")
+                               or (wanted if alias_note else found["name"]))
                 measure.pop("master", None)
             if not isinstance(measure, dict):
                 return [], {"id": query_id, "error": (
@@ -1168,7 +1205,7 @@ class EngineQueriesMixin:
                     "hint": ("Add `filters`, or drop the marker — Qlik has no "
                              "meaning for it and would read it as text.")}
             warnings = []
-            notes = []
+            notes = [alias_note] if alias_note else []
             # The sets each aggregation of the measure reads through, as
             # written: what the checks after the query ask about.
             contexts = set_contexts(master["expression"] if master is not None
@@ -1188,7 +1225,7 @@ class EngineQueriesMixin:
                     warnings = limit_warnings(
                         master.get("name", ""),
                         filter_limits(master["expression"]), stated, repeated)
-                    notes = repeated_notes(master.get("name", ""), repeated)
+                    notes += repeated_notes(master.get("name", ""), repeated)
                     contexts = set_contexts(
                         in_front(own, master["expression"]))
                 elif not has_marker(expression):
@@ -1657,6 +1694,70 @@ class EngineQueriesMixin:
                              if layer.get("plain")
                              and layer["table"] in spread["repeating_tables"]]
         return spread
+
+    @staticmethod
+    def _aliases(labels: Dict[str, List[str]],
+                 library: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Sheet labels to the library measures they stand for: the ones an
+        object names by id, and the ones whose text a formula repeats."""
+        by_text = {_same_text(item.get("expression", "")): item.get("id")
+                   for item in library.get("measures") or []}
+        aliases: Dict[str, List[str]] = {}
+        for label, ids in labels.items():
+            resolved = []
+            for entry in ids:
+                found = by_text.get(entry[5:]) if entry.startswith("expr:") else entry
+                if found and found not in resolved:
+                    resolved.append(found)
+            if resolved:
+                aliases[label] = resolved
+        return aliases
+
+    def _sheet_labels(self, app_handle: int) -> Dict[str, List[str]]:
+        """Labels the author's sheets give library measures, to their ids.
+
+        Read from the sheets' definitions only when a measure is asked for
+        by a name the library lacks, and remembered per app. Measured: a
+        model asked for "Turnover", the name every sheet shows, of a
+        measure the library calls otherwise, and was told there is none.
+        """
+        cache_for = getattr(self, "_app_cache", None)
+        cache = cache_for("_sheet_labels") if cache_for else {}
+        if "labels" in cache:
+            return cache["labels"]
+        labels: Dict[str, List[str]] = {}
+        reader = getattr(self, "published_sheets", None)
+        try:
+            sheets = reader(app_handle)[0] if reader else []
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not read the sheets for measure labels: %s", exc)
+            return {}
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                label = str(node.get("label") or "").strip().casefold()
+                if label and node.get("master_id"):
+                    ids = labels.setdefault(label, [])
+                    if node["master_id"] not in ids:
+                        ids.append(node["master_id"])
+                elif label and isinstance(node.get("expression"), str) and node["expression"]:
+                    # A formula written on the sheet under the label; it
+                    # names a library measure when it is that measure's text.
+                    ids = labels.setdefault(label, [])
+                    written = "expr:" + _same_text(node["expression"])
+                    if written not in ids:
+                        ids.append(written)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(sheets)
+        cache["labels"] = labels
+        return labels
 
     def _cube_checks(self, app_handle: int, measures: List[Dict[str, Any]],
                      dimensions: Optional[List[Dict[str, Any]]] = None

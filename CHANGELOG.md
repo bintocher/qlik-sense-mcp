@@ -336,11 +336,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   found", the third worked. The calls ran one after the other under the
   Engine lock, and two calls sent at once are served one after the other
   as before; a timeout or a wrong query is not repeated.
-- A range on a text field whose values sort as text - months written `2026-08`
-  - is the list of its values between the bounds (`form: "text values"`,
+- A range on a text field whose values sort as text, such as months
+  written `2026-08`, is the list of its values between the bounds (`form: "text values"`,
   at most 1000 values read); it was refused as "neither dates nor
   numbers". Measured on a 1.16-billion-row app: months `2026-07` to
   `2026-08` with the plain rows gave GGR 3 311 116 219 and 2 905 309 486.
+- `{"master": "<name>"}` in `engine_query` also finds a library measure by
+  the label the author's sheets show for it: an object naming it by id, or
+  a formula on a sheet that is its very text. The reply says so in
+  `notes`; a label that stands for two library measures names both. The
+  sheets are read only on such a miss, once per app. Measured on a
+  1.16-billion-row app: "Оборот", the sheets' label for the library
+  measure of settled stakes, answered 34 228 244 489 for August 2026; it
+  was "no measure named" before.
 
 ## [2.3.1] - 2026-09-25
 
