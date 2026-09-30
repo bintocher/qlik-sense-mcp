@@ -13,6 +13,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from ..engine.objects import fields_in_expression, measure_text
+from ..engine.outer_set import filter_limits
 
 # A table this large next to the largest one of its group is a fact table
 # too: a second fact (bets beside their settlements) links to the first
@@ -317,6 +318,12 @@ def measure_entries(measures: Iterable[Dict[str, Any]], model_fields: Set[str],
         if used:
             entry["fields"] = used
         entry["expression"] = expression
+        # What keeps a filter from reaching the measure, known before the
+        # measure is asked for: the fields it sets itself, a set of its own
+        # that ignores an outer one, a `$(=...)` computed before the cube.
+        limits = filter_limits(m.get("expression", ""))
+        if limits:
+            entry["filter_limits"] = limits
         entry["_id"] = m.get("id")
         _cut_expression(entry, limit)
         index[m["name"]] = entry

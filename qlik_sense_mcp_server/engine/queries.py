@@ -19,6 +19,9 @@ import uuid
 
 from ..utils import bare_field_name, escape_qlik_field_name
 from .filters import _set_identifier, _too_much
+from .outer_set import (FILTER_MARKER, filter_limits, in_front,
+                        limit_warnings, marks_outer, master_reference,
+                        place_filter)
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -288,11 +291,6 @@ OPERATIONS = {
     "subtract": " - ",
 }
 
-# Where a described filter goes inside an expression the caller wrote. The
-# same marker `engine_create_hypercube` uses, so the two tools ask for the
-# same thing.
-FILTER_MARKER = "{filter}"
-
 # Queries one call may carry. The batch is sent to Engine before the first
 # reply is read and every query holds a session object until the batch
 # ends, so an unbounded list would hold the single shared socket, and the
@@ -415,16 +413,27 @@ class EngineQueriesMixin:
             return reply
         modifier = built.get("modifier", "")
 
-        # The library is read only when a measure is named from it.
+        # The library is read only when a measure is named from it, and
+        # the field names with it: a label that is also a field name is
+        # written as the measure's expression instead.
         library = None
+        field_names = None
         if any(isinstance(m, dict) and m.get("master")
                for m in query.get("measures") or []):
             reader = getattr(self, "_library_for", None)
             library = reader(app_handle, app_id) if reader else {}
+            sizes = getattr(self, "_search_model", None)
+            field_names = set(sizes(app_handle)) if sizes else set()
         measures, error = self._build_measures(
-            query, modifier, query_id, slice_for, library=library)
+            query, modifier, query_id, slice_for, library=library,
+            applied=built.get("applied", []), field_names=field_names)
         if error:
             return error
+        # What keeps a filter from reaching a measure is said before the
+        # figures, like every other reason not to trust them.
+        measure_warnings = []
+        for measure in measures:
+            measure_warnings.extend(measure.pop("warnings", None) or [])
         if not measures:
             return {"id": query_id, "error": (
                 f"Query {query_id!r} asks for no measure."),
@@ -451,6 +460,7 @@ class EngineQueriesMixin:
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
+            **({"warnings": measure_warnings} if measure_warnings else {}),
         }
 
     @staticmethod
@@ -848,7 +858,8 @@ class EngineQueriesMixin:
 
     @staticmethod
     def _build_measures(query: Dict[str, Any], modifier: str, query_id: str,
-                        slice_for=None, library=None
+                        slice_for=None, library=None, applied=None,
+                        field_names=None
                         ) -> "tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]":
         """Write one Qlik expression per metric.
 
@@ -940,6 +951,7 @@ class EngineQueriesMixin:
         # expression marks where it goes, exactly as in
         # engine_create_hypercube.
         for measure in query.get("measures") or []:
+            master = None
             if isinstance(measure, str):
                 measure = {"expression": measure}
             if isinstance(measure, dict) and measure.get("master"):
@@ -959,6 +971,10 @@ class EngineQueriesMixin:
                             for item in known.get("measures") or [])[:20],
                         "hint": ("The library of the app is in "
                                  "get_app_details under `measures`.")}
+                # Named as the library names it now, by its id: a measure
+                # renamed since the caller read the list is still the one
+                # it asked for.
+                master = found
                 measure = dict(measure, expression=found["expression"],
                                label=measure.get("label") or found["name"])
                 measure.pop("master", None)
@@ -1020,16 +1036,33 @@ class EngineQueriesMixin:
                     "error_category": "invalid_argument",
                     "hint": ("Add `filters`, or drop the marker — Qlik has no "
                              "meaning for it and would read it as text.")}
+            warnings = []
             if own:
-                if FILTER_MARKER not in expression:
+                stated = [record.get("field") for _, record in _narrowings(
+                    own_applied if own_applied is not None else applied, own)
+                    if record.get("field")]
+                if master is not None:
+                    # A master measure takes the filter as an outer set in
+                    # front of its name: the library's own expression runs
+                    # as written, and whatever it sets itself says so.
+                    expression = in_front(own, master_reference(
+                        master.get("name", ""), master["expression"],
+                        field_names))
+                    warnings = limit_warnings(
+                        master.get("name", ""),
+                        filter_limits(master["expression"]), stated)
+                elif FILTER_MARKER not in expression:
                     return [], {"id": query_id, "error": (
                         f"Measure {expression!r} is written by hand and this "
                         f"query has filters, but the expression does not say "
                         f"where the filter goes."),
                         "error_category": "invalid_argument",
                         "next_actions": [
-                            "write the marker inside the aggregation the "
-                            "filter narrows: \"Sum({filter} Amount)\"",
+                            "put the marker in front of the whole expression, "
+                            "and the filter reaches every aggregation in it: "
+                            "\"{filter} Sum(Amount) / Count(OrderId)\"",
+                            "or inside the one aggregation it narrows: "
+                            "\"Sum({filter} Amount)\"",
                             "or state the measure as a metric: "
                             '{"field": "Amount", "agg": "sum"}',
                         ],
@@ -1038,7 +1071,12 @@ class EngineQueriesMixin:
                             "every row while the reply said the period had "
                             "been applied."
                         )}
-                expression = expression.replace(FILTER_MARKER, own)
+                else:
+                    if marks_outer(expression):
+                        warnings = limit_warnings(
+                            str(measure.get("label") or expression),
+                            filter_limits(expression), stated)
+                    expression = place_filter(expression, own)
             written = {"expression": expression,
                        "label": str(measure.get("label") or expression)}
             if own_applied is not None:
@@ -1046,6 +1084,8 @@ class EngineQueriesMixin:
                 written["modifier"] = own
             if own_scope:
                 written["scope"] = own_scope
+            if warnings:
+                written["warnings"] = warnings
             oversized = _too_long(written["expression"], query_id)
             if oversized:
                 return [], oversized

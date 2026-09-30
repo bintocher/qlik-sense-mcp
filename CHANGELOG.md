@@ -49,6 +49,26 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   objects and 20 formulas.
 - Field names starting with `%` (`%Issue_ID`) are read whole from
   expressions, and `NODISTINCT` is no longer taken for a field.
+- Filters reach master measures. `engine_query` with `{"master": "<name>"}`
+  and `filters` writes the filter as an outer set in front of the measure,
+  `{&<filter>} [<name>]`, the measure found in the library by its id under
+  its current name (by its expression in parentheses when the label is
+  also a field name); before, such a query was refused. In
+  `engine_create_hypercube` and in hand-written `engine_query` measures a
+  `{filter}` marker at the start of the expression is an outer set that
+  reaches every aggregation inside, `{filter} [A] / [B]` or
+  `{filter} (expression)`; an expression that starts with its own outer
+  set keeps it after the filter. Measured on a 1.16-billion-row app: the
+  outer set over a master measure, over its expression in parentheses and
+  over a ratio measure answered the reference figures exactly, and a chain
+  of two outer sets applied left to right. A hypercube-wide
+  `qContextSetExpression` gave the same figures but cannot differ per
+  measure, so the outer set is used. The measure's expression is read for
+  what keeps a filter out, and the reply's `warnings` name the measure: a
+  filtered field it sets itself (its own condition wins - measured), a set
+  of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark), and
+  `$(=...)`, computed before the filter. `get_app_details` gives the same as
+  `measures[].filter_limits`.
 
 ### Changed
 

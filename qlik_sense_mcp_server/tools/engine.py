@@ -421,12 +421,14 @@ def engine_query(
             optional "id". Use it for several independent questions at
             once. When present, the single-query arguments are ignored.
         measures: an escape hatch inside a query, for one expression this
-            vocabulary cannot state — `[{"expression": "Sum({filter} A) / "
-            "Count({filter} B)", "label": "AOV"}]`. With `filters`, the
-            expression must mark where the filter goes: a set modifier
-            narrows the aggregation it sits in, and only the author knows
-            which one that is. Without the marker the query is refused
-            rather than answered with an unfiltered number.
+            vocabulary cannot state — `[{"expression": "{filter} Sum(A) / "
+            "Count(B)", "label": "AOV"}]`. With `filters`, the expression
+            must mark where the filter goes. In front of the whole
+            expression, `{filter} (...)`, it is an outer set and reaches
+            every aggregation inside; inside one aggregation,
+            `Sum({filter} A)`, it narrows that one alone. Without the marker
+            the query is refused rather than answered with an unfiltered
+            number.
 
     RETURNS
         `results`, one entry per query, each with `id`, `columns`, `rows`
@@ -451,6 +453,14 @@ def engine_query(
         by hand risks a neighbouring field or a different aggregation -
         an answer that looks reasonable and is not the one anyone here
         would recognise.
+
+        With `filters`, the filter goes in front of the measure as an outer
+        set - `{&<period>} [Sales MUSD]` - and reaches every aggregation in
+        it. Three things keep it out, and `warnings` names the measure when
+        one applies (`filter_limits` in `get_app_details` says so in
+        advance): a field the measure sets itself (its own condition wins),
+        a set of its own with an identifier (`{1<...>}`, `{$<...>}`, a
+        bookmark), and `$(=...)`, computed before the filter.
 
     SETS
         `scope` says what a query counts over before any filter narrows
@@ -607,9 +617,21 @@ def engine_create_hypercube(
                            "label": "Revenue"}],
              "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-        The marker `{filter}` is required with `filters`, because a set
-        modifier narrows the aggregation it sits in and only the author of
-        the expression knows which one that is.
+        The marker `{filter}` is required with `filters`. Put it in front
+        of the whole expression and it is an outer set, which reaches every
+        aggregation inside, master measures named by label included:
+
+            {"measures": [{"expression": "{filter} [Revenue] / [Orders]",
+                           "label": "AOV"}],
+             "filters": [{"field": "OrderDate", "period": "2024"}]}
+
+        An expression that starts with its own outer set keeps it after the
+        filter - `{filter} {<Flag={1}>} Fractile(...)` - and wins on any
+        field both name. Inside one aggregation, `Sum({filter} Amount)`,
+        the marker narrows that aggregation alone. `warnings` says when the
+        expression sets a filtered field itself, counts over a set with an
+        identifier (`{1<...>}`), or holds `$(=...)`: the filter does not
+        reach that part.
 
         Or write the set analysis yourself:
 

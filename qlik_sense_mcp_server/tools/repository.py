@@ -239,6 +239,11 @@ def get_app_details(app_id: Optional[str] = None, name: Optional[str] = None) ->
         and `variants` - measures named "<name> Y-1", "<name> YoY, %",
         "<name>, %" folded under their base, by exact name. `engine_query`
         computes any of them by name: {"measures": [{"master": "<name>"}]}.
+        `filter_limits` says what keeps a filter from reaching a measure:
+        `fields` it sets itself (its own condition wins over a filter on
+        them), `own_set` - identifiers of its sets that ignore a filter
+        written in front of them (`1`, `$`, a bookmark), `computed_first` -
+        it holds `$(=...)`, computed before any filter.
         `usage` - how the author's sheets use the model (the approved
         sheets of a published app, every sheet of an unpublished one; read
         from definitions, nothing calculated): per field, in how many

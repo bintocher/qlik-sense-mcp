@@ -10,15 +10,15 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 from ..utils import bare_field_name, escape_qlik_field_name
+# Where a described filter is written into a hand-written expression.
+from .outer_set import (FILTER_MARKER as _FILTER_MARKER, filter_limits,
+                        limit_warnings, marks_outer, place_filter)
 from typing import Dict, List, Any, Optional
 import logging
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
-
-# Where a described filter is written into a hand-written expression.
-_FILTER_MARKER = "{filter}"
 
 
 MAX_EXPRESSION_CHARS = 20000
@@ -690,6 +690,7 @@ class EngineHypercubeMixin:
             # author of the expression knows which aggregation that is —
             # hence the marker rather than a guess.
             filters_applied: List[Dict[str, Any]] = []
+            outer_warnings: List[str] = []
             if filters:
                 step = "filters"
                 built = self.build_filters(
@@ -699,11 +700,22 @@ class EngineHypercubeMixin:
                     built.setdefault("failed_step", "filters")
                     return built
                 marker_used = False
+                stated = [record.get("field") for record in
+                          built.get("applied", []) or []
+                          if isinstance(record, dict) and record.get("field")]
                 for measure in converted_measures:
                     expression = measure.get("expression") or ""
                     if _FILTER_MARKER in expression:
-                        measure["expression"] = expression.replace(
-                            _FILTER_MARKER, built["modifier"])
+                        # In front of the whole expression the marker is an
+                        # outer set: it reaches every aggregation inside,
+                        # master measures named by label included, and what
+                        # the expression sets itself says so.
+                        if marks_outer(expression):
+                            outer_warnings.extend(limit_warnings(
+                                str(measure.get("label") or expression),
+                                filter_limits(expression), stated))
+                        measure["expression"] = place_filter(
+                            expression, built["modifier"])
                         marker_used = True
                 if not marker_used:
                     return {
@@ -714,7 +726,11 @@ class EngineHypercubeMixin:
                         "error_category": "invalid_argument",
                         "failed_step": "filters",
                         "next_actions": [
-                            "write the marker inside the aggregation: "
+                            "put the marker in front of the whole "
+                            "expression: \"{filter} Sum(Amount) / "
+                            "Count(OrderId)\" or \"{filter} [Master "
+                            "measure]\"",
+                            "or inside one aggregation: "
                             "\"Sum({filter} Amount)\"",
                             "or call engine_query, which writes the whole "
                             "expression for you",
@@ -1103,7 +1119,7 @@ class EngineHypercubeMixin:
             temporal_columns = self._temporal_columns(hypercube)
             rows = self._matrix_to_rows(initial_pages, column_names,
                                         temporal_columns)
-            warnings = list(input_warnings)
+            warnings = list(outer_warnings) + list(input_warnings)
             if not rows and converted_measures:
                 # No rows at all is the *strongest* version of the same
                 # signal, and `suppress_zero` turns a table of zeros into
