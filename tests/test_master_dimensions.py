@@ -91,3 +91,34 @@ class TestLibrary:
         assert [d["definition"] for d in library["dimensions"]] == [
             "Trader = TraderName", "Geography = Country > City (drill-down)"]
         assert all("expression" not in d for d in library["dimensions"])
+
+
+class _FlatteningEngine(_Engine):
+    """Engine as it really answers: a list's qData flattens an array to ""."""
+
+    def send_request(self, method, params=None, handle=None):
+        if handle == "library-measures":
+            return super().send_request(method, params, handle)
+        return {"qLayout": {"qDimensionList": {"qItems": [
+            {"qInfo": {"qId": "d1"}, "qData": {"title": "Trader", "field_defs": "",
+                                               "field_labels": "", "grouping": "N"}},
+            {"qInfo": {"qId": "d2"}, "qData": {"title": "Geography", "field_defs": "",
+                                               "field_labels": "", "grouping": "H"}},
+        ]}}}
+
+    def send_requests_pipelined(self, requests, raise_on_error=True):
+        if requests[0]["method"] == "GetDimension":
+            self.opened = [r["params"]["qId"] for r in requests]
+            return [{"qReturn": {"qHandle": i}} for i in range(len(requests))]
+        bodies = {"d1": {"qFieldDefs": ["TraderName"], "qGrouping": "N"},
+                  "d2": {"qFieldDefs": ["Country", "City"], "qGrouping": "H"}}
+        return [{"qProp": {"qMetaDef": {"title": {"d1": "Trader", "d2": "Geography"}[i]},
+                           "qDim": bodies[i]}} for i in self.opened]
+
+
+def test_dimensions_are_read_from_properties_when_the_list_flattens_them():
+    library = _FlatteningEngine().get_master_items(1)
+    assert [d["definition"] for d in library["dimensions"]] == [
+        "Trader = TraderName", "Geography = Country > City (drill-down)"]
+    assert library["dimensions"][1]["fields"] == ["Country", "City"]
+    assert all("_unread" not in d for d in library["dimensions"])

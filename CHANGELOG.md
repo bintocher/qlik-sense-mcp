@@ -89,6 +89,9 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `qFieldLabels` and `qGrouping` - `name = field`, `name = A > B (drill-down)`,
   `name = A | B (cyclic)`, or `name = =expr (calculated)` cut at 150
   characters with `expression_truncated` - plus `fields` for field-based ones.
+  A dimension list's `qData` resolves only scalar paths - `qFieldDefs`
+  comes back as `""` on a live server - so the fields are read from each
+  dimension's properties in one pipelined batch.
 - `get_app_sheet_objects` no longer calculates the sheet. It called
   `GetLayout` on every object, so Engine computed every chart, and on a
   large app a sheet ran past 300 seconds until the client dropped the MCP

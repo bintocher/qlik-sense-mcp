@@ -224,6 +224,12 @@ class EngineSheetsMixin:
                 }
                 if key == "measures":
                     entry["expression"] = str(data.get("expression") or "").strip()
+                elif not isinstance(data.get("field_defs"), list):
+                    # A list's qData resolves a path to a scalar only: an
+                    # array such as qFieldDefs comes back as "" (seen on
+                    # Qlik Sense November 2025). The body is read from the
+                    # dimension's own properties below.
+                    entry["_unread"] = True
                 else:
                     entry.update(describe_master_dimension(
                         entry["name"], data.get("field_defs"),
@@ -236,8 +242,18 @@ class EngineSheetsMixin:
                                              or meta.get("tags") or []) if tag]
                 if tags:
                     entry["tags"] = tags
-                if entry["name"] or entry.get("expression") or entry.get("definition"):
+                if entry["name"] or entry.get("expression") or entry.get("definition") \
+                        or entry.get("_unread"):
                     library[key].append(entry)
+        unread = [e for e in library["dimensions"] if e.pop("_unread", False)]
+        if unread:
+            read = {e["id"]: e for e in self._library_items_by_id(
+                app_handle, [e["id"] for e in unread], kinds=("dimensions",))["dimensions"]}
+            for entry in unread:
+                body = read.get(entry["id"]) or {}
+                entry.update({k: v for k, v in body.items()
+                              if k in ("definition", "fields", "expression_truncated")})
+                entry.setdefault("definition", entry["name"])
         return library
 
     def _get_sheet_objects_detailed(self, app_handle: int, sheet_id: str) -> List[Dict[str, Any]]:
@@ -455,14 +471,19 @@ class EngineSheetsMixin:
         return {"measures": library.get("measures", []) + extra["measures"],
                 "dimensions": library.get("dimensions", []) + extra["dimensions"]}
 
-    def _library_items_by_id(self, app_handle: int,
-                             item_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """Master items read one by one, in the shape `get_master_items` uses."""
+    def _library_items_by_id(self, app_handle: int, item_ids: List[str],
+                             kinds: Tuple[str, ...] = ("measures", "dimensions")
+                             ) -> Dict[str, List[Dict[str, Any]]]:
+        """Master items read one by one, in the shape `get_master_items` uses.
+
+        `kinds` limits the lookup when the caller knows what the ids are.
+        """
         found: Dict[str, List[Dict[str, Any]]] = {"measures": [], "dimensions": []}
-        requests = ([{"method": "GetMeasure", "params": {"qId": i}, "handle": app_handle}
-                     for i in item_ids]
-                    + [{"method": "GetDimension", "params": {"qId": i}, "handle": app_handle}
-                       for i in item_ids])
+        asked = [(kind, item_id) for kind in ("measures", "dimensions") if kind in kinds
+                 for item_id in item_ids]
+        requests = [{"method": "GetMeasure" if kind == "measures" else "GetDimension",
+                     "params": {"qId": item_id}, "handle": app_handle}
+                    for kind, item_id in asked]
         try:
             opened = self.send_requests_pipelined(requests, raise_on_error=False)
             handles = [None if isinstance(o, Exception)
@@ -482,14 +503,14 @@ class EngineSheetsMixin:
             body = (reply or {}).get("qProp") if isinstance(reply, dict) else None
             if not isinstance(body, dict):
                 continue
-            item_id = item_ids[position % len(item_ids)]
+            kind, item_id = asked[position]
             name = ((body.get("qMetaDef") or {}).get("title") or "").strip()
-            if position < len(item_ids) and isinstance(body.get("qMeasure"), dict):
+            if kind == "measures" and isinstance(body.get("qMeasure"), dict):
                 measure = body["qMeasure"]
                 found["measures"].append({
                     "id": item_id, "name": name or str(measure.get("qLabel") or ""),
                     "expression": str(measure.get("qDef") or "").strip()})
-            elif position >= len(item_ids) and isinstance(body.get("qDim"), dict):
+            elif kind == "dimensions" and isinstance(body.get("qDim"), dict):
                 dim = body["qDim"]
                 entry = {"id": item_id, "name": name}
                 entry.update(describe_master_dimension(
