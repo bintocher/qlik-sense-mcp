@@ -335,9 +335,28 @@ def _tool():
     is `_bounded(func)`.
     """
     def decorator(func):
-        context.mcp.tool()(_bounded(func))
+        context.mcp.tool(**_unstructured())(_bounded(func))
         return func
     return decorator
+
+
+def _unstructured() -> Dict[str, Any]:
+    """Registration options that keep a reply to one layer of JSON.
+
+    Every tool returns a JSON document as text. An SDK that infers
+    structured output from the `-> str` annotation also sends that text as
+    `structuredContent: {"result": "<the same JSON as a string>"}`, and a
+    client that prefers the structured copy shows the model JSON escaped
+    inside a string - every quote doubled, the reply a third longer, and
+    nothing it can index. Declining structured output leaves the text
+    content, which is the JSON itself. SDKs older than the option never
+    added the copy, so they need nothing.
+    """
+    try:
+        accepted = inspect.signature(context.mcp.tool).parameters
+    except (TypeError, ValueError):  # pragma: no cover - a host without a signature
+        return {}
+    return {"structured_output": False} if "structured_output" in accepted else {}
 
 
 def _bounded(func):

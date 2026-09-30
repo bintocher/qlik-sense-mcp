@@ -57,6 +57,11 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   object's own expressions - typically a branch of `if()` a variable
   switches off - no longer refuses the whole object: the cube runs as the
   object runs and `data.warnings` names the field.
+- Tools are registered without structured output. With the SDK inferring
+  it from `-> str`, every reply also went out as `structuredContent:
+  {"result": "<json>"}`, and a client preferring that copy showed the model
+  the JSON escaped inside a string. The reply is now the text content
+  alone - one layer of JSON. `outputSchema` is no longer declared.
 - `get_app_details` no longer adds the "Date field(s) present" warning. It
   named the first date-like fields and offered the first as the example
   filter; on an app with a shift calendar that was the shifted date, and a
