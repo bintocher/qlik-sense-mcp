@@ -351,12 +351,15 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   was "no measure named" before.
 - `group_by`, `metrics`, `measures`, `filters` and `scope` stated beside
   `queries` in `engine_query` are shared by every query that does not state
-  its own. They were ignored without a word: a model sent its measures and
+  its own; `filters` add up - a query's own filters join the shared ones,
+  and on a field both name its own wins, said in `notes`. They were
+  ignored without a word: a model sent its measures and
   filters once for three queries and got "asks for no measure", and a
   query with measures of its own was computed without the stated filters.
   Measured: two queries with shared GGR and a month on the plain rows now
-  answer 2 905 309 486 and, with their own filter on a channel added,
-  2 639 121 914.
+  answer 2 905 309 486; a query stating only a channel keeps the shared
+  month and answers 2 639 121 914, and one stating July answers
+  3 311 116 219 with a note.
 
 ## [2.3.1] - 2026-09-25
 

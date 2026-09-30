@@ -572,8 +572,9 @@ class EngineQueriesMixin:
         measure_warnings = []
         for measure in measures:
             measure_warnings.extend(measure.pop("warnings", None) or [])
-        measure_notes = [note for measure in measures
-                         for note in measure.pop("notes", None) or []]
+        measure_notes = list(query.get("_shared_notes") or []) + [
+            note for measure in measures
+            for note in measure.pop("notes", None) or []]
         if not measures:
             return {"id": query_id, "error": (
                 f"Query {query_id!r} asks for no measure."),

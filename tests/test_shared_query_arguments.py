@@ -46,9 +46,25 @@ def test_queries_take_the_shared_measures_and_filters(engine):
     total, north = engine.queries
     assert total["measures"] == [{"master": "Revenue"}]
     assert total["filters"] == [{"field": "Month", "values": ["2026-08"]}]
-    # A query's own key wins over the shared one.
-    assert north["filters"] == [{"field": "Region", "values": ["N"]}]
+    # Its own filters are added to the shared ones, never instead of them.
+    assert north["filters"] == [{"field": "Month", "values": ["2026-08"]},
+                                {"field": "Region", "values": ["N"]}]
     assert north["measures"] == [{"master": "Revenue"}]
+
+
+def test_a_query_filter_on_a_shared_field_wins_and_says_so(engine):
+    engine_tools.engine_query(
+        "app", queries=[{"id": "july", "measures": [{"master": "Cost"}],
+                         "filters": [{"field": "Month", "values": ["2026-07"]}]}],
+        measures=[{"master": "Revenue"}],
+        filters=[{"field": "Month", "values": ["2026-08"]},
+                 {"field": "Region", "values": ["N"]}])
+    [july] = engine.queries
+    assert july["filters"] == [{"field": "Region", "values": ["N"]},
+                               {"field": "Month", "values": ["2026-07"]}]
+    # Measures stated by the query replace the shared ones.
+    assert july["measures"] == [{"master": "Cost"}]
+    assert "[Month]" in july["_shared_notes"][0]
 
 
 def test_nothing_shared_leaves_the_queries_as_they_are(engine):

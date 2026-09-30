@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from . import context
 from .schema import (Filter, Measure, Metric, Query, Scope)
+from ..utils import bare_field_name
 from ..engine.objects import public as public_object
 from .helpers import (
     _check,
@@ -425,7 +426,9 @@ def engine_query(
             optional "id". Use it for several independent questions at
             once. `group_by`, `metrics`, `measures`, `filters` and `scope`
             stated beside it are shared: each query that does not state
-            its own takes them. Paging and sorting arguments are per query.
+            its own takes them. `filters` add up: a query's own filters
+            join the shared ones, and on a field both name its own wins,
+            said in `notes`. Paging and sorting arguments are per query.
         measures: an escape hatch inside a query, for one expression this
             vocabulary cannot state — `[{"expression": "{filter} Sum(A) / "
             "Count(B)", "label": "AOV"}]`. With `filters`, the marker says
@@ -573,12 +576,8 @@ def engine_query(
                   "measures": measures, "filters": filters, "scope": scope}
         shared = {key: value for key, value in shared.items() if value is not None}
         if shared:
-            queries = [dict({key: value for key, value in shared.items()
-                             if key not in query
-                             and not (key == "group_by" and "dimensions" in query)},
-                            **query)
-                       if isinstance(query, dict) else query
-                       for query in queries]
+            queries = [_with_shared(query, shared) if isinstance(query, dict)
+                       else query for query in queries]
     if not isinstance(queries, list) or not queries:
         return _err(
             "queries must be a non-empty list of query objects",
@@ -604,6 +603,37 @@ def engine_query(
         logger.exception("engine_query failed")
         return _err(str(ex) or repr(ex), error_type=type(ex).__name__,
                     app_id=app_id)
+
+
+def _with_shared(query: Dict[str, Any], shared: Dict[str, Any]) -> Dict[str, Any]:
+    """One query with the arguments stated beside `queries`.
+
+    A key the query states replaces the shared one, except `filters`: the
+    shared filters stay and the query's own are added, its own winning on
+    a field both name - dropping a shared period silently is the error
+    this contract exists to prevent.
+    """
+    merged = dict({key: value for key, value in shared.items()
+                   if key not in query
+                   and not (key == "group_by" and "dimensions" in query)},
+                  **query)
+    own = query.get("filters")
+    if isinstance(own, list) and isinstance(shared.get("filters"), list):
+        own_fields = {bare_field_name(str(f.get("field") or ""))
+                      for f in own if isinstance(f, dict)}
+        kept, replaced = [], []
+        for entry in shared["filters"]:
+            name = (bare_field_name(str(entry.get("field") or ""))
+                    if isinstance(entry, dict) else "")
+            (replaced if name in own_fields else kept).append(entry)
+        merged["filters"] = kept + list(own)
+        if replaced:
+            fields = ", ".join(sorted({f"[{bare_field_name(str(e.get('field') or ''))}]"
+                                       for e in replaced}))
+            merged["_shared_notes"] = [
+                f"The query states its own filter on {fields}, which replaces "
+                f"the shared one on that field; the other shared filters apply."]
+    return merged
 
 
 @_tool()
