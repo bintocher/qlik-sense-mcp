@@ -20,6 +20,8 @@ from qlik_sense_mcp_server.engine.filters import (
     BOUND_FORMS,
     _parse_bound,
     _to_serial,
+    display_format,
+    formatted_bound,
     quote_value,
 )
 from qlik_sense_mcp_server.engine import QlikEngineAPI
@@ -612,3 +614,84 @@ class TestSetsCombineWithEachOther:
 
 
 
+
+
+class _FormattedEngine(_Engine):
+    """A date field displayed as DD.MM.YYYY: Qlik's search reads a range
+    only in that writing, and a bare serial range selects nothing."""
+
+    def __init__(self, shown="01.01.2011", number=40544, **kwargs):
+        super().__init__(numeric_text=False, **kwargs)
+        self.shown, self.number = shown, number
+
+    def evaluate_expressions(self, app_handle, expressions):
+        answers = []
+        for expression in expressions:
+            self.asked.append(expression)
+            if "FieldValue(" in expression:
+                answers.append({"text": self.shown, "number": self.number})
+            elif "DateFormat" in expression:
+                answers.append({"text": "DD.MM.YYYY", "number": None})
+            elif "TimestampFormat" in expression:
+                answers.append({"text": "DD.MM.YYYY h:mm:ss[.fff]", "number": None})
+            else:
+                answers.append({"text": None, "number": self._count(expression)})
+        return answers
+
+    def _count(self, expression):
+        import re
+        dotted = re.search(
+            r">=(\d\d)\.(\d\d)\.(\d{4})<(\d\d)\.(\d\d)\.(\d{4})", expression)
+        if dotted:
+            d1, m1, y1, d2, m2, y2 = (int(g) for g in dotted.groups())
+            low = _to_serial(datetime.date(y1, m1, d1))
+            high = _to_serial(datetime.date(y2, m2, d2))
+            return len([d for d in self.days if low <= d < high])
+        return super()._count(expression)
+
+
+class TestRangeInTheFieldsFormat:
+    """The period as a range written the way the field displays it.
+
+    Measured on a 1.16-billion-row app: `{">=01.08.2026<=31.08.2026"}` on a
+    field shown as DD.MM.YYYY answered the reference figure, and unlike the
+    expression form an outer set reaches it."""
+
+    @pytest.mark.parametrize("text, number, expected", [
+        ("01.08.2026", 46235, "DD.MM.YYYY"),
+        ("2026-08-01", 46235, "YYYY-MM-DD"),
+        ("08/01/2026", 46235, "MM/DD/YYYY"),
+        ("01.08.2026 13:45:10", 46235 + (13 * 3600 + 45 * 60 + 10) / 86400,
+         "DD.MM.YYYY h:mm:ss[.fff]"),
+    ])
+    def test_the_format_is_read_off_a_value(self, text, number, expected):
+        assert display_format(text, number, ("DD.MM.YYYY h:mm:ss[.fff]",)) == expected
+
+    def test_a_value_shown_as_a_number_has_no_date_format(self):
+        assert display_format("46235", 46235, ("DD.MM.YYYY",)) is None
+
+    @pytest.mark.parametrize("fmt, expected", [
+        ("DD.MM.YYYY", "01.08.2026"),
+        ("YYYY-MM-DD", "2026-08-01"),
+        ("DD.MM.YYYY h:mm:ss[.fff]", "01.08.2026"),
+        ("MMM YYYY", None),
+    ])
+    def test_a_bound_is_a_day_in_that_format(self, fmt, expected):
+        assert formatted_bound(fmt, 46235) == expected
+
+    def test_the_range_is_used_when_it_agrees_with_the_reference(self):
+        engine = _FormattedEngine()
+        result = engine.period_modifier(1, "app", "F", "2011", "2011")
+        assert result["form"] == "range"
+        assert result["modifier"] == '[F]={">=01.01.2011<01.01.2012"}'
+
+    def test_a_field_shown_as_a_number_keeps_the_numeric_range(self):
+        engine = _Engine(numeric_text=True)
+        result = engine.period_modifier(1, "app", "F", "2011", "2011")
+        assert result["form"] == "numeric"
+
+    def test_the_format_is_asked_once(self):
+        engine = _FormattedEngine()
+        engine.period_modifier(1, "app", "F", "2011", "2011")
+        engine.period_modifier(1, "app", "F", "2012", "2012")
+        assert len([a for a in engine.asked if "FieldValue(" in a]) == 1

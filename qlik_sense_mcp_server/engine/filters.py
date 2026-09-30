@@ -8,16 +8,23 @@ The proof is necessary. Measured: filtering a date field:
 
     {<[F]={">=40542<40908"}>}                  0 on a timestamp field,
                                                correct on a numeric one
-    {<[F]={">=30.10.2010<01.01.2011"}>}        0 on both
+    {<[F]={">=30.10.2010<01.01.2011"}>}        0 on both, neither shown
+                                               as DD.MM.YYYY
     {<[F]={"=[F]>=40542 and [F]<40908"}>}      correct on both
     {<[F]={">=$(=Date(40542))"}>}              0 on both
 
+and on a date field shown as DD.MM.YYYY, `{">=01.08.2026<=31.08.2026"}`
+answered the reference figure over 1.16 billion rows.
+
 Comparison inside a set modifier runs against the text Qlik displays for
-the value, so the numeric form works only where that text is itself a
-number. The expression form always works and costs about sixty times more
-(480ms against 7ms on a field with 295k values). Neither is chosen by
-assumption: the cheap form is measured against a reference count, and used
-only where it agrees.
+the value, so a range works only when its bounds are written the way the
+field displays its values: `{">=01.08.2026<01.09.2026"}` on a field shown as
+`DD.MM.YYYY`, `{">=46235<46266"}` on one shown as a bare number. The
+expression form always works, costs about sixty times more (480ms against
+7ms on a field with 295k values) and is not reached by an outer set. None is
+chosen by assumption: the range in the field's own format comes first, then
+the numeric range, then the expression, and a form is used only where it
+counts the same values as a reference.
 """
 
 import datetime
@@ -45,6 +52,92 @@ _YEAR = re.compile(r"^(\d{4})$")
 
 BOUND_FORMS = ("2024-01-31", "31.01.2024", "2024-01 (whole month)",
                "2024 (whole year)", "45292 (Qlik date serial number)")
+
+# How Qlik writes a date: the tokens of DateFormat and TimestampFormat, and
+# the formats tried on a field's own value when the app's do not print it.
+_FORMAT_TOKEN = re.compile(
+    r"YYYY|YY|MMMM|MMM|MM|M|DD|D|WWWW|WWW|hh|h|mm|m|ss|s|\[\.fff\]|fff|TT|tt")
+_COMMON_FORMATS = ("DD.MM.YYYY", "YYYY-MM-DD", "MM/DD/YYYY", "DD/MM/YYYY",
+                   "YYYY.MM.DD", "YYYY/MM/DD", "D.M.YYYY", "M/D/YYYY",
+                   "DD-MM-YYYY", "YYYYMMDD", "YYYY-MM", "MM.YYYY")
+
+
+def _print_moment(fmt: str, moment: datetime.datetime,
+                  date_only: bool = False) -> Optional[str]:
+    """A moment written in a Qlik date format, or None when the format
+    names what this server does not print (month or weekday names).
+
+    `date_only` stops at the first time token: a search string holds no
+    spaces, and the day is all a period bound needs.
+    """
+    out: List[str] = []
+    position = 0
+    for match in _FORMAT_TOKEN.finditer(fmt):
+        token = match.group(0)
+        literal = fmt[position:match.start()]
+        if date_only and token in ("hh", "h", "mm", "m", "ss", "s", "[.fff]",
+                                   "fff", "TT", "tt"):
+            return "".join(out).strip() or None
+        out.append(literal)
+        position = match.end()
+        if token in ("MMMM", "MMM", "WWWW", "WWW"):
+            return None
+        value = {
+            "YYYY": f"{moment.year:04d}", "YY": f"{moment.year % 100:02d}",
+            "MM": f"{moment.month:02d}", "M": str(moment.month),
+            "DD": f"{moment.day:02d}", "D": str(moment.day),
+            "hh": f"{moment.hour:02d}", "h": str(moment.hour),
+            "mm": f"{moment.minute:02d}", "m": str(moment.minute),
+            "ss": f"{moment.second:02d}", "s": str(moment.second),
+            "fff": f"{moment.microsecond // 1000:03d}",
+            "[.fff]": (f".{moment.microsecond // 1000:03d}"
+                       if moment.microsecond else ""),
+            "TT": "AM" if moment.hour < 12 else "PM",
+            "tt": "am" if moment.hour < 12 else "pm",
+        }[token]
+        out.append(value)
+    out.append(fmt[position:])
+    return "".join(out)
+
+
+def _moment(serial: float) -> Optional[datetime.datetime]:
+    try:
+        return (datetime.datetime(1899, 12, 30)
+                + datetime.timedelta(days=float(serial)))
+    except (OverflowError, ValueError, TypeError):
+        return None
+
+
+def display_format(text: Any, number: Any,
+                   app_formats: Tuple[str, ...] = ()) -> Optional[str]:
+    """The format a date field displays its values in, read off one value.
+
+    The app's DateFormat and TimestampFormat are tried first, then the
+    common formats; the first that prints the value's number exactly as
+    Qlik showed its text is the field's. A value shown as a bare number, or
+    in a format with month names, has none.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        return None
+    moment = _moment(number)
+    if moment is None:
+        return None
+    # Qlik keeps milliseconds at most; a float serial carries noise below.
+    moment = moment.replace(microsecond=round(moment.microsecond, -3) % 1000000)
+    for fmt in tuple(f for f in app_formats if f) + _COMMON_FORMATS:
+        if _print_moment(fmt, moment) == text.strip():
+            return fmt
+    return None
+
+
+def formatted_bound(fmt: str, serial: int) -> Optional[str]:
+    """A day written the way the field displays it, without any time."""
+    moment = _moment(serial)
+    if moment is None:
+        return None
+    return _print_moment(fmt, moment, date_only=True)
 
 
 def _to_serial(day: datetime.date) -> int:
@@ -612,12 +705,46 @@ class EngineFiltersMixin:
 
     def forget_filter_forms(self, app_id: str = None) -> None:
         """Drop the remembered forms for one app, or for all of them."""
-        store = self._filter_form_store()
-        if app_id is None:
-            store.clear()
-            return
-        for key in [k for k in store if k[0] == app_id]:
-            store.pop(key, None)
+        for store in (self._filter_form_store(), self._display_format_store()):
+            if app_id is None:
+                store.clear()
+                continue
+            for key in [k for k in store if k[0] == app_id]:
+                store.pop(key, None)
+
+    def _display_format_store(self) -> Dict[Tuple[str, str], Tuple[str, float]]:
+        store = self.__dict__.get("_display_formats")
+        if store is None:
+            store = {}
+            self.__dict__["_display_formats"] = store
+        return store
+
+    def _display_format(self, app_handle: int, app_id: str,
+                        field: str) -> Optional[str]:
+        """How this field writes a date, read off its first value.
+
+        One pipelined question - the value, DateFormat and TimestampFormat -
+        remembered as long as a filter form is. Unknown is an answer too:
+        the range in the field's format is then simply not a candidate.
+        """
+        store = self._display_format_store()
+        entry = store.get((app_id, field))
+        if entry and (time.monotonic() - entry[1]) <= self.FILTER_FORM_TTL_SECONDS:
+            return entry[0] or None
+        quoted = field.replace("'", "''")
+        answers = self.evaluate_expressions(app_handle, [
+            f"=FieldValue('{quoted}', 1)",
+            "='$(DateFormat)'",
+            "='$(TimestampFormat)'",
+        ])
+        if len(answers) < 3:
+            return None
+        value = answers[0]
+        fmt = display_format(
+            value.get("text"), value.get("number"),
+            tuple(str(a.get("text") or "") for a in answers[1:]))
+        store[(app_id, field)] = (fmt or "", time.monotonic())
+        return fmt
 
     def _is_temporal_field(self, app_handle: int, field: str) -> bool:
         """Does this field hold dates, according to Qlik's own tags?
@@ -796,15 +923,28 @@ class EngineFiltersMixin:
             "distinct_values_in_period": form["matched"],
         }
 
-    def _period_forms(self, field: str, serial_from: int,
-                      serial_to: int) -> List[Tuple[str, str]]:
-        """Candidate modifiers for one period, cheapest first."""
+    def _period_forms(self, field: str, serial_from: int, serial_to: int,
+                      fmt: Optional[str] = None) -> List[Tuple[str, str]]:
+        """Candidate modifiers for one period, cheapest first.
+
+        The range in the field's own format first: it is what Qlik's search
+        compares against, and unlike the expression form an outer set
+        reaches it. The upper bound is the next day, excluded, so a value
+        carrying a time of day on the last day stays in.
+        """
         name = escape_qlik_field_name(field)
-        return [
+        forms = []
+        low = formatted_bound(fmt, serial_from) if fmt else None
+        high = formatted_bound(fmt, serial_to) if fmt else None
+        if (low and high and '"' not in low + high
+                and not low.lstrip("-").isdigit()):
+            forms.append(("range", f'{name}={{">={low}<{high}"}}'))
+        forms += [
             ("numeric", f'{name}={{">={serial_from}<{serial_to}"}}'),
             ("expression",
              f'{name}={{"={name}>={serial_from} and {name}<{serial_to}"}}'),
         ]
+        return forms
 
     def _resolve_period_form(self, app_handle: int, app_id: str, field: str,
                              serial_from: int, serial_to: int,
@@ -818,7 +958,11 @@ class EngineFiltersMixin:
         """
         name = escape_qlik_field_name(field)
         remembered = self._remembered_form(app_id, field)
-        candidates = self._period_forms(field, serial_from, serial_to)
+        # The format is needed only where the range in it can be a
+        # candidate: a field already known to answer another form keeps it.
+        fmt = (self._display_format(app_handle, app_id, field)
+               if remembered in (None, "range") else None)
+        candidates = self._period_forms(field, serial_from, serial_to, fmt)
         if remembered:
             # The form was measured against the reference once and holds for
             # this field until the app reloads. Only the count is still

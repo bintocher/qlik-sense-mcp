@@ -138,6 +138,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   filter; on an app with a shift calendar that was the shifted date, and a
   filter on it multiplied the figures. The server does not choose the
   period field; `warnings` are about volume only.
+- A period on a date field is written as a range in the field's own
+  display format, `[Date]={">=01.08.2026<01.09.2026"}`, reported as
+  `form: "range"`. The format is read off the field's first value and
+  checked against the app's `DateFormat` and `TimestampFormat` (bounds are
+  days, without a time of day), in one question remembered as long as the
+  form. The numeric range for a field shown as a bare number and the
+  expression search `{"=[F]>=a and [F]<b"}` follow, the latter only where
+  no range counts the right values: it is scored per value of the field
+  and an outer set does not reach it. Every form is still measured against
+  the reference count before use, and `period_check` still reports the
+  earliest and latest value that reached the result. Measured on a
+  1.16-billion-row app: GGR and turnover for August 2026 matched the
+  reference figures; on its 637-value calendar field both forms took 0.15 s.
 
 ### Fixed
 
