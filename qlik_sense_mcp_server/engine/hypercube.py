@@ -564,6 +564,8 @@ class EngineHypercubeMixin:
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
         strict_fields: bool = True,
+        accept_fan_out: bool = False,
+        run_checks: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
@@ -1027,6 +1029,32 @@ class EngineHypercubeMixin:
                     f"{validation['error']}. Qlik computes a name it does not have as "
                     f"null, and so does the object; its values here are what it shows.")
 
+            # The same checks engine_query runs, over the measures as they
+            # will be sent: the ends of a bounded filter's field as each
+            # measure reads it, and the dates a filter on a repeating
+            # calendar reaches. Asked before the cube, which they cost a
+            # fraction of: a query that sums other periods' dates is said
+            # so at once instead of after minutes of computing (measured,
+            # 156 s on a 1.16-billion-row app), unless the caller accepts it.
+            step = "checks"
+            t_step = time.monotonic()
+            checks = (self._cube_checks(app_handle, checked, converted_dimensions)
+                      if run_checks else {})
+            if run_checks:
+                timings["checks_seconds"] = round(time.monotonic() - t_step, 3)
+            if checks.get("fan_out_check") and not accept_fan_out:
+                return {
+                    "error": " ".join(spread["note"] for spread in checks["fan_out_check"])
+                             + " Not computed: add the condition for one row per "
+                               "date, or pass accept_fan_out=true to compute it as "
+                               "written.",
+                    "error_category": "fan_out",
+                    "failed_step": "checks",
+                    "fan_out_check": [{k: v for k, v in spread.items() if k != "note"}
+                                      for spread in checks["fan_out_check"]],
+                    "timings": timings,
+                }
+
             step = "CreateSessionObject"
             logger.info(
                 "create_hypercube: %s (dims=%d, measures=%d, max_rows=%d, op_timeout=%.1fs)",
@@ -1178,16 +1206,8 @@ class EngineHypercubeMixin:
                     f"get_app_field before trusting this as a real zero."
                 )
 
-            # The same checks engine_query runs, over the measures as they
-            # were sent: the ends of a bounded filter's field as each
-            # measure reads it, and the dates a filter on a repeating
-            # calendar reaches. Said first among the warnings.
-            step = "checks"
-            t_step = time.monotonic()
-            checks = self._cube_checks(app_handle, checked)
-            if checks.get("period_check") or checks.get("fan_out_check"):
-                timings["checks_seconds"] = round(time.monotonic() - t_step, 3)
-            alarms = [spread["note"] for spread in checks.get("fan_out_check", [])]
+            # What the checks before the cube said, first among the warnings.
+            alarms =[spread["note"] for spread in checks.get("fan_out_check", [])]
             for check in checks.get("period_check", []):
                 if check.get("filter_applied") is False:
                     alarms.append(check["note"])

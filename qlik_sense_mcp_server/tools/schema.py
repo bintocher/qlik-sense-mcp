@@ -148,3 +148,6 @@ class Query(BaseModel):
     exclude_null_dimensions: Optional[bool] = None
     suppress_zero: Optional[bool] = None
     include_raw_layout: Optional[bool] = None
+    accept_fan_out: Optional[bool] = Field(
+        None, description="Compute it even when the checks find the filter "
+                          "covering more dates than it names.")

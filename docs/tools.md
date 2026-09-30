@@ -224,7 +224,9 @@ the `field`, the fact `table` and `key`, the `key_values` reached,
 `per_value` and the `repeating_tables` that cause it, and `warnings` leads with it,
 naming the rows that keep one per date where `get_app_details` found them
 (its `plain_layer`). The field that picks such rows is not checked
-itself. `filters_applied[].form` says how the
+itself. The check runs before the calculation, and a query it finds
+spreading is not computed: it comes back as `error_category: "fan_out"`
+unless it carries `accept_fan_out: true`. `filters_applied[].form` says how the
 period was written: `range` in the field's display format, `numeric`, or
 `expression` where neither counts the right values.
 

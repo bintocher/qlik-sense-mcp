@@ -118,6 +118,16 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   flagged. Grouping by a field of such a calendar while the measures do
   not set its plain layer is named as well (`grouped_by`): each row then
   sums every layer of its value.
+  The check runs before anything is computed - with the creation of the
+  objects in `engine_query`, before the cube in `engine_create_hypercube` -
+  and reads only the conditions on the calendars, not those on the facts.
+  A query it finds covering more than it names is not computed: the reply
+  is `error_category: "fan_out"` with the `fan_out_check` and the condition
+  for one row per date; `accept_fan_out: true` (per query in `engine_query`)
+  computes it as written. Measured on a 1.16-billion-row app: a month on
+  the cumulative calendar, which computed for 155.8 s before its warning
+  came back, is answered in 15.5 s; a correct cold query spends about 5 s
+  on the check, as it did after the cube before.
 - `get_app_details` names the rows of a repeating calendar that keep one
   row per date. For each such calendar the server asks Engine, once per
   app and over the calendar alone, which value of a field with few values

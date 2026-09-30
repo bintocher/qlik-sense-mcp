@@ -96,7 +96,8 @@ class _SpreadEngine(_Engine):
 class TestTheWarning:
     def test_a_value_list_on_a_repeating_calendar_is_said_first(self):
         result = _SpreadEngine().run_queries(1, "app", [_query(
-            filters=[{"field": "Month", "values": ["2026-08"]}])])
+            filters=[{"field": "Month", "values": ["2026-08"]}],
+            accept_fan_out=True)])
         reply = result["results"][0]
         [spread] = reply["fan_out_check"]
         assert spread == {"field": "Month", "table": "Facts", "key": "MonthKey",
@@ -133,7 +134,8 @@ class TestTheWarning:
             _Cube.send_request(engine, method, params, handle, timeout)
         engine.ws = object()
         reply = engine.create_hypercube(1, [{"field": "Region"}], [
-            {"expression": "Sum({<Month={'2026-08'}>} Amount)", "label": "GGR"}], 10)
+            {"expression": "Sum({<Month={'2026-08'}>} Amount)", "label": "GGR"}], 10,
+            accept_fan_out=True)
         assert reply["warnings"][0].startswith(
             "The set of measure 'GGR' on [Month] reaches Facts through 13 values")
         assert reply["fan_out_check"][0]["measure"] == "GGR"
@@ -142,13 +144,43 @@ class TestTheWarning:
         """A row per month of a cumulative calendar sums every layer of that
         month; the filter check alone would say nothing without a filter."""
         reply = _SpreadEngine().run_queries(1, "app", [_query(
-            group_by=["Month"])])["results"][0]
+            group_by=["Month"], accept_fan_out=True)])["results"][0]
         [spread] = reply["fan_out_check"]
         assert spread["grouped_by"] is True and spread["repeating_tables"] == ["Accumulated"]
         assert reply["warnings"][0].startswith("The rows are grouped by [Month]")
         quiet = _SpreadEngine().run_queries(1, "app", [_query(
             group_by=["Month"], filters=[{"field": "Layer", "values": ["Month"]}])])
         assert "fan_out_check" not in quiet["results"][0]
+
+    def test_a_query_that_fans_out_is_not_computed(self):
+        """Live, such a query computed for 156 s before its warning came
+        back; the check runs with the object's creation and the layout is
+        never asked for."""
+        engine = _SpreadEngine()
+        result = engine.run_queries(1, "app", [
+            _query(filters=[{"field": "Month", "values": ["2026-08"]}]),
+            _query(filters=[{"field": "Region", "values": ["North"]}])])
+        refused, answered = result["results"]
+        assert refused["error_category"] == "fan_out"
+        assert "Not computed" in refused["error"]
+        assert refused["fan_out_check"][0]["key_values"] == 13
+        assert answered["rows"]
+        layouts = [b for b in engine.batches if b[0] == "GetLayout"]
+        assert layouts == [["GetLayout"]]
+
+    def test_a_hypercube_that_fans_out_is_not_computed(self):
+        engine = _SpreadEngine()
+        sent = []
+
+        def send(method, params=None, handle=-1, timeout=None):
+            sent.append(method)
+            return _Cube.send_request(engine, method, params, handle, timeout)
+        engine.send_request = send
+        engine.ws = object()
+        reply = engine.create_hypercube(1, [{"field": "Region"}], [
+            {"expression": "Sum({<Month={'2026-08'}>} Amount)", "label": "GGR"}], 10)
+        assert reply["error_category"] == "fan_out"
+        assert "CreateSessionObject" not in sent
 
     def test_a_field_on_an_ordinary_table_is_not_asked(self):
         engine = _SpreadEngine()
@@ -266,7 +298,8 @@ class TestWhichTableRepeats:
 
     def _spread(self, through):
         reply = _ChainEngine(through).run_queries(1, "app", [_query(
-            filters=[{"field": "Month", "values": ["2026-08"]}])])["results"][0]
+            filters=[{"field": "Month", "values": ["2026-08"]}],
+            accept_fan_out=True)])["results"][0]
         return reply["fan_out_check"][0], reply["warnings"][0]
 
     def test_the_shift_calendar_alone(self):

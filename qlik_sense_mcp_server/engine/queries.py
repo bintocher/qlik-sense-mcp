@@ -453,7 +453,7 @@ class EngineQueriesMixin:
                          '"values": ["North"]}].')}
 
         for key in ("exclude_null_dimensions", "suppress_zero",
-                    "include_raw_layout"):
+                    "include_raw_layout", "accept_fan_out"):
             refusal = _yes_or_no(query.get(key), key, query_id)
             if refusal:
                 return refusal
@@ -580,6 +580,7 @@ class EngineQueriesMixin:
                 "exclude_null_dimensions", False),
             "suppress_zero": query.get("suppress_zero", False),
             "include_raw_layout": query.get("include_raw_layout", False),
+            "accept_fan_out": bool(query.get("accept_fan_out")),
             "offset": query.get("offset", 0),
             "sort_by": query.get("sort_by"),
             "sort_order": query.get("sort_order", "desc"),
@@ -1455,6 +1456,14 @@ class EngineQueriesMixin:
             if flat is None:
                 continue
             identifier, parts = flat
+            # Only the conditions on the calendars decide which key values
+            # of the facts are reached; a condition on the facts themselves
+            # would make each count read the facts - measured, five seconds
+            # a query on 1.16 billion rows against a fraction of one.
+            between = set(link.get("calendar_fields") or [])
+            if between:
+                parts = [part for part in parts if set(filter_limits(
+                    _set_text("", [part])).get("fields", [])) <= between]
             field = escape_qlik_field_name(applied["field"])
             key = escape_qlik_field_name(link["key"])
             within = _set_text(identifier, parts)
@@ -1643,8 +1652,9 @@ class EngineQueriesMixin:
             spread["note"] += " " + " ".join(layers)
         return spread
 
-    def _cube_checks(self, app_handle: int,
-                     measures: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _cube_checks(self, app_handle: int, measures: List[Dict[str, Any]],
+                     dimensions: Optional[List[Dict[str, Any]]] = None
+                     ) -> Dict[str, Any]:
         """The query checks for a hypercube written by hand.
 
         `measures` carry what `_build_measures` gives a typed query: the
@@ -1653,7 +1663,8 @@ class EngineQueriesMixin:
         run leaves the cube as it is.
         """
         plan: Dict[str, Any] = {"filters_applied": [], "modifier": "",
-                                "measures": measures}
+                                "measures": measures,
+                                "dimensions": dimensions or []}
         try:
             probes = self._control_probes(plan, app_handle)
             spans, expressions = [], []
@@ -1982,6 +1993,17 @@ class EngineQueriesMixin:
 
         handles = []
         for (plan, shaped), outcome in zip(prepared, create_outcomes):
+            # The checks came back with the objects, before anything was
+            # computed: a query that sums other periods' dates is said so
+            # now instead of after its calculation (measured, 156 s on a
+            # 1.16-billion-row app), unless the caller accepts it.
+            if plan.get("fan_out_check") and not plan.get("accept_fan_out"):
+                plan["error"] = (
+                    " ".join(spread["note"] for spread in plan["fan_out_check"])
+                    + " Not computed: add the condition for one row per date, "
+                      "or set accept_fan_out to compute it as written.")
+                plan["error_category"] = "fan_out"
+                continue
             if isinstance(outcome, Exception):
                 plan["error"] = str(outcome)
                 plan["error_category"] = "engine_api_error"
@@ -2248,6 +2270,10 @@ class EngineQueriesMixin:
                               "accepted_forms", "next_actions",
                               "invalid_expressions", "available_columns",
                               "available_values", "note")}
+            if plan.get("error_category") == "fan_out":
+                reply["fan_out_check"] = [
+                    {k: v for k, v in spread.items() if k != "note"}
+                    for spread in plan.get("fan_out_check", [])]
             return reply
         if cube is None or shaped is None:
             return {"id": plan.get("id"),

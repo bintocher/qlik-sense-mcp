@@ -102,9 +102,12 @@ def _walk(raw_fields: List[Dict[str, Any]], start: Optional[List[str]]
                 and dates < rows.get(table, 0)):
             repeats.append({"table": table, "key": towards,
                             "rows": rows[table], "dates": dates})
+    # The fields of the tables between the field and the facts: the part of
+    # a set that decides which key values the facts are reached through.
+    between = sorted({name for table, _ in path for name in fields_of.get(table, [])})
     return {"key": key, "table": facts,
             "temporal": _temporal(info.get(key, {}).get("tags")),
-            "repeats": repeats}
+            "repeats": repeats, "calendar_fields": between}
 
 
 def repeating_calendars(raw_fields: List[Dict[str, Any]]
@@ -216,7 +219,8 @@ class EngineLayersMixin:
         reply = self.create_hypercube(
             app_handle, [{"field": field, "sort_by": dict(order)} for field in fields],
             measures,
-            max_rows=LAYER_FIELD_MAX * LAYER_FIELD_MAX, include_raw_layout=True)
+            max_rows=LAYER_FIELD_MAX * LAYER_FIELD_MAX, include_raw_layout=True,
+            run_checks=False)
         if reply.get("error"):
             raise RuntimeError(reply["error"])
         rows = reply.get("rows") or []

@@ -274,6 +274,7 @@ def engine_query(
     exclude_null_dimensions: bool = False,
     suppress_zero: bool = False,
     include_raw_layout: bool = False,
+    accept_fan_out: bool = False,
 ) -> str:
     """
     Answer a question about an app's data: group by fields, aggregate
@@ -507,6 +508,15 @@ def engine_query(
         one - the same key `engine_create_hypercube` uses.
         Every one of them can also be stated per query inside `queries`.
 
+    A FILTER THAT COVERS MORE THAN IT NAMES
+        A filter on a calendar whose dates repeat (cumulative, as-of or
+        shifted rows) that reaches key values of other periods, or a
+        grouping by such a calendar without its plain layer, is checked
+        before anything is computed. Such a query is not computed: it
+        comes back with `error_category: "fan_out"`, the `fan_out_check`
+        and the condition that keeps one row per date. `accept_fan_out:
+        true` computes it as written anyway.
+
     DOES NOT RETURN
         Per-cell state or the expressions it wrote. Row-level records —
         every reply is aggregated. The untouched Qlik layout only on
@@ -549,6 +559,7 @@ def engine_query(
             "exclude_null_dimensions": exclude_null_dimensions,
             "suppress_zero": suppress_zero,
             "include_raw_layout": include_raw_layout,
+            "accept_fan_out": accept_fan_out,
         }]
     if not isinstance(queries, list) or not queries:
         return _err(
@@ -593,6 +604,7 @@ def engine_create_hypercube(
     max_rows: Optional[int] = None,
     offset: int = 0,
     filters: Optional[List[Dict[str, Any]]] = None,
+    accept_fan_out: bool = False,
 ) -> str:
     """
     Run a grouped aggregation written as Qlik expressions.
@@ -743,6 +755,12 @@ def engine_create_hypercube(
             "to": "2024-12-31"}` for a period, `{"field": "Discount",
             "from": 400}` for a range of any other field, or
             `{"field": "Region", "values": ["North"]}` for named values.
+        accept_fan_out: Compute a query the checks found covering more
+            dates than it names (`fan_out_check`: a filter on a calendar
+            whose dates repeat, or a grouping by one without its plain
+            layer). By default such a query is answered with
+            `error_category: "fan_out"` and the check, before anything is
+            computed.
 
     Returns:
           - `columns`: column names, in row order.
@@ -814,6 +832,7 @@ def engine_create_hypercube(
             exclude_null_dimensions=exclude_null_dimensions,
             offset=offset,
             filters=filters,
+            accept_fan_out=accept_fan_out,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the
