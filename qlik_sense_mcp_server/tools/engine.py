@@ -29,13 +29,64 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 
+# A script page. A large app's script runs to thousands of lines; whole, it
+# is one of the largest replies a model can ask for and most of it is not
+# what the question is about.
+SCRIPT_PAGE_LINES = 400
+# Lines shown either side of a search hit: enough to see the LOAD a field
+# belongs to and the FROM it comes from.
+SCRIPT_SEARCH_CONTEXT = 5
+
+
+def script_page(script: str, offset: int, limit: int,
+                search: Optional[str] = None) -> Dict[str, Any]:
+    """One page of a load script, or the blocks around a search term.
+
+    Lines are split on "\\n" alone, so a "\\r" stays with its line and the
+    pages joined with "\\n" are the script, byte for byte.
+    """
+    lines = script.split("\n") if script else []
+    total = len(lines)
+    page: Dict[str, Any] = {"total_lines": total}
+    if not search:
+        chunk = lines[offset:offset + limit]
+        page["qScript"] = "\n".join(chunk)
+        page["returned_lines"] = len(chunk)
+        if offset + limit < total:
+            page["next_offset"] = offset + limit
+        return page
+
+    needle = search.lower()
+    hits = [i for i, line in enumerate(lines) if i >= offset and needle in line.lower()]
+    blocks: List[List[int]] = []
+    for i in hits:
+        low, high = max(0, i - SCRIPT_SEARCH_CONTEXT), min(total - 1, i + SCRIPT_SEARCH_CONTEXT)
+        if blocks and low <= blocks[-1][1] + 1:
+            blocks[-1][1] = max(blocks[-1][1], high)
+        else:
+            blocks.append([low, high])
+    matches, used = [], 0
+    for low, high in blocks:
+        if used and used + (high - low + 1) > limit:
+            page["next_offset"] = low
+            break
+        matches.append({"lines": f"{low}-{high}", "text": "\n".join(lines[low:high + 1])})
+        used += high - low + 1
+    page["search"] = search
+    page["match_count"] = len(hits)
+    page["matches"] = matches
+    page["returned_lines"] = used
+    return page
+
 
 @_tool()
 @_timed
 @_engine_serialised
-def get_app_script(app_id: str) -> str:
+def get_app_script(app_id: str, offset: int = 0, limit: int = SCRIPT_PAGE_LINES,
+                   search: Optional[str] = None) -> str:
     """
-    Read an app's load script — the LOAD statements that built its data.
+    Read an app's load script — the LOAD statements that built its data —
+    a page of lines at a time, or only the lines around a word.
 
     WHEN TO USE
         To learn where the data came from and what was done to it: source
@@ -43,6 +94,8 @@ def get_app_script(app_id: str) -> str:
         expressions rely on. Worth reading before writing anything
         elaborate, since the script explains names that look arbitrary in
         the data model.
+        With `search` to find where one field, table or variable is made
+        without reading the whole script.
 
     WHEN NOT TO USE
         To find out which fields exist or how large they are —
@@ -50,10 +103,21 @@ def get_app_script(app_id: str) -> str:
 
     Args:
         app_id: application GUID, from `get_apps` or `get_app_details`.
+        offset: first line to return, counted from 0. Default 0.
+        limit: lines per page. Default 400.
+        search: text to look for, case insensitive. Only the lines that
+            contain it come back, each with 5 lines either side, as blocks
+            of consecutive lines; `offset` and `limit` then page through
+            the blocks by script line.
 
     Returns:
-        `qScript` (the whole script as one string), `script_length`,
-        `app_id`. An empty script comes with a `note` saying whether the
+        `qScript` - the page: lines `offset` to `offset + limit` joined by
+        newlines, so pages joined with a newline give the script back
+        exactly. `total_lines`, `returned_lines`, `next_offset` (absent on
+        the last page), `script_length` of the whole script, `app_id`.
+        With `search`: `matches` - blocks of `{"lines": "120-131", "text"}`
+        - and `match_count` instead of `qScript`.
+        An empty script comes with a `note` saying whether the
         app has none or this identity may not read it — reading the script
         needs Professional access, and an Analyzer licence gets an empty
         string rather than an error.
@@ -64,15 +128,19 @@ def get_app_script(app_id: str) -> str:
     e = _check()
     if e:
         return e
+    for name, value, least in (("offset", offset, 0), ("limit", limit, 1)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or value < least):
+            return _err(f"{name}={value!r} is not a line count of at least {least}.",
+                        error_category="invalid_argument")
     try:
         # no_data=False so the cached connection is reusable for later data calls
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         script = context.engine_api.get_script(app_handle)
-        reply = {
-            "qScript": script,
-            "app_id": app_id,
-            "script_length": len(script) if script else 0,
-        }
+        reply = {"app_id": app_id}
+        reply.update(script_page(script or "", offset or 0, limit or SCRIPT_PAGE_LINES,
+                                 search))
+        reply["script_length"] = len(script) if script else 0
         if not script:
             # Engine returns an empty string rather than an error when the
             # identity may not read the script — an Analyzer licence, for

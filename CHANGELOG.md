@@ -62,6 +62,12 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   {"result": "<json>"}`, and a client preferring that copy showed the model
   the JSON escaped inside a string. The reply is now the text content
   alone - one layer of JSON. `outputSchema` is no longer declared.
+- `get_app_script` returns the script a page of lines at a time: `offset`
+  and `limit` (default the first 400 lines), `total_lines`, `returned_lines`
+  and `next_offset`; pages joined with a newline are the script exactly.
+  `search` returns only the lines containing a word, 5 lines either side,
+  merged into `matches` blocks with their line range. `script_length` is
+  still the length of the whole script.
 - `get_app_details` no longer adds the "Date field(s) present" warning. It
   named the first date-like fields and offered the first as the example
   filter; on an app with a shift calendar that was the shifted date, and a

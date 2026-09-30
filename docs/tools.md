@@ -45,7 +45,7 @@ categories. The lists below are a quick map only.
 
 | Tool | Purpose |
 |------|---------|
-| `get_app_script` | Full load script (`SET`/`LET`, `LOAD ... FROM ...`). Read this to understand how calendar fields and named variables are built. |
+| `get_app_script` | The load script (`SET`/`LET`, `LOAD ... FROM ...`) a page of lines at a time: `offset`/`limit` (default the first 400 lines), with `total_lines` and `next_offset`; pages joined with a newline give the script back exactly. `search` returns only the lines containing a word, each with 5 lines around, as `matches` blocks. Read this to understand how calendar fields and named variables are built. |
 | `get_app_variables` | User variables split by source (script vs UI), with wildcard search and pagination. |
 | `get_app_sheets` | List of sheets in the app, with title and description. |
 | `get_app_sheet_objects` | The objects on a sheet in reading order, each as one `summary` line - dimensions (`[label]=field`, `[label]==expression`, `master <id> "<name>" = field`), measures with their expressions, roles the expression does not show, alternative measures, show and calculation conditions, top N, state, `$(variables)`, and what filters, variable inputs and buttons do - plus `object_id`, `object_type`, `title` and `fields_used`. Containers list their tabs in `children` with `tab` and `shown_if`. Read by a rule per type from definitions only (`GetFullPropertyTree`), so nothing is calculated; master visualizations and master items are read once per app. |
