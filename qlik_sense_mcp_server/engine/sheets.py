@@ -654,7 +654,7 @@ class EngineSheetsMixin:
         result = self.create_hypercube(
             app_handle, dimensions, measures, max_rows=limit, sort_by=sort_by,
             sort_order=sort_order, suppress_zero=bool(plan.get("suppress_zero")),
-            exclude_null_dimensions=False, offset=offset)
+            exclude_null_dimensions=False, offset=offset, strict_fields=False)
         if not isinstance(result, dict) or result.get("error"):
             return result if isinstance(result, dict) else {"error": str(result)}
         data = {key: result.get(key) for key in _DATA_KEYS if result.get(key) not in (None, [], "")}

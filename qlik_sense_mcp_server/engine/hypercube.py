@@ -560,9 +560,15 @@ class EngineHypercubeMixin:
         exclude_null_dimensions: bool = False,
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
+        strict_fields: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
+
+        `strict_fields=False` turns a name the data model lacks from a
+        refusal into a warning. For a caller's own query the refusal is
+        right; for the expressions of an existing object it is not, since
+        the object is computed with them as they are.
 
         `sort_by` names the column that drives the row order — a measure
         label/expression or a dimension field name. It is translated into
@@ -963,9 +969,16 @@ class EngineHypercubeMixin:
             validation = self._validate_cube_inputs(
                 app_handle, converted_dimensions, converted_measures)
             timings["validate_seconds"] = round(time.monotonic() - t_step, 3)
+            input_warnings: List[str] = list(validation.get("warnings", []))
             if validation.get("error"):
-                return validation
-            input_warnings: List[str] = validation.get("warnings", [])
+                # An object's own expressions are computed the way the
+                # object computes them: a name the model lacks - often in a
+                # branch of if() a variable switches off - is null there too.
+                if validation.get("error_category") != "field_not_found" or strict_fields:
+                    return validation
+                input_warnings.append(
+                    f"{validation['error']}. Qlik computes a name it does not have as "
+                    f"null, and so does the object; its values here are what it shows.")
 
             step = "CreateSessionObject"
             logger.info(

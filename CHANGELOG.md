@@ -53,7 +53,10 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   a column, a map is computed from its first layer; a column whose show
   condition is false now is left out and named in `data.notes`, and a false
   calculation condition of the object is said there too. A linked object
-  is read with `GetEffectiveProperties`.
+  is read with `GetEffectiveProperties`. A name the data model lacks in the
+  object's own expressions - typically a branch of `if()` a variable
+  switches off - no longer refuses the whole object: the cube runs as the
+  object runs and `data.warnings` names the field.
 
 ### Fixed
 

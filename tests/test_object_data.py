@@ -92,6 +92,8 @@ class TestFlatCube:
         assert [d["field"] for d in cube["dimensions"]] == ["Region", "Year"]
         assert [m["expression"] for m in cube["measures"]] == ["Sum(Amount)"]
         assert cube["exclude_null_dimensions"] is False
+        # The object's expressions run as the object runs them.
+        assert cube["strict_fields"] is False
         assert any("left out" in note for note in data["notes"])
         assert "GetLayout" not in engine.methods
         assert "dimensions" not in data and "timings" not in data

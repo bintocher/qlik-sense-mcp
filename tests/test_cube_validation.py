@@ -146,6 +146,38 @@ class TestUnknownNamesInMeasures:
 
 
 
+class TestAnObjectsOwnExpressions:
+    """An existing object is computed with its expressions as they are.
+
+    A calculated dimension such as `=If($(vMode)=1, Region, OldField)`
+    names a field the model lost in a branch the variable switches off;
+    Qlik computes the name as null and the chart still shows. Refusing it
+    would leave the object without data while the object itself shows some.
+    """
+
+    class _Computing(_Engine):
+        ws_operation_timeout = 30.0
+        ws = None
+
+        def send_request(self, method, params=None, handle=-1, timeout=None):
+            if method == "CreateSessionObject":
+                return {"qReturn": {"qHandle": 7}}
+            if method == "GetLayout":
+                return {"qLayout": {"qHyperCube": {
+                    "qSize": {"qcx": 2, "qcy": 1}, "qDimensionInfo": [{}], "qMeasureInfo": [{}],
+                    "qDataPages": [{"qMatrix": [[{"qText": "-", "qNum": "NaN"},
+                                                 {"qText": "5", "qNum": 5}]]}]}}}
+            return {}
+
+    def test_refused_for_a_query_computed_with_a_warning_for_an_object(self):
+        engine = self._Computing()
+        dims, measures = _dims("=If(1, Region, Regionn)"), _measures("Sum(Sales)")
+        assert engine.create_hypercube(1, dims, measures)["error_category"] == "field_not_found"
+        loose = engine.create_hypercube(1, dims, measures, strict_fields=False)
+        assert loose["rows"] == [["-", 5]]
+        assert "Regionn" in loose["warnings"][0]
+
+
 class TestEmptyMeasureDetection:
     COLUMNS = ["Region", "Revenue", "Filtered"]
 
