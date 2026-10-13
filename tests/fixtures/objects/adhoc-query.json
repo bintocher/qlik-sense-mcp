@@ -1,0 +1,90 @@
+{
+ "description": "A stored cube left by another client is not shown to users.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "aq1",
+    "qType": "adhoc-query"
+   },
+   "qMetaDef": {},
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Region"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "skipped": true
+ }
+}

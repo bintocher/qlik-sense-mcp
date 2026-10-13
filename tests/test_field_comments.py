@@ -137,7 +137,7 @@ class TestAppDetailsPayload:
         return json.loads(srv.get_app_details(app_id="a1b2c3d4-1111-2222-3333-444455556666"))
 
     def test_commented_field_carries_comment(self):
-        fields = {f["name"]: f for f in self._details()["fields"]}
+        fields = {f["name"]: f for t in self._details()["tables"] for f in t["fields"]}
         assert fields["Amount"]["comment"] == "Order amount, net of refunds"
 
 

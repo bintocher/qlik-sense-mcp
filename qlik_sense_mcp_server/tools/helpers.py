@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional
 
 
 from . import context
+from ..engine.canonical import explain_engine_error
 
 logger = context.logger
 
@@ -50,8 +51,13 @@ def _err(msg: str, **extra: Any) -> str:
     the next step is the caller's work, and a list the caller might need
     it can ask for with a call of its own.
     """
-    payload = {"error": msg}
+    payload = {"error": explain_engine_error(msg)}
     payload.update(extra)
+    # Qlik's refusal over the per-user session limit reads like any other
+    # connection failure; its category says it is neither the query nor
+    # the network.
+    if "OnMaxParallelSessionsExceeded" in str(msg):
+        payload["error_category"] = "session_limit"
     for key in _ADVICE_KEYS:
         payload.pop(key, None)
 
@@ -96,6 +102,10 @@ def _without_advice(value: Any) -> Any:
     if "error" in cleaned:
         for key in _ADVICE_KEYS:
             cleaned.pop(key, None)
+        # A bare Engine code says nothing to a reader; its meaning is part
+        # of the error, not advice.
+        if isinstance(cleaned["error"], str):
+            cleaned["error"] = explain_engine_error(cleaned["error"])
     return cleaned
 
 
@@ -113,7 +123,13 @@ def _ok(obj: Any) -> str:
     obj = _without_advice(obj)
     compact = {}
     for key, value in obj.items():
-        if key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
+        if key in _LINE_KEYS and isinstance(value, list) and len(value) > 1:
+            compact[key] = _LinesList(value)
+        elif key in _LINE_KEYS and isinstance(value, dict):
+            # A section of lists, such as `usage`: each list a line an item.
+            compact[key] = {k: _LinesList(v) if isinstance(v, list) and len(v) > 1 else v
+                            for k, v in value.items()}
+        elif key in _BULK_KEYS and isinstance(value, list) and len(value) > 3:
             compact[key] = _CompactList(value)
         elif key in _BULK_KEYS and isinstance(value, dict) and "rows" in value:
             # A bulk key answered as {columns, rows} — the wide-model form
@@ -133,6 +149,17 @@ def _ok(obj: Any) -> str:
 
 class _CompactList(list):
     """Marker: serialise this list without the indentation."""
+
+
+# Lists read an item at a time: one table with its fields, one measure,
+# one link per line. Indented, a measure spreads over eight lines of mostly
+# spaces; all on one line, a hundred of them are a wall.
+_LINE_KEYS = ("tables", "measures", "dimensions", "links", "islands", "bookmarks",
+              "usage", "report_filters")
+
+
+class _LinesList(list):
+    """Marker: one compact item per line."""
 
 
 class _CompactEncoder(json.JSONEncoder):
@@ -155,6 +182,12 @@ class _CompactEncoder(json.JSONEncoder):
         placeholders = {}
 
         def swap(value):
+            if isinstance(value, _LinesList):
+                key = f"__compact_{len(placeholders)}__"
+                placeholders[key] = "[\n    " + ",\n    ".join(
+                    json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str)
+                    for item in value) + "\n  ]"
+                return key
             if isinstance(value, _CompactList):
                 key = f"__compact_{len(placeholders)}__"
                 placeholders[key] = json.dumps(
@@ -220,6 +253,31 @@ def _engine_serialised(func):
         if context.engine_api is None:
             return func(*args, **kwargs)
         with context.engine_api.transaction():
+            try:
+                result = func(*args, **kwargs)
+            except ConnectionError as exc:
+                result = exc
+            if not _connection_lost(result):
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            # The socket was gone when the call reached for it: the proxy
+            # closes an idle or expired session without a word, the socket
+            # still reads as open, and the first request of the call fails.
+            # Measured: a call right after the JWT session renewed failed
+            # with "Not connected to Engine API", the next with OpenDoc
+            # 1003, the third worked. The call is made once more on a new
+            # connection, and only when the time limit leaves room.
+            from .. import deadline
+            left = deadline.remaining()
+            if left is not None and left <= 1:
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            logger.warning("%s lost the Engine connection (%s); calling it "
+                           "once more on a new one", func.__name__,
+                           _lost_reason(result))
+            context.engine_api.disconnect()
             return func(*args, **kwargs)
 
     # functools.wraps copies __qualname__, so the wrapper is otherwise
@@ -227,6 +285,36 @@ def _engine_serialised(func):
     # to catch a new Engine tool that forgets the decorator.
     wrapper.__engine_serialised__ = True
     return wrapper
+
+
+# What a call says when the socket under it was gone, as opposed to what a
+# slow or wrong query says. A timeout is not among them: repeating a heavy
+# query repeats the wait.
+_LOST_CONNECTION = ("Not connected to Engine API", "socket is already closed",
+                    "Connection to remote host was lost",
+                    "Connection is already closed", "'code': 1003")
+
+
+def _lost_reason(result: Any) -> str:
+    if isinstance(result, Exception):
+        return str(result)
+    try:
+        parsed = json.loads(result) if isinstance(result, str) else {}
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return str(parsed.get("error") or "")
+
+
+def _connection_lost(result: Any) -> bool:
+    """Whether a call failed because the Engine socket was gone."""
+    reason = _lost_reason(result)
+    if not reason or "timed out" in reason:
+        return False
+    if "'code': 1003" in reason and "OpenDoc" not in reason:
+        return False
+    return any(sign in reason for sign in _LOST_CONNECTION)
 
 
 
@@ -315,6 +403,161 @@ def _timed(func):
         )
     return wrapper
 
+
+
+# How often a long call tells the client it is still working. Well inside
+# the silence a client tolerates, and rare enough not to be noise.
+PROGRESS_INTERVAL_SECONDS = 10.0
+
+# The Engine requests of a call stop themselves at the limit; this margin
+# is for whatever cannot be stopped from inside - a connect, a QRS call -
+# after which the call is abandoned from outside.
+_BACKSTOP_GRACE_SECONDS = 5.0
+
+
+def _tool():
+    """Register a tool with the MCP host, bounded in time.
+
+    Returns the function unchanged, so Python callers (the tests, anything
+    importing `server`) keep calling it synchronously. What the host gets
+    is `_bounded(func)`.
+    """
+    def decorator(func):
+        context.mcp.tool(**_unstructured())(_bounded(func))
+        return func
+    return decorator
+
+
+def _unstructured() -> Dict[str, Any]:
+    """Registration options that keep a reply to one layer of JSON.
+
+    Every tool returns a JSON document as text. An SDK that infers
+    structured output from the `-> str` annotation also sends that text as
+    `structuredContent: {"result": "<the same JSON as a string>"}`, and a
+    client that prefers the structured copy shows the model JSON escaped
+    inside a string - every quote doubled, the reply a third longer, and
+    nothing it can index. Declining structured output leaves the text
+    content, which is the JSON itself. SDKs older than the option never
+    added the copy, so they need nothing.
+    """
+    try:
+        accepted = inspect.signature(context.mcp.tool).parameters
+    except (TypeError, ValueError):  # pragma: no cover - a host without a signature
+        return {}
+    return {"structured_output": False} if "structured_output" in accepted else {}
+
+
+def _bounded(func):
+    """The async form of a tool that the MCP host runs.
+
+    A plain function registered with the host runs on its event loop, so a
+    call waiting on a slow Engine froze the server for every client, sent
+    nothing, and after 300 silent seconds the client dropped the session.
+    Here the tool body runs in a worker thread under the QLIK_TOOL_TIMEOUT
+    limit (`deadline`), the loop stays free, and every
+    PROGRESS_INTERVAL_SECONDS the client is sent a progress notification -
+    when it asked for them with a progress token; otherwise there is
+    nothing to send. At the limit the reply is an error that says so, and
+    the next call starts on a clean connection.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):  # pragma: no cover - builtins only
+        sig = None
+    uses_engine = getattr(func, "__engine_serialised__", False)
+
+    @functools.wraps(func)
+    async def runner(*args, **kwargs):
+        import anyio
+
+        from .. import deadline
+
+        limit = deadline.tool_timeout_seconds()
+        state = {}
+
+        def work():
+            with deadline.call_deadline(limit) as bound:
+                state["bound"] = bound
+                return func(*args, **kwargs)
+
+        if limit <= 0:
+            return await anyio.to_thread.run_sync(work)
+
+        ctx = _request_context()
+        started = time.monotonic()
+        result = None
+
+        async def heartbeat():
+            while True:
+                await anyio.sleep(PROGRESS_INTERVAL_SECONDS)
+                await _report_progress(ctx, time.monotonic() - started, limit)
+
+        with anyio.move_on_after(limit + _BACKSTOP_GRACE_SECONDS):
+            async with anyio.create_task_group() as group:
+                if ctx is not None:
+                    group.start_soon(heartbeat)
+                result = await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+                group.cancel_scope.cancel()
+
+        bound = state.get("bound")
+        if result is None:
+            # Abandoned from outside. The thread may still hold the Engine
+            # lock in a blocked recv(); breaking the socket lets it finish.
+            if uses_engine and context.engine_api is not None:
+                context.engine_api.abort_socket()
+            return _time_limit_reply(func.__name__, limit, sig, args, kwargs,
+                                     time.monotonic() - started)
+        if bound is not None and bound.expired:
+            try:
+                parsed = json.loads(result)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict) and "error" in parsed:
+                return _time_limit_reply(func.__name__, limit, sig, args, kwargs,
+                                         parsed.get("tool_call_seconds"))
+        return result
+
+    return runner
+
+
+def _time_limit_reply(name, limit, sig, args, kwargs, elapsed) -> str:
+    """The reply for a call the time limit stopped.
+
+    Replaces whatever the tool made of it: a step that swallowed the
+    timeout leaves the next one to fail with "not connected", which would
+    send the caller looking for a network fault.
+    """
+    return _err(
+        f"The call did not finish within its {limit:.0f}s time limit "
+        f"(QLIK_TOOL_TIMEOUT) and was stopped; the connection is fine. Ask "
+        f"for less in one call: fewer objects, fields or dimensions, a "
+        f"filter on the large table, or explicit field names.",
+        error_category="time_limit",
+        tool=name,
+        request=_describe_call(sig, args, kwargs),
+        tool_call_seconds=round(elapsed, 3) if isinstance(elapsed, (int, float)) else elapsed,
+    )
+
+
+def _request_context():
+    """The MCP request context of the running call, or None outside one."""
+    get_context = getattr(context.mcp, "get_context", None)
+    if get_context is None:
+        return None
+    try:
+        ctx = get_context()
+        return ctx if getattr(ctx, "request_context", None) is not None else None
+    except Exception:
+        return None
+
+
+async def _report_progress(ctx, elapsed: float, limit: float) -> None:
+    try:
+        await ctx.report_progress(
+            round(elapsed), limit,
+            f"still working, {elapsed:.0f}s of at most {limit:.0f}s")
+    except Exception as exc:  # a lost notification must not fail the call
+        logger.debug("Progress notification failed: %s", exc)
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

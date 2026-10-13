@@ -1,0 +1,140 @@
+{
+ "description": "A stacked bar chart: title from an expression, a master drill-down dimension, a top-N dimension, a reference line.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "bar1",
+    "qType": "barchart"
+   },
+   "visualization": "barchart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": {
+    "qStringExpression": {
+     "qExpr": "='Revenue by ' & vDimLabel"
+    }
+   },
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qLibraryId": "dPeriod",
+      "qDef": {
+       "qFieldDefs": [],
+       "qFieldLabels": []
+      }
+     },
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Channel"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_COUNTED",
+       "qOtherCounted": {
+        "qv": "5"
+       }
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qLibraryId": "mRevenue",
+      "qDef": {
+       "qLabel": "",
+       "qGrouping": "N"
+      },
+      "qCalcCondition": {}
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     2
+    ]
+   },
+   "barGrouping": {
+    "grouping": "stacked"
+   },
+   "refLine": {
+    "refLines": [
+     {
+      "refLineExpr": {
+       "value": "=Avg(total Amount)",
+       "label": "Average"
+      }
+     }
+    ]
+   },
+   "color": {
+    "auto": true
+   },
+   "legend": {
+    "show": true
+   },
+   "dimensionAxis": {
+    "show": "all"
+   },
+   "qLayoutExclude": {
+    "disabled": {
+     "measureAxes": [
+      {
+       "max": 1
+      }
+     ]
+    }
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "barchart \"='Revenue by ' & vDimLabel\": dims master dPeriod \"Period\" = Year > Month (drill-down), Channel (top 5, rest \"Others\"); measure master mRevenue \"Revenue\" = Sum(Amount); bars stacked; reference lines Average = =Avg(total Amount)",
+  "checks": {
+   "dimensions.0.fields": [
+    "Year",
+    "Month"
+   ],
+   "dimensions.1.top_n": "5",
+   "options.grouping": "stacked"
+  },
+  "fields_used": [
+   "Amount",
+   "Channel",
+   "Month",
+   "Year"
+  ]
+ }
+}

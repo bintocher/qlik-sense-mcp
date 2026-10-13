@@ -1,0 +1,24 @@
+{
+ "description": "An object on a sheet linked to a master visualization: its own properties are only qExtendsId.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "lk1",
+    "qType": "linechart"
+   },
+   "qExtendsId": "vUnitsByMonth",
+   "qMetaDef": {}
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "linechart \"Units by month\": dims Month; measure \"Units\" = Sum(Units); from master \"Units by month\" vUnitsByMonth",
+  "checks": {
+   "master_object.title": "Units by month"
+  },
+  "fields_used": [
+   "Month",
+   "Units"
+  ]
+ }
+}

@@ -1,0 +1,36 @@
+{
+ "description": "A GeoAnalytics map: its layers are separate objects of the app, linked by the map id; coordinates and pictures are not measures.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "gm1",
+    "qType": "ideviomap"
+   },
+   "visualization": "ideviomap",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Store map",
+   "mapId": 1700000001,
+   "mapOptions": {
+    "zoom": 3
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "ideviomap \"Store map\": layers: ideviobubblelayer \"Stores\"",
+  "checks": {
+   "children.0.tooltip_fields": [
+    "City",
+    "StoreName"
+   ],
+   "children.0.summary": "ideviobubblelayer \"Stores\": points StoreID; measure \"Store revenue\" = Sum(Amount); located by coordinates; tooltip City, StoreName"
+  },
+  "fields_used": [
+   "Amount",
+   "City",
+   "StoreID",
+   "StoreName"
+  ]
+ }
+}

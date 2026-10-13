@@ -1,0 +1,46 @@
+{
+ "description": "A variable input: the values it offers decode conditions written as $(vMode)=2 elsewhere.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "vi1",
+    "qType": "qlik-variable-input"
+   },
+   "visualization": "qlik-variable-input",
+   "version": "1.0.0",
+   "showTitles": true,
+   "variableName": "vMode",
+   "render": "b",
+   "valueType": "x",
+   "alternatives": [
+    {
+     "value": "1",
+     "label": "Count"
+    },
+    {
+     "value": "2",
+     "label": "Sum"
+    }
+   ],
+   "min": 0,
+   "max": 100,
+   "step": 1,
+   "variableValue": {
+    "qStringExpression": {
+     "qExpr": "=\"vMode\""
+    }
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "qlik-variable-input: variable vMode: 1=Count, 2=Sum; variables vMode",
+  "checks": {
+   "controls.0.alternatives": [
+    "1=Count",
+    "2=Sum"
+   ]
+  },
+  "fields_used": []
+ }
+}

@@ -15,11 +15,13 @@ from ..config import (
     AUTH_MODE_JWT,
     AUTH_MODE_FORM,
 )
+from .. import deadline
 from ..exceptions import (
     QlikConnectionError,
     QlikEngineError,
     QlikLicenseError,
     QlikSessionLimitError,
+    ToolTimeLimitError,
 )
 from ..jwt_session import JwtBootstrapError
 from ..form_session import FormBootstrapError
@@ -27,6 +29,8 @@ from contextlib import contextmanager
 from typing import Dict, List, Any, Optional
 import json
 import logging
+import os
+import socket
 import ssl
 import threading
 import time
@@ -35,12 +39,43 @@ import websocket
 
 logger = logging.getLogger(__name__)
 
+# What a socket timeout looks like from recv()/send(). websocket-client
+# wraps the socket's own timeout in WebSocketTimeoutException, which is not
+# a TimeoutError: catching only the latter sent every Engine timeout down
+# the generic "recv() failed" path instead of the timeout handling.
+_RECV_TIMEOUTS = (socket.timeout, TimeoutError, websocket.WebSocketTimeoutException)
+
 # Every Engine endpoint carries this: Qlik reads `/ttl/<n>` from the socket
 # path and drops the session that many seconds after the socket goes away.
 _TTL = f"/ttl/{WS_SESSION_TTL_SECONDS}"
 
 # Guards creation of a per-instance transaction lock, nothing else.
 _LOCK_CREATION_GUARD = threading.Lock()
+
+
+# Engine notifications that end or refuse a session. Said in the server
+# log at WARNING: without them a refused session showed there only as the
+# websocket library's "close status: 1001", which reads like a network fault.
+_SESSION_NOTIFICATIONS = ("OnMaxParallelSessionsExceeded", "OnSessionClosed",
+                          "OnSessionTimedOut", "OnLicenseAccessDenied",
+                          "OnEngineWebsocketFailed", "OnNoEngineAvailable",
+                          "OnSessionLoggedOut", "OnManyUsers")
+
+
+def _log_notification(frame: Dict[str, Any]) -> None:
+    method = frame.get("method")
+    if method in _SESSION_NOTIFICATIONS:
+        params = frame.get("params") or {}
+        logger.warning("Engine notification %s (severity=%s): %s", method,
+                       params.get("severity", "unknown"),
+                       params.get("message") or params.get("reason") or "")
+
+
+def _logout_allowed() -> bool:
+    """Whether this server may end its user's sessions on its virtual proxy
+    (on exit, and once when Engine refuses a session over the limit)."""
+    return os.getenv("QLIK_PROXY_LOGOUT", "true").strip().lower() not in (
+        "false", "0", "no", "off")
 
 
 class EngineConnectionMixin:
@@ -305,6 +340,7 @@ class EngineConnectionMixin:
 
         last_error = None
         session_retried = False  # one re-bootstrap per connect() call
+        limit_retried = False    # one logout per connect() call
         i = 0
         while i < len(endpoints_to_try):
             url = endpoints_to_try[i]
@@ -329,12 +365,29 @@ class EngineConnectionMixin:
                 # call, which says nothing about the real cause.
                 self._consume_greeting()
                 return  # Success
-            except (QlikSessionLimitError, QlikLicenseError):
-                # Quota or a missing license, not a bad endpoint - every
-                # fallback URL would be refused the same way, and a fresh login
-                # cannot grant a license. Surface as-is: retrying here would
-                # spend one more Qlik session on a certain failure and bring the
-                # per-user limit closer.
+            except QlikSessionLimitError as limit:
+                # The sessions filling the limit are most often this
+                # server's own, left by earlier starts on this proxy: they
+                # live until its inactivity timeout. Ending them - the one
+                # logout a virtual proxy offers, for this user on this
+                # proxy only - and logging in again frees the limit once;
+                # a second refusal is someone else's sessions and is said.
+                logger.warning("Engine refused the session: %s", limit)
+                self._kill_socket()
+                if (is_cookie_mode and cookie_session is not None
+                        and not limit_retried and _logout_allowed()):
+                    limit_retried = True
+                    logger.warning("Ending this user's sessions on the proxy "
+                                   "and logging in again")
+                    cookie_session.logout()
+                    endpoints_to_try, headers = _refresh_cookie_session_and_rebuild(
+                        "the session limit")
+                    continue  # retry same i
+                raise
+            except QlikLicenseError:
+                # A missing license, not a bad endpoint - every fallback URL
+                # would be refused the same way, and a fresh login cannot
+                # grant a license.
                 self._kill_socket()
                 raise
             except websocket.WebSocketBadStatusException as e:
@@ -401,11 +454,12 @@ class EngineConnectionMixin:
     # the per-user cap.
     _FATAL_GREETINGS = {
         "OnMaxParallelSessionsExceeded": (
-            "Qlik refused the Engine session: the per-user limit of concurrent "
-            "sessions is exhausted. Existing sessions stay alive until the "
-            "virtual proxy inactivity timeout expires. Close them (QPS "
-            "delete-user-sessions) or wait for the timeout, and avoid running "
-            "several MCP servers or parallel tool calls against one account."
+            "Qlik refused the Engine session: this user already holds as many "
+            "Qlik sessions as Qlik allows (five by default). They end when the "
+            "virtual proxy's inactivity timeout passes; closing other Qlik tabs "
+            "or clients of this account, or stopping other servers that use it, "
+            "frees them sooner, and a Qlik administrator can end them at once. "
+            "Retrying now will be refused the same way."
         ),
         "OnSessionClosed": "Qlik closed the Engine session immediately after connect.",
         "OnSessionTimedOut": "Qlik reported the Engine session as timed out on connect.",
@@ -422,7 +476,6 @@ class EngineConnectionMixin:
         typed error here, because the socket is closed right after it and
         every later call would otherwise fail with an unrelated parse error.
         """
-        import socket as _socket
 
         # Greeting frames arrive immediately; a long wait here would only
         # delay the fallback to the next endpoint.
@@ -432,7 +485,7 @@ class EngineConnectionMixin:
             for _ in range(10):
                 try:
                     data = self.ws.recv()
-                except (_socket.timeout, TimeoutError):
+                except _RECV_TIMEOUTS:
                     # No OnConnected within the window: keep the socket and
                     # let the first real request decide. Pre-1.7.2 behaviour.
                     logger.debug("No OnConnected within %.1fs, proceeding anyway",
@@ -452,6 +505,7 @@ class EngineConnectionMixin:
                     continue
 
                 method = frame.get("method")
+                _log_notification(frame)
                 if method in self._FATAL_GREETINGS:
                     params = frame.get("params") or {}
                     message = (
@@ -629,6 +683,66 @@ class EngineConnectionMixin:
                 pass
             self.ws = None
 
+    def _within_deadline(self, timeout: Optional[float],
+                         method: str) -> "tuple[Optional[float], bool]":
+        """The socket timeout for one request, cut to the tool call's time left.
+
+        Returns the timeout to use and whether the tool's limit, rather than
+        QLIK_WS_TIMEOUT, is what bounds it. A call with no time left fails
+        before sending anything, so the socket stays clean.
+        """
+        left = deadline.remaining()
+        base = timeout if timeout is not None else self.ws_timeout_seconds
+        if left is None or left >= base:
+            return timeout, False
+        if left <= 0:
+            raise self._time_limit_error(method)
+        return left, True
+
+    @staticmethod
+    def _time_limit_error(method: str) -> ToolTimeLimitError:
+        limit = deadline.mark_expired()
+        return ToolTimeLimitError(
+            f"The call did not finish within its {limit:.0f}s time limit "
+            f"(QLIK_TOOL_TIMEOUT) and was stopped at Engine method "
+            f"'{method}'. The connection is fine; ask for less in one call: "
+            f"fewer objects, fields or dimensions, a filter on the large "
+            f"table, or explicit field names.")
+
+    def _cancel_and_drop(self, request_ids: List[int]) -> None:
+        """Ask Engine to abandon these requests, then drop the socket.
+
+        Closing the socket alone leaves Engine computing for a session
+        nobody reads; `CancelRequest` stops the calculation. The socket
+        still goes, because the cancelled replies would arrive later as
+        stray frames.
+        """
+        if self.ws is not None:
+            try:
+                self._set_socket_timeout(2.0)
+                for request_id in request_ids:
+                    self.ws.send(json.dumps({
+                        "jsonrpc": "2.0", "id": self._get_next_request_id(),
+                        "handle": -1, "method": "CancelRequest",
+                        "params": {"qRequestId": request_id}}))
+            except Exception as exc:
+                logger.debug("CancelRequest failed: %s", exc)
+        self._kill_socket()
+
+    def abort_socket(self) -> None:
+        """Break a request blocked in another thread, without waiting.
+
+        `close()` sends a close frame and waits for the answer; this only
+        shuts the socket, so the blocked `recv()` fails at once and the
+        thread that owns the call cleans up after itself.
+        """
+        ws = self.ws
+        if ws is not None:
+            try:
+                ws.shutdown()
+            except Exception as exc:
+                logger.debug("Socket shutdown failed: %s", exc)
+
     def send_request(
         self, method: str, params: List[Any] = None, handle: int = -1,
         timeout: float = None,
@@ -652,10 +766,10 @@ class EngineConnectionMixin:
             handle: Object handle for scoped operations (-1 for global)
             timeout: Override socket timeout for this request (seconds)
         """
-        import socket as _socket
         if not self.ws:
             raise ConnectionError("Not connected to Engine API")
 
+        timeout, time_limited = self._within_deadline(timeout, method)
         effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
         if timeout is not None:
             self._set_socket_timeout(timeout)
@@ -673,7 +787,7 @@ class EngineConnectionMixin:
         try:
             try:
                 self.ws.send(json.dumps(request))
-            except (_socket.timeout, TimeoutError) as e:
+            except _RECV_TIMEOUTS as e:
                 self._kill_socket()
                 raise TimeoutError(
                     f"WebSocket send() timed out after {effective_timeout:.1f}s "
@@ -716,6 +830,7 @@ class EngineConnectionMixin:
                     if frame_id is None:
                         # Engine notifications: OnConnected, OnAuthenticated,
                         # OnSessionTimedOut, change events. Harmless.
+                        _log_notification(frame)
                         logger.debug(
                             "send_request[%s req_id=%d]: skipping notification: %s",
                             method, req_id, frame.get("method", "<no-method>"),
@@ -736,7 +851,10 @@ class EngineConnectionMixin:
                             f"received {stray_frames} stray frames without a "
                             f"matching id, killing connection"
                         )
-            except (_socket.timeout, TimeoutError) as e:
+            except _RECV_TIMEOUTS as e:
+                if time_limited:
+                    self._cancel_and_drop([req_id])
+                    raise self._time_limit_error(method) from e
                 self._kill_socket()
                 raise TimeoutError(
                     f"WebSocket recv() timed out after {effective_timeout:.1f}s "
@@ -826,12 +944,13 @@ class EngineConnectionMixin:
             left holding unread frames that a later call could mistake for
             its own.
         """
-        import socket as _socket
         if not self.ws:
             raise ConnectionError("Not connected to Engine API")
         if not requests:
             return []
 
+        timeout, time_limited = self._within_deadline(
+            timeout, requests[0].get("method", "batch"))
         effective_timeout = timeout if timeout is not None else self.ws_timeout_seconds
         if timeout is not None:
             self._set_socket_timeout(timeout)
@@ -854,7 +973,7 @@ class EngineConnectionMixin:
                 }
                 try:
                     self.ws.send(json.dumps(payload))
-                except (_socket.timeout, TimeoutError) as e:
+                except _RECV_TIMEOUTS as e:
                     self._kill_socket()
                     raise TimeoutError(
                         f"WebSocket send() timed out after {effective_timeout:.1f}s "
@@ -872,7 +991,11 @@ class EngineConnectionMixin:
             while pending:
                 try:
                     data = self.ws.recv()
-                except (_socket.timeout, TimeoutError) as e:
+                except _RECV_TIMEOUTS as e:
+                    if time_limited:
+                        self._cancel_and_drop(list(pending))
+                        raise self._time_limit_error(
+                            requests[next(iter(pending.values()))]["method"]) from e
                     self._kill_socket()
                     raise TimeoutError(
                         f"WebSocket recv() timed out after {effective_timeout:.1f}s "
@@ -905,6 +1028,7 @@ class EngineConnectionMixin:
                     # timed-out request — same stray-frame handling as
                     # send_request().
                     if frame_id is None:
+                        _log_notification(frame)
                         logger.debug(
                             "send_requests_pipelined: skipping notification: %s",
                             frame.get("method", "<no-method>"),

@@ -50,8 +50,8 @@ def details(monkeypatch):
     def build(fields):
         monkeypatch.setattr(repository.context, "engine_api", _Engine(fields))
         monkeypatch.setattr(repository.context, "repo_api", _Repo())
-        monkeypatch.setattr(repository, "_attach_sample_values",
-                            lambda handle, fields: None)
+        monkeypatch.setattr(repository, "_values_and_ranges",
+                            lambda handle, fields: ({}, {}))
         repository._DETAILS_CACHE.clear()
         return json.loads(repository.get_app_details("app-1"))
     return build
@@ -68,7 +68,7 @@ class TestWhatIsKept:
     def test_the_load_script_comment_reaches_the_caller(self, details):
         """The only human description a column ever has."""
         reply = details([_field(comment="Сумма заказа без НДС")])
-        assert reply["fields"][0]["comment"] == "Сумма заказа без НДС"
+        assert reply["tables"][0]["fields"][0]["comment"] == "Сумма заказа без НДС"
 
 
 
@@ -77,7 +77,7 @@ class TestWhatIsDropped:
     def test_no_comment_means_no_key(self, details):
         """An empty comment on every field is noise, not information."""
         reply = details([_field()])
-        assert "comment" not in reply["fields"][0]
+        assert "comment" not in reply["tables"][0]["fields"][0]
 
 
 

@@ -43,8 +43,9 @@ from typing import Optional
 
 import httpx
 
+from . import session_cache
 from .config import QlikSenseConfig
-from .utils import pick_qlik_session_cookie
+from .utils import looks_like_qlik_session_name, pick_qlik_session_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,28 @@ def token_problem(token: str, now: Optional[float] = None) -> Optional[str]:
     return None
 
 
+def _drop_session_cookies(client: httpx.Client) -> None:
+    """Remove Qlik session cookies from a jar; load balancer cookies stay."""
+    for name in list(client.cookies.keys()):
+        if looks_like_qlik_session_name(name):
+            client.cookies.delete(name)
+
+
+def _sent_session_cookie(request: Optional[httpx.Request]) -> tuple[Optional[str], Optional[str]]:
+    """The Qlik session cookie a request carried, if any."""
+    if request is None:
+        return None, None
+    sent = {}
+    for part in request.headers.get("cookie", "").split(";"):
+        name, sep, value = part.strip().partition("=")
+        if sep and value:
+            sent[name] = value
+    for name, value in sent.items():
+        if looks_like_qlik_session_name(name):
+            return name, value
+    return None, None
+
+
 class JwtSession:
     """
     Lazy, thread-safe holder of the bootstrapped Qlik session material.
@@ -140,6 +163,15 @@ class JwtSession:
         self._cookie_value: Optional[str] = None
         self._csrf_token: Optional[str] = None
         self._fetched_at: float = 0.0
+        # Survives invalidate(): whether this proxy has ever issued a session,
+        # which decides whether a missing cookie points at its configuration.
+        self._logged_in_before = False
+        # A session a previous start of this server left behind is taken
+        # up again rather than a new one opened: see session_cache.
+        self._cache_key = session_cache.key_for(
+            "jwt", config.qlik_base_host, config.virtual_proxy_prefix,
+            config.jwt_token)
+        self._cache_checked = False
 
     # ─── public surface ────────────────────────────────────────────────
     # Reader properties snapshot the three session fields under the lock
@@ -182,6 +214,8 @@ class JwtSession:
             self._fetched_at = 0.0
             # Forget the name too, so a fresh Set-Cookie is picked up.
             self._cookie_name = None
+            self._cache_checked = True
+        session_cache.forget(self._cache_key)
 
     def logout(self) -> bool:
         """Ask the proxy to end this user's Qlik session, and forget it.
@@ -193,7 +227,9 @@ class JwtSession:
         with `OnMaxParallelSessionsExceeded`, which looks like an outage
         and lasts until the timeout expires.
 
-        Not called automatically. `DELETE /{vp}/qps/user` is the only
+        Called on the way out (`context.shutdown`) and once when Engine
+        refuses a session over the limit, unless QLIK_PROXY_LOGOUT=false.
+        `DELETE /{vp}/qps/user` is the only
         logout a virtual proxy exposes — the per-session endpoint needs
         admin rights on port 4243 — and it ends every session this user
         holds *on this virtual proxy*. Measured: sessions
@@ -243,14 +279,27 @@ class JwtSession:
         throwaway one) is copied in here as well: otherwise the Repository
         client starts with an empty jar, gets a 302 on its first call and logs
         in again, spending a second Qlik session for nothing.
+
+        The login itself never runs on the shared client. Once the TTL runs
+        out its jar still holds the previous session cookie; the proxy
+        recognises it, answers 204 without Set-Cookie, and a login that
+        demanded a new cookie failed there - every QRS call after the first
+        25 minutes of a long-lived server did. So the stale cookie is dropped
+        from the shared jar, the login runs on a cookieless client exactly as
+        ``ensure_standalone`` does, and the new cookie is copied in.
         """
         if self._is_fresh():
             self._apply_cookie_to(http_client)
             return
         with self._lock:
-            if self._is_fresh():  # re-check under lock
-                return
-            self._bootstrap(http_client)
+            if not self._is_fresh():  # re-check under lock
+                _drop_session_cookies(http_client)
+                client = self._build_bootstrap_client()
+                try:
+                    self._bootstrap(client)
+                finally:
+                    client.close()
+            self._apply_cookie_to(http_client)
 
     def ensure_standalone(self) -> None:
         """
@@ -294,6 +343,9 @@ class JwtSession:
         and a session that loses it gets a 403 that the existing re-login path
         already handles.
         """
+        if not self._cookie_value and not self._cache_checked:
+            self._cache_checked = True
+            session_cache.restore(self, self._cache_key, self._ttl)
         if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
@@ -387,6 +439,18 @@ class JwtSession:
 
         cookie_name, cookie_value = self._pick_session_cookie(resp)
         if not cookie_value:
+            # A proxy that recognises the session cookie the request carried
+            # answers 204 and sets nothing: the session is alive, not broken.
+            cookie_name, cookie_value = _sent_session_cookie(resp.request)
+        if not cookie_value:
+            if self._logged_in_before:
+                # The same proxy set a cookie before, so its configuration is
+                # fine; advice about QMC here sent the reader the wrong way.
+                raise JwtBootstrapError(
+                    f"Re-login to the virtual proxy returned HTTP "
+                    f"{resp.status_code} without a session cookie, although "
+                    "an earlier login on the same proxy worked. Retry the call."
+                )
             raise JwtBootstrapError(
                 "csrftoken response did not set a Qlik session cookie. "
                 f"Cookies received: {list(resp.cookies.keys()) or 'none'}. "
@@ -397,12 +461,14 @@ class JwtSession:
                 "name containing 'Qlik'."
             )
 
+        self._logged_in_before = True
         self._cookie_name = cookie_name
         self._cookie_value = cookie_value
         # Store "missing" as None (not ""); the public csrf_token property
         # stays Optional[str] and downstream code uses truthiness checks.
         self._csrf_token = csrf or None
         self._fetched_at = time.time()
+        session_cache.store(self, self._cache_key)
         logger.info(
             "JWT session bootstrap OK (cookie=%s, csrf_present=%s)",
             cookie_name, bool(csrf),

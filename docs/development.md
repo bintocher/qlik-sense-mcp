@@ -84,7 +84,7 @@ The PyPI package version is read from `pyproject.toml`.
    `srv.my_new_tool` keeps resolving. Clients are read through
    `context`, never captured at import time:
    ```python
-   @mcp.tool()
+   @_tool()
    @_timed
    @_engine_serialised
    def my_new_tool(app_id: str, foo: int = 10) -> str:
@@ -109,7 +109,10 @@ The PyPI package version is read from `pyproject.toml`.
            return _err(str(ex))
    ```
 3. The decorators are not optional:
-   - `@mcp.tool()` registers the function with the MCP host. Use
+   - `@_tool()` registers the function with the MCP host, in the
+     bounded form that runs it in a worker thread under
+     `QLIK_TOOL_TIMEOUT` and reports progress; the function itself is
+     returned unchanged for Python callers. Use
      `@_task_admin_tool()` instead if the tool needs QRS admin rights
      (reload-task administration) — it registers the tool by default in
      certificate mode only (`QLIK_TASK_TOOLS=true` can turn it on in JWT

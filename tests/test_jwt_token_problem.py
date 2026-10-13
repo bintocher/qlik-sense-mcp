@@ -64,20 +64,26 @@ class _Client:
         return httpx.Response(self.status, text="Bad Request",
                               request=httpx.Request("GET", url))
 
+    def close(self):
+        pass
 
-def _session(token):
-    return JwtSession(QlikSenseConfig(server_url="https://qlik.example.com/jwt",
-                                      jwt_token=token))
+
+def _session(token, client):
+    session = JwtSession(QlikSenseConfig(server_url="https://qlik.example.com/jwt",
+                                         jwt_token=token))
+    # The login runs on its own cookieless client, not the shared one.
+    session._build_bootstrap_client = lambda: client
+    return session
 
 
 class TestBootstrap:
     def test_an_expired_token_never_reaches_the_proxy(self):
         client = _Client()
         with pytest.raises(JwtBootstrapError, match="expired on"):
-            _session(_token({"exp": 1})).ensure(client)
+            _session(_token({"exp": 1}), client).ensure(_Client())
         assert client.requests == 0
 
     def test_a_400_for_a_live_token_says_the_token_was_refused(self):
         client = _Client(status=400)
         with pytest.raises(JwtBootstrapError, match="did not accept QLIK_JWT_TOKEN"):
-            _session(_token({"exp": 4_000_000_000})).ensure(client)
+            _session(_token({"exp": 4_000_000_000}), client).ensure(_Client())

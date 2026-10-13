@@ -22,11 +22,15 @@ qlik-sense-mcp/
 │   │   ├── queries.py    #   engine_query: a stated query, written and run
 │   │   ├── expressions.py#   Expression checks performed by Qlik itself
 │   │   ├── filters.py    #   Filters written as set analysis, and proven
+│   │   ├── outer_set.py  #   A filter in front of an expression, and what
+│   │   │                 #   in a measure keeps it out
+│   │   ├── canonical.py  #   One written form per expression; Engine codes
 │   │   ├── fields.py     #   Values, ranges, statistics, descriptions
 │   │   ├── sheets.py     #   Sheets and their objects
 │   │   └── app_model.py  #   Data model, master items, variables
 │   ├── config.py         # QlikSenseConfig + defaults
 │   ├── exceptions.py     # Error types carried into the response envelope
+│   ├── deadline.py       # Time limit of the tool call in progress
 │   ├── repository_api.py # Repository (HTTP/QRS) client
 │   ├── jwt_session.py    # JWT session bootstrap + cache (since v1.5.0)
 │   ├── form_session.py   # Login/password session bootstrap + cache
@@ -163,10 +167,10 @@ back-to-back and matches responses by `id`, which is exactly what the
 Engine's numeric request ids are for. `send_request()` is unchanged and
 still used everywhere else.
 
-`_get_sheet_objects_detailed()` is the one caller: it resolves every child
-object's handle in one batch and reads every layout in a second, so a
-sheet with N objects costs 2 round-trips instead of 2N. Measured against a
-live sheet with 16 objects: 0.135s to 0.028s for identical results.
+Its callers resolve a set of handles in one batch and read their
+definitions in a second, so N objects cost 2 round-trips instead of 2N -
+the master visualizations behind a sheet's linked objects, and the
+master items its charts use.
 `raise_on_error=False` keeps per-object isolation — one broken object is
 skipped rather than losing the sheet.
 
@@ -280,6 +284,104 @@ field statistics). Heavy operations like building a hypercube against a
 raise `QLIK_WS_TIMEOUT` if you see `WebSocket recv() timed out`. The
 limit is per-call, not per-session.
 
+Above it sits `QLIK_TOOL_TIMEOUT` (default `240s`), the limit for a whole
+tool call. MCP clients drop the session, not just the call, after a few
+minutes of silence (Claude Code after 300 seconds), which leaves the model
+without tools. So the host does not run a tool on its event loop: `_tool()`
+registers an async form that runs the tool body in a worker thread under
+a deadline (`deadline.py`). `send_request` and `send_requests_pipelined`
+cut their socket timeout to the time the call has left; when that is what
+runs out they send Engine `CancelRequest` for the pending ids, drop the
+socket and raise `ToolTimeLimitError`, and the reply carries
+`error_category: "time_limit"`. Anything that cannot be stopped from
+inside - a connect, a QRS request - is abandoned from outside five seconds
+later, after shutting the Engine socket so the worker thread lets go of the
+Engine lock. While a call runs, a progress notification goes out every 10
+seconds when the client sent a progress token; without one the protocol
+gives the server nothing to send, and it stays silent until the limit.
+
+`get_app_sheet_objects` never calls `GetLayout`, which makes Engine
+compute each chart. The sheet's `GetFullPropertyTree` returns every object
+and every container's children as definitions in one request; objects
+linked to a master visualization are read from the master's properties.
+
+#### Reading objects by type
+
+[`engine/objects.py`](../qlik_sense_mcp_server/engine/objects.py) turns
+properties into a description without talking to Engine. It reads a
+whitelist of paths per type, because most of the bytes of a definition are
+formatting and leftovers of a type the object used to be: `qLayoutExclude`,
+`qUndoExclude`, `qMiniChartDef` in every measure, `extensionMeta`. Roles the
+expression does not carry are written out - the axis of a combo measure,
+the position of a scatter measure, the sign of a waterfall step, the target
+of a bullet chart that lives in the measure, the plan of a gauge that lives
+in its axis. An extension without a rule goes through a universal reader
+that walks the tree for cubes, list objects and expressions and drops what
+is colour, style, a URL or a constant.
+
+The walk starts from the sheet's `cells`. A container's children are in
+the tree but not in the cells; they are reported inside their container,
+three levels deep at most, each object once. What objects point at is
+read in batches and remembered per app: master visualizations by
+`qExtendsId`, a trellis' `vizId` or a Vizlib container's `masterItemId`
+(`GetEffectiveProperties` when a master cannot be read on its own), master
+items from the library, GeoAnalytics layers, which are separate objects
+linked to their map only by its id.
+
+`get_app_object` computes an object's data from the same description: its
+dimensions and measures go to `create_hypercube` as one straight cube
+(`qMode: "S"`), whatever the chart - a pivot or a stacked chart would
+otherwise come back as a tree of nodes. A histogram becomes `Class()` and
+a count, a bullet chart's target a column of its own, a map its first
+layer's measures. Show conditions are evaluated as scalars first, and a
+column the object hides now is left out, as the object leaves it out.
+
+#### Filters: the period form, outer sets, the fan-out check
+
+A period on a date field is written in the first form that counts the same
+values as a reference `Count(DISTINCT If(...))`: a range in the field's own
+display format (`{">=01.08.2026<01.09.2026"}`, the format read off the
+field's first value against `DateFormat` and `TimestampFormat`), then a
+numeric range for a field shown as a number, then the expression search,
+which is scored per value and not reached by an outer set. The form and
+the format are remembered for ten minutes per field. Modifiers are ordered
+by field name.
+
+[`engine/outer_set.py`](../qlik_sense_mcp_server/engine/outer_set.py)
+places a filter in front of a whole expression - a master measure named
+by its label, or an expression whose `{filter}` marker stands first - as
+`{&<...>}`, and reads the expression for what keeps it out: a field the
+measure sets itself, a set with an identifier, `$(=...)`, P()/E() over
+sets of their own. A marker next to a set of the expression's own is merged
+into it, since Qlik reads one of two sets side by side; what cannot be
+merged is refused. It also gives, per aggregation, the sets it reads
+through (`set_contexts`). It talks to nothing; `get_app_details` uses the
+same reading for `measures[].filter_limits`.
+
+The control values of a period (the field's first and last value in the
+result) go out in the batch that creates the cubes. When the filtered
+field reaches the largest table through a date key, the key's count and
+ends under the filter go in the same batch: key values outside the period
+are a shifted or cumulative calendar, reported as `period_check.fan_out`.
+Every probe is written through the sets of the measure it checks, exactly
+as the measure is sent, so whatever Qlik does with those sets the probe
+does too.
+
+[`engine/layers.py`](../qlik_sense_mcp_server/engine/layers.py) finds the
+calendars whose date key towards the facts has fewer values than the
+table has rows, and asks Engine, once per app and over the calendar alone,
+which value of a few-valued field (or pair of fields) keeps one row per
+date that is the date itself. A filter on such a calendar is checked for
+key values that belong to other values of its field
+(`fan_out_check`); `get_app_details` states the condition as
+`plain_layer`.
+
+[`engine/canonical.py`](../qlik_sense_mcp_server/engine/canonical.py)
+writes hand-written expressions in one form - function case, whitespace,
+`Today()`/`Now()` as the day - because Engine's shared result cache
+matches text exactly, and puts the meaning of Engine's error codes (7004,
+7009, 30100, 19, 6, 7002) into the error text.
+
 ### `FastMCP` server ([server.py](../qlik_sense_mcp_server/server.py))
 
 The host object comes from the
@@ -300,7 +402,7 @@ takes `host`/`port` in the constructor, 2.x in
 contract down so the next SDK change fails in CI rather than at a user's
 first tool call.
 
-The host registers every `@mcp.tool()`-decorated function as an MCP tool. Each
+The host registers every `@_tool()`-decorated function as an MCP tool. Each
 tool is also wrapped in the local `_timed` decorator, which:
 
 1. Measures wall-clock time of the call.
@@ -334,7 +436,7 @@ branch on the `error` key instead.
 #### Per-mode tool registration (since v1.6.0)
 
 Reload-task tools are declared with `@_task_admin_tool()` instead of
-`@mcp.tool()`. That decorator registers the function only when
+`@_tool()`. That decorator registers the function only when
 `_TASK_TOOLS_ENABLED` is true, because QRS task administration
 (`/qrs/reloadtask`, `/qrs/executionresult`, script-log download)
 requires repository-admin rights — a QMC role, not a property of the

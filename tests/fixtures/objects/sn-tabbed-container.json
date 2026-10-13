@@ -1,0 +1,186 @@
+{
+ "description": "A new tabbed container: objects[] is the tab list; a tab without a child is dropped.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "tc1",
+    "qType": "sn-tabbed-container"
+   },
+   "visualization": "sn-tabbed-container",
+   "version": "1.0.0",
+   "showTitles": true,
+   "defaultTabId": "tc1-a",
+   "objects": [
+    {
+     "childRefId": "ka",
+     "label": "Count"
+    },
+    {
+     "childRefId": "kb",
+     "label": "Amount"
+    }
+   ],
+   "children": [
+    {
+     "refId": "ka",
+     "label": "Count"
+    },
+    {
+     "refId": "kb",
+     "label": "Amount"
+    },
+    {
+     "refId": "kc",
+     "label": "Orphan tab"
+    }
+   ],
+   "extensionMeta": {
+    "icon": "M0 0"
+   }
+  },
+  "qChildren": [
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "tc1-a",
+      "qType": "kpi"
+     },
+     "visualization": "kpi",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Order count",
+     "childRefId": "ka",
+     "qHyperCubeDef": {
+      "qReductionMode": "N",
+      "qMode": "S",
+      "qPseudoDimPos": -1,
+      "qNoOfLeftDims": -1,
+      "qMaxStackedCells": 5000,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qInitialDataFetch": [
+       {
+        "qLeft": 0,
+        "qTop": 0,
+        "qWidth": 10,
+        "qHeight": 500
+       }
+      ],
+      "qLayoutExclude": {
+       "qHyperCubeDef": {
+        "qDimensions": [],
+        "qMeasures": []
+       }
+      },
+      "qDimensions": [],
+      "qMeasures": [
+       {
+        "qDef": {
+         "qLabel": "",
+         "qDef": "Count(OrderID)",
+         "qGrouping": "N",
+         "autoSort": true,
+         "numFormatFromTemplate": true
+        },
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qSortBy": {
+         "qSortByNumeric": -1
+        },
+        "qMiniChartDef": {
+         "qOtherTotalSpec": {
+          "qOtherMode": "OTHER_OFF"
+         }
+        }
+       }
+      ],
+      "qInterColumnSortOrder": [
+       0
+      ]
+     }
+    },
+    "qChildren": []
+   },
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "tc1-b",
+      "qType": "kpi"
+     },
+     "visualization": "kpi",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Order amount",
+     "childRefId": "kb",
+     "qHyperCubeDef": {
+      "qReductionMode": "N",
+      "qMode": "S",
+      "qPseudoDimPos": -1,
+      "qNoOfLeftDims": -1,
+      "qMaxStackedCells": 5000,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qInitialDataFetch": [
+       {
+        "qLeft": 0,
+        "qTop": 0,
+        "qWidth": 10,
+        "qHeight": 500
+       }
+      ],
+      "qLayoutExclude": {
+       "qHyperCubeDef": {
+        "qDimensions": [],
+        "qMeasures": []
+       }
+      },
+      "qDimensions": [],
+      "qMeasures": [
+       {
+        "qDef": {
+         "qLabel": "",
+         "qDef": "Sum(Amount)",
+         "qGrouping": "N",
+         "autoSort": true,
+         "numFormatFromTemplate": true
+        },
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qSortBy": {
+         "qSortByNumeric": -1
+        },
+        "qMiniChartDef": {
+         "qOtherTotalSpec": {
+          "qOtherMode": "OTHER_OFF"
+         }
+        }
+       }
+      ],
+      "qInterColumnSortOrder": [
+       0
+      ]
+     }
+    },
+    "qChildren": []
+   }
+  ]
+ },
+ "expect": {
+  "summary": "sn-tabbed-container: 2 tabs: \"Count\" -> kpi \"Order count\"; \"Amount\" -> kpi \"Order amount\"",
+  "checks": {
+   "children.1.tab": "Amount"
+  },
+  "fields_used": [
+   "Amount",
+   "OrderID"
+  ]
+ }
+}

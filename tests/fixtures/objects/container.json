@@ -1,0 +1,202 @@
+{
+ "description": "A container of tabs: the tab picked by a variable, a master tab via containerChild, a child missing from the tab list.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "ct1",
+    "qType": "container"
+   },
+   "visualization": "container",
+   "version": "1.0.0",
+   "showTitles": true,
+   "defaultTab": "ct1-bar",
+   "children": [
+    {
+     "refId": "rBar",
+     "label": "By region",
+     "cId": "c1",
+     "condition": {
+      "qStringExpression": {
+       "qExpr": "=$(vMode)=1"
+      }
+     }
+    },
+    {
+     "refId": "vUnitsByMonth",
+     "label": "Trend",
+     "isMaster": true,
+     "condition": {
+      "qStringExpression": {
+       "qExpr": "=$(vMode)=2"
+      }
+     }
+    },
+    {
+     "refId": "rGone",
+     "label": "Removed tab"
+    }
+   ],
+   "showTabs": true,
+   "qChildListDef": {
+    "qData": {}
+   }
+  },
+  "qChildren": [
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "ct1-bar",
+      "qType": "barchart"
+     },
+     "visualization": "barchart",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Revenue by region",
+     "containerChildId": "rBar",
+     "qHyperCubeDef": {
+      "qReductionMode": "N",
+      "qMode": "S",
+      "qPseudoDimPos": -1,
+      "qNoOfLeftDims": -1,
+      "qMaxStackedCells": 5000,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qInitialDataFetch": [
+       {
+        "qLeft": 0,
+        "qTop": 0,
+        "qWidth": 10,
+        "qHeight": 500
+       }
+      ],
+      "qLayoutExclude": {
+       "qHyperCubeDef": {
+        "qDimensions": [],
+        "qMeasures": []
+       }
+      },
+      "qDimensions": [
+       {
+        "qDef": {
+         "qGrouping": "N",
+         "qFieldDefs": [
+          "Region"
+         ],
+         "qFieldLabels": [
+          ""
+         ],
+         "autoSort": true
+        },
+        "qNullSuppression": false,
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qOtherTotalSpec": {
+         "qOtherMode": "OTHER_OFF"
+        }
+       }
+      ],
+      "qMeasures": [
+       {
+        "qLibraryId": "mRevenue",
+        "qDef": {
+         "qLabel": "",
+         "qGrouping": "N"
+        },
+        "qCalcCondition": {}
+       }
+      ],
+      "qInterColumnSortOrder": [
+       0,
+       1
+      ]
+     }
+    },
+    "qChildren": []
+   },
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "ct1-child",
+      "qType": "containerChild"
+     },
+     "qExtendsId": "vUnitsByMonth",
+     "qMetaDef": {}
+    },
+    "qChildren": []
+   },
+   {
+    "qProperty": {
+     "qInfo": {
+      "qId": "ct1-kpi",
+      "qType": "kpi"
+     },
+     "visualization": "kpi",
+     "version": "1.0.0",
+     "showTitles": true,
+     "title": "Orders",
+     "containerChildId": "rOther",
+     "qHyperCubeDef": {
+      "qReductionMode": "N",
+      "qMode": "S",
+      "qPseudoDimPos": -1,
+      "qNoOfLeftDims": -1,
+      "qMaxStackedCells": 5000,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qInitialDataFetch": [
+       {
+        "qLeft": 0,
+        "qTop": 0,
+        "qWidth": 10,
+        "qHeight": 500
+       }
+      ],
+      "qLayoutExclude": {
+       "qHyperCubeDef": {
+        "qDimensions": [],
+        "qMeasures": []
+       }
+      },
+      "qDimensions": [],
+      "qMeasures": [
+       {
+        "qLibraryId": "5c1f0c2e-8d0a-4b7e-9a51-3f2d6c7b8e90",
+        "qDef": {
+         "qLabel": "",
+         "qGrouping": "N"
+        },
+        "qCalcCondition": {}
+       }
+      ],
+      "qInterColumnSortOrder": [
+       0
+      ]
+     }
+    },
+    "qChildren": []
+   }
+  ]
+ },
+ "expect": {
+  "summary": "container: 3 tabs: \"By region\" -> barchart \"Revenue by region\" [if =$(vMode)=1]; \"Trend\" -> linechart \"Units by month\" [if =$(vMode)=2]; kpi \"Orders\"; variables vMode",
+  "checks": {
+   "children.0.tab": "By region",
+   "children.0.default_tab": true,
+   "children.1.master_object.id": "vUnitsByMonth",
+   "children.1.object_type": "linechart"
+  },
+  "fields_used": [
+   "Amount",
+   "Month",
+   "OrderID",
+   "Region",
+   "Units"
+  ]
+ }
+}

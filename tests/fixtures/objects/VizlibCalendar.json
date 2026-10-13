@@ -1,0 +1,112 @@
+{
+ "description": "A Vizlib calendar: field, range mode, quick ranges, an action that sets a variable and a default empty one.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "vc1",
+    "qType": "VizlibCalendar"
+   },
+   "visualization": "VizlibCalendar",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Order date",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qFieldDefs": [
+        "OrderDate"
+       ],
+       "measure": {
+        "mode": false,
+        "value": "Count(OrderID)"
+       },
+       "heatmap": {
+        "palette": 1
+       }
+      }
+     }
+    ],
+    "qMeasures": [],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "calendar": {
+    "mode": "range"
+   },
+   "minDate": {
+    "qStringExpression": {
+     "qExpr": "=Min({1} OrderDate)"
+    }
+   },
+   "maxDate": "",
+   "daterange": [
+    {
+     "name": "Last 7 Days",
+     "useCustomDateRangeName": true,
+     "customRangeName": "Past week"
+    },
+    {
+     "name": "This Month",
+     "useCustomDateRangeName": false
+    }
+   ],
+   "actions": [
+    {
+     "name": "Set Variable",
+     "variable": {
+      "name": "vPeriodPicked",
+      "value": "=1"
+     },
+     "url": {
+      "url": "http://"
+     }
+    },
+    {
+     "name": "Set Variable",
+     "variable": {
+      "name": "",
+      "value": ""
+     }
+    }
+   ],
+   "props": {
+    "alternateState": ""
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "VizlibCalendar \"Order date\": on OrderDate, date range, within =Min({1} OrderDate) .. , quick ranges Past week, This Month; actions Set Variable vPeriodPicked to =1; variables vPeriodPicked",
+  "checks": {
+   "controls.1.variable": "vPeriodPicked"
+  },
+  "fields_used": [
+   "OrderDate"
+  ]
+ }
+}

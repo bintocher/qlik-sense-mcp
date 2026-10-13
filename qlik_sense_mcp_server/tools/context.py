@@ -124,6 +124,39 @@ def _init_clients():
 
 _init_clients()
 
+
+_shut_down = False
+
+
+def shutdown() -> None:
+    """Close the Engine socket and end the proxy session this process holds.
+
+    A session left open outlives the process until the proxy's inactivity
+    timeout and counts against the five Qlik allows a user; restarting a
+    server a few times without this refused every call for a quarter of an
+    hour. The logout ends this user's sessions on this virtual proxy only
+    (see JwtSession.logout); `QLIK_PROXY_LOGOUT=false` keeps them. Runs
+    once, and never raises: it is called on the way out.
+    """
+    global _shut_down
+    if _shut_down:
+        return
+    _shut_down = True
+    try:
+        if engine_api is not None:
+            engine_api.disconnect()
+    except Exception as exc:  # pragma: no cover - best effort on exit
+        logger.debug("Closing the Engine socket on exit failed: %s", exc)
+    if os.getenv("QLIK_PROXY_LOGOUT", "true").strip().lower() in ("false", "0", "no", "off"):
+        return
+    for session in (jwt_session, form_session):
+        if session is None:
+            continue
+        try:
+            session.logout()
+        except Exception as exc:  # pragma: no cover - best effort on exit
+            logger.debug("Proxy logout on exit failed: %s", exc)
+
 # ─── MCP server host ────────────────────────────────────────────────────────
 
 _mcp_host = "127.0.0.1"
@@ -184,5 +217,8 @@ def _task_admin_tool():
     """Register a tool only when task administration was asked for and
     the current mode allows it — see `_TASK_TOOLS_ENABLED` above."""
     def decorator(fn):
-        return mcp.tool()(fn) if _TASK_TOOLS_ENABLED else fn
+        if not _TASK_TOOLS_ENABLED:
+            return fn
+        from .helpers import _tool  # helpers imports this module
+        return _tool()(fn)
     return decorator

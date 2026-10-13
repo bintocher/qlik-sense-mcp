@@ -1,0 +1,96 @@
+{
+ "description": "A Vizlib KPI: the measure is a text layer outside the cube, the title another text layer.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "vk1",
+    "qType": "VizlibKPI"
+   },
+   "visualization": "VizlibKPI",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [],
+    "qInterColumnSortOrder": []
+   },
+   "layers": [
+    {
+     "layername": "Text 1",
+     "label": "Text",
+     "textLayerContentText": {
+      "qStringExpression": {
+       "qExpr": "=Sum(Amount)\r\n/\nSum(Budget)\n-1"
+      }
+     },
+     "textLayerContentTextFormat": ",.0%",
+     "showHideLayer": "",
+     "masterItemLayer": {
+      "masterItemId": ""
+     },
+     "bulletChartProperties": {}
+    },
+    {
+     "layername": "Text 2",
+     "label": "Text",
+     "textLayerContentText": "Revenue vs budget",
+     "masterItemLayer": {
+      "masterItemId": ""
+     }
+    },
+    {
+     "layername": "Text 3",
+     "label": "Text",
+     "textLayerContentText": {
+      "qStringExpression": {
+       "qExpr": "=Sum(Budget)"
+      }
+     },
+     "showHideLayer": "=$(vShowBudget)=1",
+     "masterItemLayer": {
+      "masterItemId": ""
+     }
+    }
+   ],
+   "extensionMeta": {
+    "name": "Vizlib KPI v9.9.9"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "VizlibKPI \"Revenue vs budget\": measures Sum(Amount) / Sum(Budget) -1 [format ,.0%], Sum(Budget) [if =$(vShowBudget)=1]; variables vShowBudget",
+  "checks": {
+   "title": "Revenue vs budget",
+   "measures.1.condition": "=$(vShowBudget)=1"
+  },
+  "fields_used": [
+   "Amount",
+   "Budget"
+  ]
+ }
+}

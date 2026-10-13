@@ -1,0 +1,64 @@
+{
+ "description": "A Vizlib container: tabs point at master visualizations; a grid tab repeats its first cell and has a dead cell.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "vcn1",
+    "qType": "VizlibContainer"
+   },
+   "visualization": "VizlibContainer",
+   "version": "1.0.0",
+   "showTitles": true,
+   "containerObjects": [
+    {
+     "viewType": "single",
+     "masterItemId": "vTopProducts",
+     "label": "Products",
+     "condition": "1"
+    },
+    {
+     "viewType": "grid",
+     "masterItemId": "vShare",
+     "label": "Mix",
+     "condition": 1,
+     "gridView": {
+      "masterItems": [
+       {
+        "masterItemId": "vShare",
+        "cellId": "g1"
+       },
+       {
+        "masterItemId": "vUnitsByMonth",
+        "cellId": "g2"
+       },
+       {
+        "masterItemId": "vTopProducts",
+        "label": 3
+       }
+      ]
+     }
+    }
+   ],
+   "containerSettings": {
+    "containerStyle": "tabs"
+   },
+   "cell": {
+    "background": {}
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "VizlibContainer: tabs: \"Products\" -> table \"Top products\" vTopProducts; \"Mix\" -> piechart \"Share by channel\" vShare; \"Mix\" -> linechart \"Units by month\" vUnitsByMonth",
+  "checks": {
+   "children.2.master_object.id": "vUnitsByMonth"
+  },
+  "fields_used": [
+   "Amount",
+   "Channel",
+   "Month",
+   "Product",
+   "Units"
+  ]
+ }
+}

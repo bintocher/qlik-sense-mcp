@@ -37,6 +37,15 @@ right one**, because Qlik answers a bad filter with a number rather than an
 error. The mitigations in this server (unknown-field refusal, all-zero
 measure warnings, sample values in `get_app_details`) exist for that reason.
 
+Two more shapes of the same mistake were seen on a 1.16-billion-row app.
+Models rewrote the app's master measures by hand to put a period into
+them and got the conditions wrong; a master measure now takes the filter
+as an outer set in front of it, and the reply names a measure whose own
+set keeps the filter out. And a filter on the date of a year-shift
+calendar applied correctly and still summed three months of facts, 3.04
+times the month's turnover: the period check now reads the key the date
+reaches the facts through and says when it holds days outside the period.
+
 ## What a deep investigation looks like
 
 Given a chain where each step depends on the previous answer, models do walk
@@ -96,10 +105,29 @@ count it separately.
 
 ## Reply size
 
-`get_app_details` is the largest reply in normal use and stays small: 3.4k
-characters for an 11-field model, 6.5k for 33 fields. Past 60 fields it
-switches to a `columns` + `rows` table — 16k for 300 fields instead of the
-~32k the same content costs as objects.
+`get_app_details` is the largest reply in normal use and is held under 20k
+tokens (characters / 2.5). On a 97-field, 67-measure app with 698 bookmarks the
+old reply was 57k characters, a client moved it to a file, and the model
+answered without it: a third of it was user bookmarks, a third whole measure
+expressions, and the 48 short fields came without their values, which cost 34
+extra calls. The reply now lists approved bookmarks only, cuts measure
+expressions at 150 characters, folds `Y-1`/`YoY`/`%` variants under their base
+measure, and gives every short field its values; past the budget it trims
+values to 10 and expressions to 80 characters and says so in
+`size_budget.trimmed`.
+
+It also says how the author's own sheets use the model (`usage`): per field,
+in how many objects it appears and whether it is grouped by, aggregated or
+only named in a set modifier, and next to which measures. A date field used
+in 17 objects next to the revenue measures and a look-alike used in none is
+the evidence a model needs to pick the period field, and it is the report's
+evidence, not the server's guess.
+
+The reply states the model, it does not choose for the caller: which table
+holds facts, which key links what, how many dates a calendar has against its
+rows. Which date field is "the period" is left to the caller - a hint that
+named the first date-like field picked a shifted calendar's date on a real app
+and tripled the figures.
 
 Field metadata carries what cannot be inferred and drops what can: the
 load-script comment (the only human description a column has) and Qlik's

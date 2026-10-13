@@ -9,10 +9,12 @@ import time
 from typing import Any, Dict, List, Optional, Union
 
 from . import context
-from .context import mcp
 from .schema import (Filter, Measure, Metric, Query, Scope)
+from ..utils import bare_field_name
+from ..engine.objects import public as public_object
 from .helpers import (
     _check,
+    _tool,
     _engine_serialised,
     _err,
     _ok,
@@ -28,13 +30,64 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 
+# A script page. A large app's script runs to thousands of lines; whole, it
+# is one of the largest replies a model can ask for and most of it is not
+# what the question is about.
+SCRIPT_PAGE_LINES = 400
+# Lines shown either side of a search hit: enough to see the LOAD a field
+# belongs to and the FROM it comes from.
+SCRIPT_SEARCH_CONTEXT = 5
 
-@mcp.tool()
+
+def script_page(script: str, offset: int, limit: int,
+                search: Optional[str] = None) -> Dict[str, Any]:
+    """One page of a load script, or the blocks around a search term.
+
+    Lines are split on "\\n" alone, so a "\\r" stays with its line and the
+    pages joined with "\\n" are the script, byte for byte.
+    """
+    lines = script.split("\n") if script else []
+    total = len(lines)
+    page: Dict[str, Any] = {"total_lines": total}
+    if not search:
+        chunk = lines[offset:offset + limit]
+        page["qScript"] = "\n".join(chunk)
+        page["returned_lines"] = len(chunk)
+        if offset + limit < total:
+            page["next_offset"] = offset + limit
+        return page
+
+    needle = search.lower()
+    hits = [i for i, line in enumerate(lines) if i >= offset and needle in line.lower()]
+    blocks: List[List[int]] = []
+    for i in hits:
+        low, high = max(0, i - SCRIPT_SEARCH_CONTEXT), min(total - 1, i + SCRIPT_SEARCH_CONTEXT)
+        if blocks and low <= blocks[-1][1] + 1:
+            blocks[-1][1] = max(blocks[-1][1], high)
+        else:
+            blocks.append([low, high])
+    matches, used = [], 0
+    for low, high in blocks:
+        if used and used + (high - low + 1) > limit:
+            page["next_offset"] = low
+            break
+        matches.append({"lines": f"{low}-{high}", "text": "\n".join(lines[low:high + 1])})
+        used += high - low + 1
+    page["search"] = search
+    page["match_count"] = len(hits)
+    page["matches"] = matches
+    page["returned_lines"] = used
+    return page
+
+
+@_tool()
 @_timed
 @_engine_serialised
-def get_app_script(app_id: str) -> str:
+def get_app_script(app_id: str, offset: int = 0, limit: int = SCRIPT_PAGE_LINES,
+                   search: Optional[str] = None) -> str:
     """
-    Read an app's load script — the LOAD statements that built its data.
+    Read an app's load script — the LOAD statements that built its data —
+    a page of lines at a time, or only the lines around a word.
 
     WHEN TO USE
         To learn where the data came from and what was done to it: source
@@ -42,6 +95,8 @@ def get_app_script(app_id: str) -> str:
         expressions rely on. Worth reading before writing anything
         elaborate, since the script explains names that look arbitrary in
         the data model.
+        With `search` to find where one field, table or variable is made
+        without reading the whole script.
 
     WHEN NOT TO USE
         To find out which fields exist or how large they are —
@@ -49,10 +104,21 @@ def get_app_script(app_id: str) -> str:
 
     Args:
         app_id: application GUID, from `get_apps` or `get_app_details`.
+        offset: first line to return, counted from 0. Default 0.
+        limit: lines per page. Default 400.
+        search: text to look for, case insensitive. Only the lines that
+            contain it come back, each with 5 lines either side, as blocks
+            of consecutive lines; `offset` and `limit` then page through
+            the blocks by script line.
 
     Returns:
-        `qScript` (the whole script as one string), `script_length`,
-        `app_id`. An empty script comes with a `note` saying whether the
+        `qScript` - the page: lines `offset` to `offset + limit` joined by
+        newlines, so pages joined with a newline give the script back
+        exactly. `total_lines`, `returned_lines`, `next_offset` (absent on
+        the last page), `script_length` of the whole script, `app_id`.
+        With `search`: `matches` - blocks of `{"lines": "120-131", "text"}`
+        - and `match_count` instead of `qScript`.
+        An empty script comes with a `note` saying whether the
         app has none or this identity may not read it — reading the script
         needs Professional access, and an Analyzer licence gets an empty
         string rather than an error.
@@ -63,15 +129,19 @@ def get_app_script(app_id: str) -> str:
     e = _check()
     if e:
         return e
+    for name, value, least in (("offset", offset, 0), ("limit", limit, 1)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int)
+                                  or value < least):
+            return _err(f"{name}={value!r} is not a line count of at least {least}.",
+                        error_category="invalid_argument")
     try:
         # no_data=False so the cached connection is reusable for later data calls
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         script = context.engine_api.get_script(app_handle)
-        reply = {
-            "qScript": script,
-            "app_id": app_id,
-            "script_length": len(script) if script else 0,
-        }
+        reply = {"app_id": app_id}
+        reply.update(script_page(script or "", offset or 0, limit or SCRIPT_PAGE_LINES,
+                                 search))
+        reply["script_length"] = len(script) if script else 0
         if not script:
             # Engine returns an empty string rather than an error when the
             # identity may not read the script — an Analyzer licence, for
@@ -89,7 +159,7 @@ def get_app_script(app_id: str) -> str:
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_field_statistics(
@@ -146,7 +216,7 @@ def get_app_field_statistics(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def engine_get_field_range(app_id: str, field_name: str) -> str:
@@ -187,7 +257,7 @@ def engine_get_field_range(app_id: str, field_name: str) -> str:
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def engine_query(
@@ -205,6 +275,7 @@ def engine_query(
     exclude_null_dimensions: bool = False,
     suppress_zero: bool = False,
     include_raw_layout: bool = False,
+    accept_fan_out: bool = False,
 ) -> str:
     """
     Answer a question about an app's data: group by fields, aggregate
@@ -240,7 +311,10 @@ def engine_query(
         Up to 25 queries in one call, and up to 200 grouping fields,
         measures and filter values between them — every one of those is
         checked by Qlik before the batch runs. Plan the whole question in
-        one call rather than discovering it one round-trip at a time.
+        one call rather than discovering it one round-trip at a time. A
+        period per query is one query grouped by the period field: a batch
+        past the cap whose queries differ only in one filter is refused
+        with `one_query`, the query that answers all of them.
 
     WHEN NOT TO USE
         A calculation this vocabulary cannot state — a nested aggregation,
@@ -350,14 +424,21 @@ def engine_query(
         limit: rows per query, default 100, cap 5000.
         queries: a list of whole queries, each with the keys above plus an
             optional "id". Use it for several independent questions at
-            once. When present, the single-query arguments are ignored.
+            once. `group_by`, `metrics`, `measures`, `filters` and `scope`
+            stated beside it are shared: each query that does not state
+            its own takes them. `filters` add up: a query's own filters
+            join the shared ones, and on a field both name its own wins,
+            said in `notes`. Paging and sorting arguments are per query.
         measures: an escape hatch inside a query, for one expression this
-            vocabulary cannot state — `[{"expression": "Sum({filter} A) / "
-            "Count({filter} B)", "label": "AOV"}]`. With `filters`, the
-            expression must mark where the filter goes: a set modifier
-            narrows the aggregation it sits in, and only the author knows
-            which one that is. Without the marker the query is refused
-            rather than answered with an unfiltered number.
+            vocabulary cannot state — `[{"expression": "{filter} Sum(A) / "
+            "Count(B)", "label": "AOV"}]`. With `filters`, the marker says
+            where they go. In front of the whole expression, `{filter}
+            (...)`, it is an outer set and reaches every aggregation
+            inside; inside one aggregation, `Sum({filter} A)`, it narrows
+            that one alone; next to a set of the expression's own,
+            `Sum({filter} {<F={1}>} A)`, it is merged into that set. Without
+            the marker the filters go in front of the whole expression and
+            `warnings` says so.
 
     RETURNS
         `results`, one entry per query, each with `id`, `columns`, `rows`
@@ -365,13 +446,22 @@ def engine_query(
         `grand_total` across all groups, and `sorted_by`.
         `filters_applied` states what each filter resolved to.
         `period_check` gives the earliest and latest value of each filtered
-        date field inside the result, so the period is verifiable from the
-        answer itself.
+        date field as each measure reads it, through the measure's own
+        sets, so the period is verifiable from the answer itself; a measure
+        the filter did not reach is named. `period_check.fan_out` names the
+        date key the field reaches the largest table through, when that key
+        holds days outside the period under the filter - a shifted or
+        cumulative calendar - with the number of key values and their ends.
+        `fan_out_check` does the same for any filter, value lists included,
+        on a calendar whose dates repeat: the key values it reached belong
+        to other values of its field too. Either way the figures cover more
+        than was named; `warnings` leads with it, per query and at the top
+        of the reply.
         A query that fails carries `error` and `error_category`; the others
         in the batch still answer.
 
     THE APP'S OWN MEASURES
-        `get_app_details` carries `library`: the measures and dimensions
+        `get_app_details` carries `measures` and `dimensions`: the ones
         the author of this app defined, with their expressions and their
         descriptions. When one of them answers the question, name it
         instead of assembling the aggregation yourself:
@@ -382,6 +472,14 @@ def engine_query(
         by hand risks a neighbouring field or a different aggregation -
         an answer that looks reasonable and is not the one anyone here
         would recognise.
+
+        With `filters`, the filter goes in front of the measure as an outer
+        set - `{&<period>} [Sales MUSD]` - and reaches every aggregation in
+        it. Three things keep it out, and `warnings` names the measure when
+        one applies (`filter_limits` in `get_app_details` says so in
+        advance): a field the measure sets itself (its own condition wins),
+        a set of its own with an identifier (`{1<...>}`, `{$<...>}`, a
+        bookmark), and `$(=...)`, computed before the filter.
 
     SETS
         `scope` says what a query counts over before any filter narrows
@@ -414,6 +512,15 @@ def engine_query(
         `hypercube_data`, the untouched Qlik answer, beside the shaped
         one - the same key `engine_create_hypercube` uses.
         Every one of them can also be stated per query inside `queries`.
+
+    A FILTER THAT COVERS MORE THAN IT NAMES
+        A filter on a calendar whose dates repeat (cumulative, as-of or
+        shifted rows) that reaches key values of other periods, or a
+        grouping by such a calendar without its plain layer, is checked
+        before anything is computed. Such a query is not computed: it
+        comes back with `error_category: "fan_out"`, the `fan_out_check`
+        and the condition that keeps one row per date. `accept_fan_out:
+        true` computes it as written anyway.
 
     DOES NOT RETURN
         Per-cell state or the expressions it wrote. Row-level records —
@@ -457,7 +564,20 @@ def engine_query(
             "exclude_null_dimensions": exclude_null_dimensions,
             "suppress_zero": suppress_zero,
             "include_raw_layout": include_raw_layout,
+            "accept_fan_out": accept_fan_out,
         }]
+    elif isinstance(queries, list):
+        # Stated beside `queries`, these are shared by every query that does
+        # not state its own. They used to be ignored without a word: a
+        # model sent its measures and filters once for three queries, and
+        # got "asks for no measure" - or, with measures of their own,
+        # figures without the filters it had stated.
+        shared = {"group_by": group_by, "metrics": metrics,
+                  "measures": measures, "filters": filters, "scope": scope}
+        shared = {key: value for key, value in shared.items() if value is not None}
+        if shared:
+            queries = [_with_shared(query, shared) if isinstance(query, dict)
+                       else query for query in queries]
     if not isinstance(queries, list) or not queries:
         return _err(
             "queries must be a non-empty list of query objects",
@@ -485,7 +605,38 @@ def engine_query(
                     app_id=app_id)
 
 
-@mcp.tool()
+def _with_shared(query: Dict[str, Any], shared: Dict[str, Any]) -> Dict[str, Any]:
+    """One query with the arguments stated beside `queries`.
+
+    A key the query states replaces the shared one, except `filters`: the
+    shared filters stay and the query's own are added, its own winning on
+    a field both name - dropping a shared period silently is the error
+    this contract exists to prevent.
+    """
+    merged = dict({key: value for key, value in shared.items()
+                   if key not in query
+                   and not (key == "group_by" and "dimensions" in query)},
+                  **query)
+    own = query.get("filters")
+    if isinstance(own, list) and isinstance(shared.get("filters"), list):
+        own_fields = {bare_field_name(str(f.get("field") or ""))
+                      for f in own if isinstance(f, dict)}
+        kept, replaced = [], []
+        for entry in shared["filters"]:
+            name = (bare_field_name(str(entry.get("field") or ""))
+                    if isinstance(entry, dict) else "")
+            (replaced if name in own_fields else kept).append(entry)
+        merged["filters"] = kept + list(own)
+        if replaced:
+            fields = ", ".join(sorted({f"[{bare_field_name(str(e.get('field') or ''))}]"
+                                       for e in replaced}))
+            merged["_shared_notes"] = [
+                f"The query states its own filter on {fields}, which replaces "
+                f"the shared one on that field; the other shared filters apply."]
+    return merged
+
+
+@_tool()
 @_timed
 @_engine_serialised
 def engine_create_hypercube(
@@ -501,6 +652,7 @@ def engine_create_hypercube(
     max_rows: Optional[int] = None,
     offset: int = 0,
     filters: Optional[List[Dict[str, Any]]] = None,
+    accept_fan_out: bool = False,
 ) -> str:
     """
     Run a grouped aggregation written as Qlik expressions.
@@ -538,9 +690,30 @@ def engine_create_hypercube(
                            "label": "Revenue"}],
              "filters": [{"field": "OrderDate", "period": "2024"}]}
 
-        The marker `{filter}` is required with `filters`, because a set
-        modifier narrows the aggregation it sits in and only the author of
-        the expression knows which one that is.
+        Put `{filter}` in front of the whole expression and it is an outer
+        set, which reaches every aggregation inside, master measures named
+        by label included:
+
+            {"measures": [{"expression": "{filter} [Revenue] / [Orders]",
+                           "label": "AOV"}],
+             "filters": [{"field": "OrderDate", "period": "2024"}]}
+
+        Inside one aggregation, `Sum({filter} Amount)`, it narrows that
+        aggregation alone, and a measure without it is left unfiltered.
+        With no marker in any measure, every measure takes the filters in
+        front of it, and `warnings` says so.
+        Next to a set of the expression's own - `Sum({filter} {<Flag={1}>}
+        Amount)` or `Sum({filter <Flag={1}>} Amount)` - the filter is
+        merged into that set: Qlik reads one of two sets side by side and
+        drops the other without a word. A field named both in the set and
+        in `filters`, two sets of the expression's own, or a set joined by
+        an operator is refused. `warnings` says when the expression sets a
+        filtered field itself, counts over a set with an identifier
+        (`{1<...>}`), holds `$(=...)`, or picks values with P()/E() over
+        sets the filter does not reach.
+        `period_check` reads the ends of a bounded filter's field through
+        each measure's own sets, so a filter that did not reach the figure
+        shows as `filter_applied: false` with the measure named.
 
         Or write the set analysis yourself:
 
@@ -624,11 +797,18 @@ def engine_create_hypercube(
             times more tokens than `rows` and is rarely needed.
         max_rows: Alias for `limit`. If both are given, `max_rows` wins.
         filters: Filters described rather than written, applied wherever a
-            measure carries the `{filter}` marker. Same shapes as
+            measure carries the `{filter}` marker, or in front of every
+            measure when none does. Same shapes as
             `engine_query`: `{"field": "OrderDate", "from": "2024-01-01",
             "to": "2024-12-31"}` for a period, `{"field": "Discount",
             "from": 400}` for a range of any other field, or
             `{"field": "Region", "values": ["North"]}` for named values.
+        accept_fan_out: Compute a query the checks found covering more
+            dates than it names (`fan_out_check`: a filter on a calendar
+            whose dates repeat, or a grouping by one without its plain
+            layer). By default such a query is answered with
+            `error_category: "fan_out"` and the check, before anything is
+            computed.
 
     Returns:
           - `columns`: column names, in row order.
@@ -644,6 +824,16 @@ def engine_create_hypercube(
           - `truncation_warning`: set when `total_rows > returned_rows`.
             For an unsorted query the rows are arbitrary; add `sort_by`.
           - `filters_applied`: what each described filter resolved to.
+          - `period_check`: per bounded filter and measure, the earliest and
+            latest value of the field as the measure read it, and
+            `filter_applied`.
+          - `fan_out_check`: a filter - described, or written by hand in a
+            measure's own set - on a calendar whose dates repeat (more rows
+            than dates: cumulative, as-of or shifted layers) whose key
+            values belong to other values of its field too: the `field`,
+            the fact `table` and `key`, how many `key_values` it reached,
+            `per_value`, and the `repeating_tables` that cause it. `warnings` then leads
+            with it and names the rows that pick one per date.
           - `timings`: seconds per step.
 
     Does not return:
@@ -690,6 +880,7 @@ def engine_create_hypercube(
             exclude_null_dimensions=exclude_null_dimensions,
             offset=offset,
             filters=filters,
+            accept_fan_out=accept_fan_out,
         )
         # Opening the app dominates the first call against a cold app, so
         # report it next to the query time instead of hiding it in the
@@ -710,7 +901,7 @@ def engine_create_hypercube(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_field(
@@ -855,7 +1046,7 @@ def get_app_field(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_variables(
@@ -885,7 +1076,9 @@ def get_app_variables(
         offset: variables to skip.
         created_in_script: `"true"` for script `SET`/`LET` only, `"false"`
             for ones made in the interface, omitted for both.
-        search_string: wildcard filter on the name or the value.
+        search_string: part of the name or of the value (`Rate` finds
+            `vRate`); with `*` it is a pattern of the whole text instead
+            (`v*` - names starting with v).
         case_sensitive: default false.
 
     Returns:
@@ -925,7 +1118,11 @@ def get_app_variables(
         # `variables_from_script` permanently empty on the default call —
         # half the reply was structurally dead.
         if search_string:
-            rx = _wildcard_to_regex(search_string, case_sensitive)
+            # A part of the name finds it: "Rate" found nothing next to
+            # "vRate", and a model concluded the variable did not exist.
+            wanted = (search_string if any(c in search_string for c in "*%")
+                      else f"*{search_string}*")
+            rx = _wildcard_to_regex(wanted, case_sensitive)
             prepared = [x for x in prepared if rx.match(x["name"]) or rx.match(x["text_value"])]
         page = prepared[off:off + lim]
         # Always objects, never "" for an empty one: a field whose type
@@ -944,7 +1141,7 @@ def get_app_variables(
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_sheets(app_id: str) -> str:
@@ -986,36 +1183,105 @@ def get_app_sheets(app_id: str) -> str:
 
 
 
-@mcp.tool()
+def _sheet_object_entry(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """One object of `get_app_sheet_objects`, children in the same shape.
+
+    The `summary` line carries what the object shows - dimensions,
+    measures with their expressions, conditions, alternatives, roles - in
+    a fraction of the structured form's size; `get_app_object` has the
+    structure. `fields_used` of a container includes everything inside it,
+    so a child does not repeat it.
+    """
+    entry = {"object_id": obj.get("object_id", ""),
+             "object_type": obj.get("object_type", "")}
+    if obj.get("title"):
+        entry["title"] = obj["title"]
+    entry["summary"] = obj.get("summary", "")
+    for key in ("tab", "shown_if", "default_tab", "fields_used"):
+        if obj.get(key):
+            entry[key] = obj[key]
+    if obj.get("children"):
+        entry["children"] = [
+            {k: v for k, v in _sheet_object_entry(child).items() if k != "fields_used"}
+            for child in obj["children"]]
+    return entry
+
+
+def _master_item(app_handle: int, item_id: str) -> Optional[Dict[str, Any]]:
+    """A master measure or dimension by id, whole.
+
+    `get_app_details` cuts measure expressions at 150 characters and gives
+    the id of each one it cut; this is where the id leads.
+    """
+    read = getattr(context.engine_api, "_library_items_by_id", None)
+    if read is None:
+        return None
+    found = read(app_handle, [item_id])
+    for kind, entries in (("measure", found.get("measures")),
+                          ("dimension", found.get("dimensions"))):
+        for entry in entries or []:
+            item = {"object_id": item_id, "object_type": f"master {kind}",
+                    "title": entry.get("name", "")}
+            item.update({k: v for k, v in entry.items() if k not in ("id", "name")})
+            return item
+    return None
+
+
+def _variables_of(described: Dict[str, Any]) -> List[str]:
+    names = list(described.get("variables") or [])
+    for child in described.get("children") or []:
+        names += [n for n in _variables_of(child) if n not in names]
+    return names
+
+
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
     """
-    List the charts on one sheet, with the fields and expressions behind
-    them.
+    List the objects on one sheet, each as one line saying what it shows.
 
     WHEN TO USE
-        To see what a sheet works with, in one call: `fields_used` covers
-        the fields reached through master items and through a filter
-        pane's listboxes as well as the obvious ones. Also to find the
-        `object_id` of a chart mentioned by title.
-        The `measures` here are the authors' own expressions — the closest
-        thing to a definition of what a figure means in this app.
+        To see what a sheet works with, in one call, and to find the
+        `object_id` of a chart mentioned by title. Each `summary` names the
+        dimensions (`[label]=field`, `[label]==expression`, or
+        `master <id> "<name>" = field`) and the measures with their
+        expressions - the authors' own formulas, the closest thing to a
+        definition of what a figure means in this app. Measure roles that
+        the expression does not show are written out: bar or line and the
+        axis of a combo chart, x/y/size of a scatter plot, the target of a
+        bullet chart, the sign of a waterfall step. Also shown: alternative
+        measures a user can switch to, show and calculation conditions,
+        top-N limits, alternate states, `$(variables)` the formulas depend
+        on, the fields of filters and date pickers, the values a variable
+        input offers, what buttons select or set.
 
     WHEN NOT TO USE
-        For a chart's current data — `get_app_object` returns that.
+        For a chart's data - `get_app_object` computes it.
 
     Args:
         app_id: application GUID.
         sheet_id: from `get_app_sheets`.
 
     Returns:
-        `objects`, each with `object_id`, `object_type` (`barchart`,
-        `table`, `kpi`, `listbox`), `object_description` (its title),
-        `fields_used`, `measures` and `dimensions`; plus `total_objects`.
+        `objects` in reading order, each with `object_id`, `object_type`,
+        `title` when it has one, `summary` and `fields_used` (fields
+        reached through master items and filter panes included). A
+        container lists its tabs in `children`, each with `tab` (the tab
+        label) and `shown_if` (the condition that picks the tab) where set;
+        children are not repeated at the top level. Plus `total_objects`.
 
     Does not return:
-        Computed values, formatting, or layout position.
+        Computed values, formatting, or layout position. Nothing is
+        calculated to answer this, so it stays fast on any app size.
+
+    Example:
+        Call: {"app_id": "...", "sheet_id": "..."}
+        Returns: {"objects": [{"object_id": "a1b2", "object_type": "combochart",
+                  "title": "Sales and orders",
+                  "summary": "combochart \\"Sales and orders\\": dims [Month]=OrderMonth; bar \\"Sales\\" = Sum(Amount), line (axis 2) \\"Orders\\" = Count(distinct OrderID); alt measures \\"Margin\\" = Sum(Margin)",
+                  "fields_used": ["Amount", "Margin", "OrderID", "OrderMonth"]}],
+                  "total_objects": 1}
     """
     e = _check()
     if e:
@@ -1024,39 +1290,25 @@ def get_app_sheet_objects(app_id: str, sheet_id: str) -> str:
         # no_data=False to keep the cached connection data-ready
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
         objects = context.engine_api._get_sheet_objects_detailed(app_handle, sheet_id) or []
-        formatted = [
-            {"object_id": o.get("object_id", ""),
-             "object_type": o.get("object_type", ""),
-             "object_description": o.get("object_title", ""),
-             # Already computed while reading each object's layout and
-             # properties. Dropping any of it meant answering "which fields
-             # does this sheet work with" took one get_app_object call per
-             # object — and the expressions were not reachable at all, since
-             # the layout get_app_object returns does not contain them.
-             "fields_used": o.get("fields_used", []),
-             "measures": o.get("measures", []),
-             "dimensions": o.get("dimensions", [])}
-            for o in objects if isinstance(o, dict)
-        ]
+        formatted = [_sheet_object_entry(o) for o in objects if isinstance(o, dict)]
         return _ok({"app_id": app_id, "sheet_id": sheet_id, "total_objects": len(formatted), "objects": formatted})
     except Exception as ex:
         return _err(str(ex), app_id=app_id, sheet_id=sheet_id)
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def get_app_object(app_id: str, object_id: str, limit: int = 50,
                    offset: int = 0) -> str:
     """
-    Read one chart in full: its definition and the data it currently
-    shows.
+    Read one object in full: its definition and the data it shows.
 
     WHEN TO USE
         When a figure on a dashboard has to be explained or reproduced.
-        Compare the chart's own expressions with yours rather than
-        comparing the two numbers — where they differ it is almost always
+        Compare the object's own expressions with yours rather than
+        comparing the two numbers - where they differ it is almost always
         the filters, not the arithmetic.
 
     WHEN NOT TO USE
@@ -1066,133 +1318,117 @@ def get_app_object(app_id: str, object_id: str, limit: int = 50,
 
     Args:
         app_id: application GUID.
-        object_id: from `get_app_sheet_objects`.
-        limit: rows of the object's own data to return, 50 by default.
-            The definition and the expressions come back whole; it is the
-            data that is paged, because a live table holds thousands of
-            rows and the answer stops being readable long before it stops
-            being complete.
-        offset: row to start from. The reply carries `data_rows`,
-            `data_rows_total` and, while there is more, `next_offset`.
+        object_id: from `get_app_sheet_objects`; or the `id` of a master
+            measure or dimension from `get_app_details`, which returns that
+            item's whole expression or definition, without data.
+        limit: rows of data to return, 50 by default; the same limits as
+            `engine_create_hypercube` apply (at most 5000 rows and 9900
+            cells).
+        offset: row to start from. `data.has_more` and `data.next_offset`
+            say whether there is another page.
 
     Returns:
-        The object's `qLayout` with one page of its data, plus `measures`,
-        `dimensions` and `fields_used`. Read the expressions from `measures`: Engine does
-        not put them in the layout, where `qMeasureInfo` carries only the
-        fallback title, formatting and statistics. Master items are
-        resolved to their library definitions. Computed data sits in
-        `qLayout.qHyperCube.qDataPages`.
+        The definition read without calculation: `object_type`, `title`,
+        `summary` (the line `get_app_sheet_objects` shows), `dimensions`
+        (`field`, `expression` or `master_id` with `master_name` and
+        `definition`; `label`, `role`, `condition`, `top_n` where set),
+        `measures` (`expression` or `master_id` with its expression;
+        `label` or `label_expression`, `role`, `condition`, `format`,
+        `target`), and where they apply `alt_measures`, `conditions`,
+        `state`, `context_set`, `controls`, `children`, `text`,
+        `variables` (each `$(name)` used, with its definition, null when
+        the app has no such variable) and `fields_used`.
+
+        `data` is computed by the server as one flat table (`columns`,
+        `rows`, `total_rows`, `grand_total`, `has_more`, `next_offset`)
+        from the object's own dimensions and measures - a pivot or a
+        stacked chart included, whose layout Engine would send as a tree.
+        The row whose dimension is empty (Qlik's "-") is kept. A column
+        whose show condition is false now is left out and named in
+        `data.notes`, as are the bins of a histogram. A bullet chart's
+        target comes as its own column; a map is computed from its first
+        layer. Objects that compute nothing (filters, containers, text)
+        say so in `data.note`. A failed computation leaves the definition
+        intact and adds `data_error`.
         An object Engine will not open is reported as
-        `object_not_available`; a failure to read its properties leaves
-        the layout intact and adds `properties_error`.
+        `object_not_available`.
 
     Does not return:
-        Data beyond what the chart itself displays.
+        The object's layout, formatting, or data beyond what it shows.
+
+    Example:
+        Call: {"app_id": "...", "object_id": "a1b2", "limit": 3}
+        Returns: {"object_id": "a1b2", "object_type": "barchart",
+                  "title": "Sales by region",
+                  "summary": "barchart \\"Sales by region\\": dims Region; measure \\"Sales\\" = Sum(Amount)",
+                  "dimensions": [{"field": "Region"}],
+                  "measures": [{"expression": "Sum(Amount)", "label": "Sales"}],
+                  "fields_used": ["Amount", "Region"],
+                  "data": {"columns": ["Region", "Sales"],
+                           "rows": [["North", 1200.5], ["South", 980.0], ["-", 12.0]],
+                           "total_rows": 3, "returned_rows": 3, "grand_total": [2192.5],
+                           "has_more": false}}
     """
     e = _check()
     if e:
         return e
+    if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int)
+                               or offset < 0):
+        return _err(f"offset={offset!r} is not a row number.",
+                    error_category="invalid_argument",
+                    hint="Pass 0 or a positive integer, or omit it.")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        return _err(f"limit={limit!r} is not a number of rows.",
+                    error_category="invalid_argument",
+                    hint="Pass a positive integer, or omit it.")
     try:
         app_handle = context.engine_api.ensure_app(app_id, no_data=False)
-        obj_result = context.engine_api.send_request("GetObject", {"qId": object_id}, handle=app_handle)
-        # An object Engine knows about but hands back without a handle
-        # (a type it will not open, or one the user may not read) used to
-        # raise KeyError here and surface as an opaque failure.
-        obj_handle = (obj_result.get("qReturn") or {}).get("qHandle")
-        if obj_handle is None:
+        described = context.engine_api.describe_app_object(app_handle, object_id)
+        if described is None:
+            item = _master_item(app_handle, object_id)
+            if item:
+                return _ok(item)
             return _err(
                 f"Object {object_id} cannot be opened",
                 error_category="object_not_available",
-                hint="Check the id against get_app_sheet_objects — Engine "
+                hint="Check the id against get_app_sheet_objects - Engine "
                      "returns no handle for an unknown object, and for some "
-                     "object types it refuses to open one.",
-                response=obj_result,
-            )
-        layout_result = context.engine_api.send_request("GetLayout", [], handle=obj_handle)
-        if "qLayout" not in layout_result:
-            return _err("Failed to get object layout",
-                        error_category="engine_api_error")
-        # The layout does not contain the measure expressions — Engine puts
-        # qFallbackTitle, formatting and statistics in qMeasureInfo and
-        # nothing else. Since reverse-engineering a chart is what this tool
-        # is for, fetch the properties too and resolve any master items.
-        try:
-            properties = context.engine_api.send_request(
-                "GetProperties", [], handle=obj_handle)
-            expressions = context.engine_api._object_expressions(properties)
-            by_index = {0: expressions}
-            context.engine_api._resolve_library_items(app_handle, by_index)
-            layout_result["measures"] = expressions["measures"]
-            layout_result["dimensions"] = expressions["dimensions"]
-            layout_result["fields_used"] = sorted(
-                set(context.engine_api._extract_fields_from_object(layout_result["qLayout"]))
-                | {f for m in expressions["measures"]
-                   for f in context.engine_api._extract_fields_from_expression(
-                       m.get("expression", ""))}
-                | {f for d in expressions["dimensions"] for f in d.get("fields", [])}
-            )
-        except Exception as prop_error:
-            # The layout is still worth returning; say what is missing
-            # rather than pretending the object has no measures.
-            logger.warning("GetProperties failed for %s: %s", object_id, prop_error)
-            layout_result["properties_error"] = str(prop_error)
-        # The definition is what this tool is for and comes back whole;
-        # the data is paged. Measured on a live table: the whole reply ran
-        # to 111 thousand characters, nearly all of it rows.
-        if offset is not None and (isinstance(offset, bool)
-                                   or not isinstance(offset, int)
-                                   or offset < 0):
-            return _err(f"offset={offset!r} is not a row number.",
-                        error_category="invalid_argument",
-                        hint="Pass 0 or a positive integer, or omit it.")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            return _err(f"limit={limit!r} is not a number of rows.",
-                        error_category="invalid_argument",
-                        hint="Pass a positive integer, or omit it.")
-        cube = ((layout_result.get("qLayout") or {}).get("qHyperCube") or {})
-        pages = cube.get("qDataPages") or []
-        total_rows = (cube.get("qSize") or {}).get("qcy", 0)
-        width = len((cube.get("qDimensionInfo") or [])) + len(
-            (cube.get("qMeasureInfo") or []))
-        rows = [row for page in pages for row in (page.get("qMatrix") or [])]
-        # The layout carries only the first page Engine chose to send, so a
-        # page past it has to be asked for rather than sliced out of what
-        # is already here.
-        if offset + limit > len(rows) and offset + limit <= total_rows:
+                     "object types it refuses to open one.")
+        definition = public_object(described)
+        # What the object is and the line that says so come first.
+        reply = {key: definition[key] for key in ("object_id", "object_type", "title", "summary")
+                 if key in definition}
+        reply.update({k: v for k, v in definition.items() if k not in reply})
+        names = _variables_of(described)
+        if names:
             try:
-                more = context.engine_api.send_request(
-                    "GetHyperCubeData",
-                    ["/qHyperCubeDef",
-                     [{"qTop": offset, "qLeft": 0, "qHeight": limit,
-                       "qWidth": width or len((rows[0] if rows else []))}]],
-                    handle=obj_handle)
-                fetched = [row for page in (more or {}).get("qDataPages") or []
-                           for row in (page.get("qMatrix") or [])]
-                if fetched:
-                    rows = [None] * offset + fetched
-            except Exception as page_error:
-                logger.debug("Could not read page %s of %s: %s",
-                             offset, object_id, page_error)
-        if pages:
-            shown = rows[offset:offset + limit]
-            cube["qDataPages"] = [{"qArea": {"qTop": offset, "qLeft": 0,
-                                             "qHeight": len(shown),
-                                             "qWidth": len(shown[0]) if shown
-                                             else 0},
-                                   "qMatrix": shown}]
-            layout_result["data_rows"] = len(shown)
-            layout_result["data_rows_total"] = (
-                (cube.get("qSize") or {}).get("qcy", len(rows)))
-            if offset + len(shown) < len(rows):
-                layout_result["next_offset"] = offset + len(shown)
-        return _ok(layout_result)
+                defined = {v["name"]: v.get("text_value")
+                           for v in context.engine_api._get_user_variables(app_handle)}
+            except Exception as variable_error:
+                if isinstance(variable_error, TimeoutError):
+                    raise
+                logger.debug("Could not read variables: %s", variable_error)
+                defined = {}
+            reply["variables"] = {name: defined.get(name) for name in names}
+        try:
+            data = context.engine_api.object_data(app_handle, described, limit, offset or 0)
+        except Exception as data_error:
+            if isinstance(data_error, TimeoutError):
+                raise
+            logger.warning("Could not compute data of %s: %s", object_id, data_error)
+            data = {"error": str(data_error), "error_category": "engine_api_error"}
+        if isinstance(data, dict) and data.get("error"):
+            reply["data_error"] = data
+        else:
+            reply["data"] = data
+        return _ok(reply)
     except Exception as ex:
         return _err(str(ex), app_id=app_id, object_id=object_id)
 
 
 
 
-@mcp.tool()
+@_tool()
 @_timed
 @_engine_serialised
 def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
@@ -1216,15 +1452,21 @@ def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
         app_id: application GUID.
         term: what to look for. Qlik matches it as a prefix, case
             insensitively, so "Mos" finds "Moskva".
-        fields: field names to search. Omit to search the whole app.
+        fields: field names to search. Omit to search every field with up
+            to 100000 distinct values; the larger ones are skipped and
+            listed in `fields_not_searched`. A name the app does not have
+            is refused as `field_not_found`.
         max_fields: matching fields to report. Default 8.
         max_values: matching values per field. Default 5.
 
     Returns:
         `matches`, each naming a field and the values it holds that match,
-        spelled as Qlik stores them; plus `fields_matched`. An empty
-        `matches` means the app does not hold this value — an answer, not
-        a failure, and it comes with a hint on what to try next.
+        spelled as Qlik stores them; plus `fields_matched`,
+        `fields_not_searched` when fields were skipped, and `search_notes`
+        (the search sees only the current selections, and the first
+        search on an app is slow while Engine builds its index). An empty
+        `matches` means the searched fields do not hold this value — an
+        answer, not a failure, and it comes with a hint on what to try next.
 
     Does not return:
         How often a value occurs, or which rows contain it.
@@ -1237,6 +1479,8 @@ def search_app(app_id: str, term: str, fields: Optional[List[str]] = None,
         result = context.engine_api.search_app(
             app_handle, term, fields=fields,
             max_fields=max_fields, max_values=max_values)
+        if result.get("error"):
+            return _err(result.pop("error"), **result)
         if not result.get("matches"):
             result["hint"] = (
                 f"Nothing in this app matches {term!r}. Check the spelling "

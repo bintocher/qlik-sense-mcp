@@ -64,6 +64,10 @@ who bought in one year and not the next (`matching` / `not_matching`),
 counting over a bookmark or ignoring selections (`scope`), and values
 kept, dropped, added or intersected on any field.
 
+The app's own master measures are named rather than rebuilt -
+`"measures": [{"master": "Revenue"}]` - and take the query's filters as
+an outer set in front of them.
+
 `engine_create_hypercube` takes the same shape with the expressions
 written by hand, for calculations the typed form cannot state.
 
@@ -116,9 +120,16 @@ secrets), and login/password against a "Form based" virtual proxy
   modifier runs against the text Qlik displays for a value, so a serial
   number range returns 0 on a field displayed as `01.01.2024` and works
   on one displayed as `45292` — with no error either way. State the
-  period as a filter and the server tries the cheap numeric form against
-  a reference count, falls back to the form that always works, and
-  reports the period the result actually covers.
+  period as a filter and the server writes it as a range in the field's
+  own display format, checks it against a reference count, falls back to
+  the numeric range and then to the form that always works, and reports
+  the period the result actually covers - and when a shifted calendar
+  made the period reach facts outside it.
+- **Filters reach the author's measures.** `{"master": "Revenue"}` with a
+  period is computed as `{&<period>} [Revenue]`, an outer set in front of
+  the measure, and the reply names a measure that sets a filtered field
+  itself or counts over a set of its own, where the filter does not
+  reach.
 - **One value, one writing.** A date in a query result reads as the text
   Qlik displays for it, the same as the sample values in
   `get_app_details` and the bounds from `engine_get_field_range`.
@@ -132,10 +143,12 @@ secrets), and login/password against a "Form based" virtual proxy
 - **A measure can narrow itself.** Its own `filters` override the
   query's, so a KPI carries its numerator and its denominator in one
   answer.
-- **Objects say which fields they use.** `get_app_sheet_objects` returns
-  `fields_used`, including fields reached through master measures and the
+- **Objects say what they show.** `get_app_sheet_objects` gives each object
+  one line - its dimensions, its measures with their expressions, the
+  conditions and variables it depends on, what a filter or button does -
+  and `fields_used`, including fields reached through master items and the
   ones inside a filter pane's listboxes — so "what does this sheet work
-  with" is one call.
+  with" is one call, with nothing calculated.
 - **Paging is done by Qlik, not after it.** App and task listings read
   `/{entity}/table` with `skip`/`take` and take the total from
   `/{entity}/count`, so nothing past the QRS record limit goes missing
@@ -217,8 +230,10 @@ secrets), and login/password against a "Form based" virtual proxy
   top-N patterns. Qlik Engine itself returns
   [error 7009 `calc-pages-too-large`](https://help.qlik.com/en-US/sense-developer/November2025/Subsystems/EngineJSONAPI/Content/service-genericobject-gethypercubedata.htm)
   for any single page over 10000 cells.
-- **Single timeout knob.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
-  controls both the WebSocket handshake and every Engine API call.
+- **Two timeout knobs.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
+  controls both the WebSocket handshake and every Engine API call;
+  `QLIK_TOOL_TIMEOUT` (default `240.0`) bounds a whole tool call, so a
+  slow one ends with a clear error before the client gives up on it.
 
 ## Requirements
 

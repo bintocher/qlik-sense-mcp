@@ -1,0 +1,57 @@
+{
+ "description": "A button: set a variable, select values, then go to a sheet named by id; a default empty action is dropped.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "btn1",
+    "qType": "action-button"
+   },
+   "visualization": "action-button",
+   "version": "1.0.0",
+   "showTitles": true,
+   "style": {
+    "label": "Show details",
+    "font": {
+     "size": 12
+    }
+   },
+   "actions": [
+    {
+     "cId": "a0"
+    },
+    {
+     "actionType": "setVariable",
+     "variable": "vMode",
+     "value": {
+      "qStringExpression": {
+       "qExpr": "=2"
+      }
+     }
+    },
+    {
+     "actionType": "selectValues",
+     "field": "Region",
+     "value": "North"
+    }
+   ],
+   "navigation": {
+    "action": "goToSheetById",
+    "sheet": {
+     "qStringExpression": {
+      "qExpr": "='4f7c2a9e-1b3d-4e5f-8a6b-7c8d9e0f1a2b'"
+     }
+    }
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "action-button \"Show details\": setVariable vMode to =2, selectValues Region to North, go to sheet \"Details\"; variables vMode",
+  "checks": {
+   "controls.2.target": "go to sheet \"Details\""
+  },
+  "fields_used": [
+   "Region"
+  ]
+ }
+}

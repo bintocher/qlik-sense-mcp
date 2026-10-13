@@ -71,7 +71,9 @@ class TestFatalGreetings:
         assert "OnMaxParallelSessionsExceeded" in message
         assert "severity=fatal" in message
         # The caller has to know what to do about it, not just that it broke.
-        assert "delete-user-sessions" in message
+        # Advice an analyst can follow: no admin-only endpoint.
+        assert "delete-user-sessions" not in message
+        assert "administrator can end them" in message
 
 
 

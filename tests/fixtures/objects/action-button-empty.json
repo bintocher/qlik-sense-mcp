@@ -1,0 +1,29 @@
+{
+ "description": "A button with only the default empty action does nothing.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "btn0",
+    "qType": "action-button"
+   },
+   "visualization": "action-button",
+   "version": "1.0.0",
+   "showTitles": true,
+   "style": {
+    "label": "Button"
+   },
+   "actions": [
+    {
+     "cId": "x"
+    }
+   ],
+   "navigation": {
+    "action": "none"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "skipped": true
+ }
+}

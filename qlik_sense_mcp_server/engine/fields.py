@@ -5,9 +5,14 @@ from typing import Dict, List, Any, Optional
 import logging
 
 from ..exceptions import QlikEngineError
+from ..utils import bare_field_name
 import uuid
 
 logger = logging.getLogger(__name__)
+
+# Fields above this many distinct values are left out of a search that
+# names no fields.
+SEARCH_MAX_DISTINCT_VALUES = 100_000
 
 
 def _bad_offset(offset: Any) -> Optional[Dict[str, Any]]:
@@ -72,6 +77,7 @@ class EngineFieldsMixin:
                                     "qnPresentDistinctValues", 0
                                 ),
                                 "rows_count": field.get("qnRows", 0),
+                                "table_rows": table.get("qNoOfRows", 0),
                                 "subset_ratio": field.get("qSubsetRatio", 0),
                                 "key_type": field.get("qKeyType", ""),
                                 "tags": field.get("qTags", []),
@@ -141,6 +147,39 @@ class EngineFieldsMixin:
         else:
             store.pop(app_id, None)
 
+    def _model_fields(self, app_handle: int) -> List[Dict[str, Any]]:
+        """The fields of the data model, one entry per field and table.
+
+        Reuses whatever `get_app_details` already read for this app rather
+        than asking for a stamp this call does not have. Empty when the
+        model cannot be read, in which case nothing is checked or skipped.
+        """
+        app_id = getattr(self, "_cached_app_id", None)
+        try:
+            if app_id:
+                entry = self._schema_store().get(app_id) or {}
+                model = self.cached_fields(app_handle, app_id, entry.get("reload_stamp"))
+            else:
+                model = self.get_fields(app_handle)
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            logger.debug("Could not read the model: %s", exc)
+            return []
+        return list((model or {}).get("fields") or []) if isinstance(model, dict) else []
+
+    def _search_model(self, app_handle: int) -> Dict[str, int]:
+        """Field name -> distinct values, from the cached data model."""
+        sizes: Dict[str, int] = {}
+        for field in self._model_fields(app_handle):
+            name = field.get("field_name")
+            if not name or field.get("is_system"):
+                continue
+            # A key field is listed once per table it links; any of them
+            # holds all its values.
+            sizes[name] = max(sizes.get(name, 0), int(field.get("distinct_values") or 0))
+        return sizes
+
     def search_app(self, app_handle: int, term: str, fields: List[str] = None,
                    max_fields: int = 8, max_values: int = 5) -> Dict[str, Any]:
         """Find a term among the app's values, without knowing the field.
@@ -149,12 +188,65 @@ class EngineFieldsMixin:
         across every field it takes about 30 seconds, against a named list
         of fields it is instant — so the caller can narrow it when it knows
         roughly where to look, and pay the full scan when it does not.
+
+        Named fields are checked against the model first: Engine answers a
+        name it does not have with "Invalid parameters" on
+        `Options.SearchFields`, which says nothing about which name, and a
+        model that guessed a field (`MeasureName`) could not tell that from
+        a broken server. Without names, only fields of up to
+        SEARCH_MAX_DISTINCT_VALUES values are searched: an id or a timestamp
+        with millions of values is where the time goes, and a value someone
+        names is almost never there. The fields left out are listed.
         """
-        search_fields = fields or []
+        for name, value in (("max_fields", max_fields), ("max_values", max_values)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                return {"error": f"{name}={value!r} is not a positive number.",
+                        "error_category": "invalid_argument"}
+
+        sizes = self._search_model(app_handle)
+        not_searched: List[str] = []
+        if fields:
+            search_fields = list(dict.fromkeys(
+                bare_field_name(str(f)) for f in fields if str(f or "").strip()))
+            unknown = [f for f in search_fields if sizes and f not in sizes]
+            if unknown:
+                return {"error": ("The app has no field "
+                                  + ", ".join(f"[{f}]" for f in unknown) + "."),
+                        "error_category": "field_not_found",
+                        "unknown_fields": unknown}
+        elif sizes:
+            search_fields = [f for f, n in sizes.items() if n <= SEARCH_MAX_DISTINCT_VALUES]
+            not_searched = sorted((f for f, n in sizes.items()
+                                   if n > SEARCH_MAX_DISTINCT_VALUES),
+                                  key=lambda f: -sizes[f])
+        else:
+            search_fields = []
+
+        notes = [
+            "Search runs within the current selections.",
+            "The first search on an app can be slow: Engine builds its search "
+            "index on first use unless the load script sets "
+            "`Set CreateSearchIndexOnReload=1;`.",
+        ]
+        reply: Dict[str, Any] = {"term": term}
+        if not_searched:
+            reply["fields_not_searched"] = not_searched
+            notes.append(
+                f"Fields with more than {SEARCH_MAX_DISTINCT_VALUES} distinct "
+                f"values were not searched; name one in `fields` to search it.")
+        if not search_fields and not_searched:
+            reply.update({"matches": [], "fields_matched": 0, "search_notes": notes})
+            return reply
+
+        # An empty qSearchFields is documented as "all fields", but the key
+        # is only sent when it names something.
+        options: Dict[str, Any] = {"qContext": "CurrentSelections"}
+        if search_fields:
+            options["qSearchFields"] = search_fields
         result = self.send_request(
             "SearchResults",
             [
-                {"qSearchFields": search_fields, "qContext": "CurrentSelections"},
+                options,
                 [term],
                 {"qOffset": 0, "qCount": max_fields,
                  "qMaxNbrFieldMatches": max_values},
@@ -175,7 +267,9 @@ class EngineFieldsMixin:
                                                   item.get("qTotalNumberOfMatches",
                                                            len(values)),
                     })
-        return {"term": term, "matches": matches, "fields_matched": len(matches)}
+        reply.update({"matches": matches, "fields_matched": len(matches),
+                      "search_notes": notes})
+        return reply
 
     def get_field_description(self, app_handle: int, field_name: str) -> Dict[str, Any]:
         """Describe one field via `GetFieldDescription`.

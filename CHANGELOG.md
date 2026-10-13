@@ -6,6 +6,388 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-30
+
+### Added
+
+- Sheet objects are read by a rule per type, from their properties alone
+  (`engine/objects.py`): the native charts, containers, master
+  visualizations and controls, the Vizlib extensions, the Dashboard bundle,
+  GeoAnalytics and other common extensions, and a universal reader for an
+  extension without a rule, which walks the properties for cubes, list
+  objects and expressions and drops colours, styles, URLs and constants.
+  Stored cubes, ODAG records, colour maps and other objects that never
+  stand on a sheet are skipped. Every object comes back in one shape - type,
+  title, dimensions (field, `=expression` or master item with its
+  definition), measures (expression or master item, label or label
+  expression, format), roles the expression does not show (bar or line and
+  axis, x/y/size, target, the sign of a waterfall step, rows and columns of
+  a pivot), show and calculation conditions, alternative measures, top N,
+  alternate state, `$(variables)`, controls (fields a filter selects,
+  values a variable input offers, what a button selects or sets) and
+  children - plus a one-line `summary` for a model. Expressions shown lose
+  their `//` and `/* */` comments and are cut at 300 characters; defaults
+  an extension ships ("Button 1", "Click Here", `http://`) are dropped.
+  Measures placed in a text object as `=[](cId)` are shown by their label,
+  and the text of an sn-text object is decoded from the JSON stored in it.
+- `get_app_details` carries `usage`: how the author's own sheets use the
+  model - the approved sheets of a published app, every sheet of an
+  unpublished one, read from definitions with the per-type parser and
+  nothing calculated, cached with the rest of the reply until the app
+  reloads. Per field: objects, sheets, role (`dimension`, `aggregated`,
+  `condition` for a field named in a set modifier, `Aggr dimension`) and the
+  three fields and measures it most often stands next to; fields seen in one
+  object on one line; `unused_fields`; master measures by use; titled
+  objects, title first, with their dimensions and measures; measure
+  formulas written in objects rather than the library, deduplicated, with
+  the sheet and the number of objects; objects in an alternate state or
+  under a whole-cube set. `report_filters` lists how the report is
+  filtered: filter-pane fields by number of sheets, date pickers, variable
+  inputs with their values, what buttons select, set or apply (approved
+  bookmarks by title), and tab conditions with the meaning of their
+  variables. Past the budget, `usage` keeps the 10 most used fields, 30
+  objects and 20 formulas.
+- Field names starting with `%` (`%Issue_ID`) are read whole from
+  expressions, and `NODISTINCT` is no longer taken for a field.
+- Filters reach master measures. `engine_query` with `{"master": "<name>"}`
+  and `filters` writes the filter as an outer set in front of the measure,
+  `{&<filter>} [<name>]`, the measure found in the library by its id under
+  its current name (by its expression in parentheses when the label is
+  also a field name); before, such a query was refused. In
+  `engine_create_hypercube` and in hand-written `engine_query` measures a
+  `{filter}` marker at the start of the expression is an outer set that
+  reaches every aggregation inside, `{filter} [A] / [B]` or
+  `{filter} (expression)`, and a measure with no marker at all takes the
+  filters the same way, said in `notes` - a note, not a doubt, so it leaves `numbers_verified` alone (`engine_create_hypercube`
+  refused it before). A marker next to a set of the expression's own -
+  `Sum({filter} {<Flag={1}>} X)`, `Sum({filter <Flag={1}>} X)`,
+  `{filter} {<Flag={1}>} Fractile(...)`, or inside `P()` - is merged into
+  that set: Qlik reads one of two sets side by side in an aggregation and
+  drops the other without a word. Measured on a 1.16-billion-row app, the
+  filter for 2025 written that way summed two years, 719.3 billion against
+  418.6, while `filters_applied` reported 365 days; merged, it answers
+  418 613 839 776, the reference, and the same filter over a master GGR
+  for August 2026 answers 2 905 309 486. A field named both in
+  that set and in `filters`, two sets of the expression's own, a set joined
+  by an operator or two different identifiers are refused with the reason.
+  Measured on the same app: the outer set over a master measure, over its
+  expression in parentheses and over a ratio measure answered the reference
+  figures exactly. A hypercube-wide
+  `qContextSetExpression` gave the same figures but cannot differ per
+  measure, so the outer set is used. The measure's expression is read for
+  what keeps a filter out, and the reply's `warnings` name the measure: a
+  filtered field it sets itself to other values (its own condition wins -
+  measured; the same values are said in `notes`, which leave
+  `numbers_verified` alone, and next to a marker they are written once -
+  a model repeated the measure's own conditions in 21 results of 14
+  questions and each came back unverified), a set
+  of its own with an identifier (`{1<...>}`, `{$<...>}`, a bookmark),
+  `$(=...)`, computed before the filter, and `P()`/`E()` over sets the
+  filter does not reach. `get_app_details` gives the same as
+  `measures[].filter_limits`.
+- `period_check` reads a bounded filter's field through each measure's own
+  sets, exactly as the measure is sent - `={outer} Text(Min({inner}
+  [Field]))` per aggregation - instead of through the filter alone, so a
+  filter that did not reach a hand-written or library measure shows as
+  `filter_applied: false` with the `measure` named: measured, under two
+  sets side by side the date field's latest value read 29.09.2026 for a
+  2025 filter, where the filter alone read 31.12.2025. `engine_create_hypercube`
+  carries `period_check` too, and both tools put such a result first in
+  `warnings`; `engine_query` repeats it at the top of the reply.
+- A filter on a calendar whose dates repeat is checked for what it
+  reaches, whatever its kind: a value list, a range, a pattern, or a
+  condition written by hand in a measure's own set. Such a calendar is
+  found from the model - a table whose date key towards the facts has
+  fewer values than the table has rows. The check compares the key values
+  of the facts the filter reaches with those the same filter reaches on
+  the plain rows of every calendar on the way (see `plain_layer`): the
+  same set is the period asked for, however many layers the field also
+  appears in. Where no plain layer is known, it counts the values of the
+  field those key values belong to instead. A difference gives
+  `fan_out_check` (`field`, `table`, `key`, `key_values`, `per_value`,
+  `plain_key_values` or `belong_to_values`, and `repeating_tables` - the
+  calendars that do repeat) and a warning that
+  leads `warnings`, per query and at the top of the reply, with the
+  condition for one row per date where one was found, each statement and
+  each condition once (a refusal for two measures grouped by month said
+  the filter twice and the condition three times, 1665 characters against
+  889 now). Measured on a
+  1.16-billion-row app: `{"field": "Month", "values": ["2026-08"]}` on a
+  cumulative calendar gave a month's GGR of 38.3 billion against
+  2 905 309 486 with no warning, the fan-out check running for periods
+  only; now the reply leads with 12 key values reached that belong to 13
+  months, and with the plain layer added the figure is 2 905 309 486 and
+  the reply is quiet. A set written by hand on the same calendar
+  (9.28 billion, three key values) is named the same way. `Year=2025` on
+  that calendar reaches the twelve months of 2025, the same as on its
+  plain rows, and is quiet (it was flagged as unverified with the right
+  total, 418 613 839 776); `Year=2026` reaches 20 months against 9 and is
+  flagged. Grouping by a field of such a calendar while the measures do
+  not set its plain layer is named as well (`grouped_by`): each row then
+  sums every layer of its value.
+  The check runs before anything is computed - with the creation of the
+  objects in `engine_query`, before the cube in `engine_create_hypercube` -
+  and reads only the conditions on the calendars, not those on the facts.
+  A query it finds covering more than it names is not computed: the reply
+  is `error_category: "fan_out"` with the `fan_out_check` and the condition
+  for one row per date; `accept_fan_out: true` (per query in `engine_query`)
+  computes it as written. Measured on a 1.16-billion-row app: a month on
+  the cumulative calendar, which computed for 155.8 s before its warning
+  came back, is answered in 15.5 s; a correct cold query spends about 5 s
+  on the check, as it did after the cube before.
+- `get_app_details` names the rows of a repeating calendar that keep one
+  row per date. For each such calendar the server asks Engine, once per
+  app and over the calendar alone, which value of a field with few values
+  - or of a pair of them - holds every date once with the date itself,
+  read by its displayed text (a dual fiscal year `24-25` is not `2025`).
+  One condition is named: values holding the very same rows are one
+  layer, named by the value loaded first - a month-to-date layer on a
+  calendar of months holds each month once too, and naming it sent a
+  caller to a cumulative value; the
+  calendar gets `plain_layer` (`{<[Aggregation]={'Date'}>}`, and
+  `{<[PrevYear]={'0'},[PrevMonth]={'0'}>}` for a shift calendar), the field
+  `picks_plain_layer`, listed with its values even when hidden, and
+  `warnings` opens with one line per calendar. Nothing is named by its
+  name. Measured on a 1.16-billion-row app: the cumulative calendar's plain
+  rows and the shift calendar's pair were found in about 4 seconds of a
+  20-second first call, and the reply stayed at 17.3k tokens; a model had filtered such a calendar nine times out of nineteen
+  without the hidden field that picks the plain rows.
+- `period_check` sees a period that reached the facts through days outside
+  it. For a period on a date field outside the largest table, the server
+  finds the key the field reaches that table through (walked over the
+  model's shared fields), and when the key is a date it asks, in the same
+  batch as the other control values, how many key values the filter
+  reached and their first and last. Key values outside the period give
+  `period_check.fan_out` (`key`, `table`, `values`, `min`, `max`) and a
+  warning: one value of the field stands for several days of facts, as in
+  a shifted or cumulative calendar. Measured on a 1.16-billion-row app: a
+  filter on the date of a year-shift calendar for August 2026 passed
+  `filter_applied` and summed turnover 3.04 times the month's, over three
+  key values from 01.08.2025 to 01.08.2026; the reply now says so. The
+  server does not pick the right field.
+- `get_app_details` warns when the app description disagrees with the
+  data: a date it names falls inside no date field's range, or a span it
+  names ("2 months", "2 месяца", "90 days") is the length of none of them,
+  give or take a quarter or a month. The warning quotes the words and the
+  first three date ranges from the facts outward. On a large app the
+  description said "Loaded period: 2 months" over twenty months of data,
+  and a model quoted it as the answer.
+
+### Changed
+
+- `get_app_sheet_objects` answers with one `summary` line per object, read
+  by the per-type rules, next to `object_id`, `object_type`, `title` and
+  `fields_used`; the structured `measures` and `dimensions` moved to
+  `get_app_object`, and `object_description` is now `title`. The walk
+  starts from the sheet's `cells`, so objects left in the tree by earlier
+  edits are no longer listed, and container children stay inside their
+  container with `tab`, `shown_if` and `default_tab`. Master
+  visualizations, master items and GeoAnalytics layers are read once per
+  app; the library is read only when an object uses it.
+- `get_app_object` no longer returns the object's layout. A stacked chart
+  or a pivot sent its data as a tree of nodes, a map computed each layer
+  twice, and the expressions were not in the layout at all. The reply is
+  the definition in structured form, the `variables` the object uses with
+  their definitions, and `data` computed by the server as one flat
+  hypercube (`qMode: "S"`) from the object's own dimensions and measures,
+  under the limits of `engine_create_hypercube` and with the empty-dimension
+  row kept. A histogram is counted per `Class()`, a bullet chart's target is
+  a column, a map is computed from its first layer; a column whose show
+  condition is false now is left out and named in `data.notes`, and a false
+  calculation condition of the object is said there too. A linked object
+  is read with `GetEffectiveProperties`. A name the data model lacks in the
+  object's own expressions - typically a branch of `if()` a variable
+  switches off - no longer refuses the whole object: the cube runs as the
+  object runs and `data.warnings` names the field.
+- `get_app_details` has a new shape, held under 20k tokens (characters /
+  2.5). On a 97-field, 67-measure app with 698 bookmarks the reply was
+  57k characters; a client moved it to a file and the model never read it.
+  Now: `app` (name, description, stream, reload time); `tables`, each with
+  a `role` read from the model's shape - the largest table and any of at
+  least a tenth of its rows are facts, a table reached through a date key
+  is a calendar, the rest are dimension tables - its `rows`, and its
+  `fields` (`distinct`, `type`, `key`, `hidden`, `comment`, `values` for
+  every field with 25 or fewer, `min`/`max` for a date field; a key field
+  once, on the fact side); a calendar says `rows N, distinct dates M` and
+  names the fields with few values next to the date, so a calendar where
+  one date stands for several rows shows as one; `links` as
+  `Facts -Key-> Table` walked from the facts; `islands` one line each;
+  `dimensions` as `name = field`; `measures` with their `fields`, the
+  expression cut at 150 characters with `expression_truncated` and `id`,
+  and `Y-1` / `YoY, %` / `, %` variants folded under their base by exact
+  name; `bookmarks` - approved ones only, title and description, nothing
+  about the rest; `alternate_states`; `warnings` about volume;
+  `size_budget` with the estimate and what was `trimmed` (values to 10,
+  expressions to 80 characters) when over. `metainfo`, `library`,
+  `named_sets`, the flat `fields` list, its `columns`+`rows` form past 60
+  fields, `lowest_values`/`highest_values` and `sample` are gone. Lists
+  read an item at a time (tables, measures, links) go one item per line.
+- `get_app_object` takes the id of a master measure or dimension and
+  returns its whole expression or definition, without data - where the
+  `id` of a cut measure in `get_app_details` leads.
+- Tools are registered without structured output. With the SDK inferring
+  it from `-> str`, every reply also went out as `structuredContent:
+  {"result": "<json>"}`, and a client preferring that copy showed the model
+  the JSON escaped inside a string. The reply is now the text content
+  alone - one layer of JSON. `outputSchema` is no longer declared.
+- `get_app_script` returns the script a page of lines at a time: `offset`
+  and `limit` (default the first 400 lines), `total_lines`, `returned_lines`
+  and `next_offset`; pages joined with a newline are the script exactly.
+  `search` returns only the lines containing a word, 5 lines either side,
+  merged into `matches` blocks with their line range. `script_length` is
+  still the length of the whole script.
+- `get_app_details` no longer adds the "Date field(s) present" warning. It
+  named the first date-like fields and offered the first as the example
+  filter; on an app with a shift calendar that was the shifted date, and a
+  filter on it multiplied the figures. The server does not choose the
+  period field; `warnings` are about volume only.
+- A period on a date field is written as a range in the field's own
+  display format, `[Date]={">=01.08.2026<01.09.2026"}`, reported as
+  `form: "range"`. The format is read off the field's first value and
+  checked against the app's `DateFormat` and `TimestampFormat` (bounds are
+  days, without a time of day), in one question remembered as long as the
+  form. The numeric range for a field shown as a bare number and the
+  expression search `{"=[F]>=a and [F]<b"}` follow, the latter only where
+  no range counts the right values: it is scored per value of the field
+  and an outer set does not reach it. Every form is still measured against
+  the reference count before use, and `period_check` still reports the
+  earliest and latest value that reached the result. Measured on a
+  1.16-billion-row app: GGR and turnover for August 2026 matched the
+  reference figures; on its 637-value calendar field both forms took 0.15 s.
+- Past the 200-expression cap of `engine_query`, a batch whose queries
+  differ only in the filter on one field is refused with `one_query`: the
+  first query with that field added to `group_by` and one filter covering
+  all of theirs (the span of their periods, or the union of their values),
+  and the error says it answers all of them in one cube. A model had asked
+  twelve months as twelve queries of twenty measures and hit the cap four
+  times.
+- Expressions go out in one written form, so the same question asked
+  twice finds Engine's cached result, which is shared by every user and
+  matches text character for character. Filter modifiers are ordered by
+  field name, whatever order the filters were listed in. Hand-written
+  measures and calculated dimensions in `engine_query` and
+  `engine_create_hypercube` have known functions in one case (`sum(` is
+  `Sum(`), whitespace collapsed and no space inside parentheses, outside
+  strings and bracketed names; an expression with a comment keeps its line
+  breaks. `Today()` and `Now()` become the day (`MakeDate(...)`) and the
+  minute they stand for. A master measure goes as the library has it.
+- Engine's error codes are said in words inside `error`: 7004 (calculation
+  time limit - narrow the period or the grouping), 7009 (more than 10000
+  cells on a page), 30100 (the generated set is too long - fewer values),
+  and 19, 6 and 7002 (out of memory).
+
+### Fixed
+
+- JWT mode: the re-login after the 25-minute session TTL no longer fails with
+  "did not set a Qlik session cookie". It ran on the Repository client, whose
+  jar still held the old session cookie, so the proxy answered 204 without a
+  new one. The login now runs on a cookieless client, the stale cookie is
+  dropped from the shared jar and the new one copied in; a 204 for a cookie
+  the request carried keeps that session; the QMC advice is given only when
+  the very first login returns no cookie.
+- Master dimensions in the app library no longer come back with an empty
+  `expression`: it was read from `/qDim/qDef`, which dimensions do not have.
+  Each dimension now carries a `definition` line built from `qFieldDefs`,
+  `qFieldLabels` and `qGrouping` - `name = field`, `name = A > B (drill-down)`,
+  `name = A | B (cyclic)`, or `name = =expr (calculated)` cut at 150
+  characters with `expression_truncated` - plus `fields` for field-based ones.
+  A dimension list's `qData` resolves only scalar paths - `qFieldDefs`
+  comes back as `""` on a live server - so the fields are read from each
+  dimension's properties in one pipelined batch.
+- `get_app_sheet_objects` no longer calculates the sheet. It called
+  `GetLayout` on every object, so Engine computed every chart, and on a
+  large app a sheet ran past 300 seconds until the client dropped the MCP
+  session. Objects are now read from definitions only: the sheet's
+  `GetFullPropertyTree` in one request, linked objects from their master
+  visualization's properties, master items with `GetProperties`.
+- A tool call now has a time limit, `QLIK_TOOL_TIMEOUT` (default 240 s,
+  `0` turns it off). Tools used to run on the server's event loop, so a
+  slow Engine call froze the server for every client and sent nothing.
+  They now run in a worker thread; Engine requests are cut to the time
+  left, cancelled with `CancelRequest` at the limit, and the reply is an
+  error with `error_category: "time_limit"` while the next call works as
+  usual. A progress notification goes out every 10 seconds when the client
+  asked for them with a progress token.
+- An Engine socket timeout is handled as a timeout again. websocket-client
+  raises `WebSocketTimeoutException`, which is not a `TimeoutError`, so
+  every timeout took the generic "recv() failed" path, and a greeting that
+  did not arrive in time failed the connect instead of being skipped.
+- `search_app` checks named `fields` against the data model and refuses an
+  unknown one as `field_not_found` with `unknown_fields`. Engine answers
+  such a name with a bare "Invalid parameters" on `Options.SearchFields`,
+  which is the error seen in practice (a guessed field name, not the empty
+  list or `max_fields`). Without `fields` it searches only fields of up to
+  100000 distinct values and lists the rest in `fields_not_searched`: on a
+  1.16-billion-row app a search that ran past a minute now takes seconds.
+  `qSearchFields` is sent only when it names something, `max_fields` and
+  `max_values` must be positive, and `search_notes` says that the search
+  sees the current selections and that the first one on an app is slow
+  unless the script sets `CreateSearchIndexOnReload`.
+- `get_app_variables` finds a variable by a part of its name or value:
+  `search_string` without `*` is a part of the text, so `Rate` finds
+  `vRate`. It was a pattern of the whole text, found nothing, and a model
+  concluded the variable was not in the app. With `*` it is still a
+  pattern of the whole text.
+- A call whose Engine socket was gone is made once more on a new
+  connection. The proxy closes an idle or expired session without a word
+  and the socket still reads as open, so the first request of the next
+  call failed - measured, right after the JWT session renewed, one call
+  answered "Not connected to Engine API", the next OpenDoc 1003 "App not
+  found", the third worked. The calls ran one after the other under the
+  Engine lock, and two calls sent at once are served one after the other
+  as before; a timeout or a wrong query is not repeated.
+- A range on a text field whose values sort as text, such as months
+  written `2026-08`, is the list of its values between the bounds (`form: "text values"`,
+  at most 1000 values read); it was refused as "neither dates nor
+  numbers". Measured on a 1.16-billion-row app: months `2026-07` to
+  `2026-08` with the plain rows gave GGR 3 311 116 219 and 2 905 309 486.
+- `{"master": "<name>"}` in `engine_query` also finds a library measure by
+  the label the author's sheets show for it: an object naming it by id, or
+  a formula on a sheet that is its very text. The reply says so in
+  `notes`; a label that stands for two library measures names both. The
+  sheets are read only on such a miss, once per app. Measured on a
+  1.16-billion-row app: the sheets' label for the library
+  measure of settled stakes, answered 34 228 244 489 for August 2026; it
+  was "no measure named" before.
+- `group_by`, `metrics`, `measures`, `filters` and `scope` stated beside
+  `queries` in `engine_query` are shared by every query that does not state
+  its own; `filters` add up - a query's own filters join the shared ones,
+  and on a field both name its own wins, said in `notes`. They were
+  ignored without a word: a model sent its measures and
+  filters once for three queries and got "asks for no measure", and a
+  query with measures of its own was computed without the stated filters.
+  Measured: two queries with shared GGR and a month on the plain rows now
+  answer 2 905 309 486; a query stating only a channel keeps the shared
+  month and answers 2 639 121 914, and one stating July answers
+  3 311 116 219 with a note.
+- A server no longer leaves a proxy session behind each time it stops. In
+  JWT and form mode every login opens a session that outlives the process
+  until the proxy's inactivity timeout; eight restarts within ten minutes
+  exhausted the five Qlik allows a user, and every call was refused with
+  `OnMaxParallelSessionsExceeded` for a quarter of an hour. Now the server
+  closes the Engine socket and logs out of its virtual proxy on the way out
+  (Ctrl+C, SIGTERM, SIGBREAK, or a `QLIK_STOP_FILE` it watches, for a
+  background process on Windows that no signal reaches); a server killed
+  outright leaves its session cookie in a file named after a hash of its
+  identity, and the next start takes it up while it is younger than the
+  session TTL (`QLIK_SESSION_CACHE`, `QLIK_SESSION_CACHE_DIR`). When Engine
+  still refuses a session over the limit, the server ends this user's
+  sessions on its proxy once and logs in again. `QLIK_PROXY_LOGOUT=false`
+  keeps the sessions. Measured: a start after a hard kill took up the
+  31-second-old session instead of opening one, and a stop logged out (HTTP
+  204).
+- A refused Engine session is an error: `get_app_details` answered a
+  session-limit refusal as a success with no tables and an `engine_error`
+  beside them - 74 such calls counted as no errors at all - and now says
+  `error` with `error_category: "session_limit"` (`engine_error` for any
+  other failure to read the model), as every tool does for that refusal.
+  The server log carries Engine's session notifications
+  (`OnMaxParallelSessionsExceeded`, `OnSessionClosed`, ...) at WARNING; it
+  said only "close status: 1001" before. The refusal no longer tells an
+  analyst to call the admin-only session endpoint: it says the sessions end
+  at the proxy's inactivity timeout, that closing other clients of the
+  account frees them sooner, and that an administrator can end them.
+
 ## [2.3.1] - 2026-09-25
 
 ### Fixed

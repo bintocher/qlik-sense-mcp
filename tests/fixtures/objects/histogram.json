@@ -1,0 +1,83 @@
+{
+ "description": "A histogram: a field and bins, no measure.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "h1",
+    "qType": "histogram"
+   },
+   "visualization": "histogram",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Order sizes",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "Quantity"
+       ],
+       "qFieldLabels": [
+        ""
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "bins": {
+    "auto": false,
+    "binMode": "maxCount",
+    "binCount": 20,
+    "binSize": 10,
+    "countDistinct": false
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "histogram \"Order sizes\": field Quantity, 20 bins, count of records",
+  "checks": {
+   "options.bins.count": 20
+  },
+  "fields_used": [
+   "Quantity"
+  ]
+ }
+}

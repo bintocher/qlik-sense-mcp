@@ -1,0 +1,109 @@
+{
+ "description": "A native map: the measures live in the layer, not in qMeasures.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "map1",
+    "qType": "map"
+   },
+   "visualization": "map",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Stores",
+   "layers": [],
+   "gaLayers": [
+    {
+     "type": "PointLayer",
+     "qHyperCubeDef": {
+      "qReductionMode": "N",
+      "qMode": "S",
+      "qPseudoDimPos": -1,
+      "qNoOfLeftDims": -1,
+      "qMaxStackedCells": 5000,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qInitialDataFetch": [
+       {
+        "qLeft": 0,
+        "qTop": 0,
+        "qWidth": 10,
+        "qHeight": 500
+       }
+      ],
+      "qLayoutExclude": {
+       "qHyperCubeDef": {
+        "qDimensions": [],
+        "qMeasures": []
+       }
+      },
+      "qDimensions": [
+       {
+        "qDef": {
+         "qGrouping": "N",
+         "qFieldDefs": [
+          "=StoreName"
+         ],
+         "qFieldLabels": [
+          "Store"
+         ],
+         "autoSort": true
+        },
+        "qNullSuppression": false,
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qOtherTotalSpec": {
+         "qOtherMode": "OTHER_OFF"
+        }
+       }
+      ],
+      "qMeasures": [],
+      "qInterColumnSortOrder": [
+       0
+      ]
+     },
+     "locationOrLatitude": {
+      "key": "=Latitude",
+      "type": "expression"
+     },
+     "longitude": {
+      "key": "=Longitude",
+      "type": "expression"
+     },
+     "size": {
+      "label": "Revenue",
+      "expression": {
+       "key": "=Sum(Amount)",
+       "type": "expression"
+      }
+     },
+     "color": {
+      "mode": "byExpression",
+      "colorExpression": "=If(Sum(Amount)>Sum(Plan), Green(), Red())"
+     }
+    }
+   ],
+   "qUndoExclude": {
+    "gaLayers": [
+     {
+      "copy": true
+     }
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "map \"Stores\": layers: PointLayer of [Store]==StoreName at =Latitude/=Longitude size \"Revenue\" = Sum(Amount) colour = =If(Sum(Amount)>Sum(Plan), Green(), Red())",
+  "checks": {
+   "layers.0.measures.0.role": "size"
+  },
+  "fields_used": [
+   "Amount",
+   "StoreName"
+  ]
+ }
+}

@@ -10,15 +10,20 @@ from ..config import (
     DEFAULT_HYPERCUBE_MAX_ROWS,
 )
 from ..utils import bare_field_name, escape_qlik_field_name
+from .canonical import canonical_expression
+# Where a described filter is written into a hand-written expression.
+from .fan_out_text import fan_out_notes, fan_out_public
+from .outer_set import (FILTER_MARKER as _FILTER_MARKER, FilterPlacementError,
+                        element_set_warning, filter_limits, has_marker,
+                        repeated_conditions, repeated_notes,
+                        holds_filter, limit_warnings, marks_outer,
+                        place_filter, set_contexts)
 from typing import Dict, List, Any, Optional
 import logging
 import time
 import uuid
 
 logger = logging.getLogger(__name__)
-
-# Where a described filter is written into a hand-written expression.
-_FILTER_MARKER = "{filter}"
 
 
 MAX_EXPRESSION_CHARS = 20000
@@ -441,7 +446,7 @@ class EngineHypercubeMixin:
                                 "qSortByFrequency": 0,
                                 "qSortByNumeric": dim["sort_by"].get("qSortByNumeric", 0),
                                 "qSortByAscii": dim["sort_by"].get("qSortByAscii", 1),
-                                "qSortByLoadOrder": 0,
+                                "qSortByLoadOrder": dim["sort_by"].get("qSortByLoadOrder", 0),
                                 "qSortByExpression": dim["sort_by"].get("qSortByExpression", 0),
                                 "qExpression": EngineHypercubeMixin._as_value_expr(
                                     dim["sort_by"].get("qExpression", "")
@@ -560,9 +565,17 @@ class EngineHypercubeMixin:
         exclude_null_dimensions: bool = False,
         offset: int = 0,
         filters: Optional[List[Dict[str, Any]]] = None,
+        strict_fields: bool = True,
+        accept_fan_out: bool = False,
+        run_checks: bool = True,
     ) -> Dict[str, Any]:
         """
         Create a hypercube (grouped aggregation) and return its first page.
+
+        `strict_fields=False` turns a name the data model lacks from a
+        refusal into a warning. For a caller's own query the refusal is
+        right; for the expressions of an existing object it is not, since
+        the object is computed with them as they are.
 
         `sort_by` names the column that drives the row order — a measure
         label/expression or a dimension field name. It is translated into
@@ -639,6 +652,8 @@ class EngineHypercubeMixin:
                 field_text = str(dim["field"]).strip()
                 if not field_text.startswith("="):
                     dim["field"] = escape_qlik_field_name(field_text)
+                else:
+                    dim["field"] = canonical_expression(field_text)
                 dim.setdefault("sort_by", {
                     "qSortByNumeric": 0,
                     "qSortByAscii": 1,  # Default: ASCII ascending
@@ -673,6 +688,10 @@ class EngineHypercubeMixin:
                         "hint": ('An expression, or {"expression": '
                                  '"Sum(...)", "label": "..."}.'),
                     }
+                # One written form for one question, so a repeated one
+                # finds Engine's cached result.
+                measure["expression"] = canonical_expression(
+                    measure["expression"])
                 # Default: numeric descending. Only takes effect once this
                 # measure is the leading column of qInterColumnSortOrder.
                 measure.setdefault("sort_by", {"qSortByNumeric": -1})
@@ -684,6 +703,13 @@ class EngineHypercubeMixin:
             # author of the expression knows which aggregation that is —
             # hence the marker rather than a guess.
             filters_applied: List[Dict[str, Any]] = []
+            outer_warnings: List[str] = []
+            # What the server did with the query, apart from doubts about
+            # its figures.
+            notes: List[str] = []
+            # What the checks after the cube ask about: per measure, the
+            # sets its aggregations read through, and the filter it took.
+            checked: List[Dict[str, Any]] = []
             if filters:
                 step = "filters"
                 built = self.build_filters(
@@ -692,34 +718,67 @@ class EngineHypercubeMixin:
                 if built.get("error"):
                     built.setdefault("failed_step", "filters")
                     return built
-                marker_used = False
+                stated = [record.get("field") for record in
+                          built.get("applied", []) or []
+                          if isinstance(record, dict) and record.get("field")]
+                modifier = built["modifier"]
+                # No marker anywhere: every measure takes the filters as an
+                # outer set in front of it, as a master measure does. A
+                # marker on some measures leaves the others unfiltered - that
+                # is what marking one says.
+                marked = any(has_marker(m.get("expression") or "")
+                             for m in converted_measures)
                 for measure in converted_measures:
                     expression = measure.get("expression") or ""
-                    if _FILTER_MARKER in expression:
-                        measure["expression"] = expression.replace(
-                            _FILTER_MARKER, built["modifier"])
-                        marker_used = True
-                if not marker_used:
-                    return {
-                        "error": (
-                            "`filters` was given but no measure marks where "
-                            "the filter goes."
-                        ),
-                        "error_category": "invalid_argument",
-                        "failed_step": "filters",
-                        "next_actions": [
-                            "write the marker inside the aggregation: "
-                            "\"Sum({filter} Amount)\"",
-                            "or call engine_query, which writes the whole "
-                            "expression for you",
-                        ],
-                        "hint": (
-                            "A set modifier narrows the aggregation it sits "
-                            "in. Marking the place keeps that choice with "
-                            "whoever wrote the expression."
-                        ),
-                    }
+                    label = str(measure.get("label") or expression)
+                    if not marked or has_marker(expression):
+                        if not marked:
+                            expression = (_FILTER_MARKER + " "
+                                          + expression.lstrip("= "))
+                        # In front of the whole expression the marker is an
+                        # outer set: it reaches every aggregation inside,
+                        # master measures named by label included, and what
+                        # the expression sets itself says so.
+                        if marks_outer(expression):
+                            repeated = repeated_conditions(expression, modifier)
+                            outer_warnings.extend(limit_warnings(
+                                label, filter_limits(expression), stated, repeated))
+                            notes.extend(repeated_notes(label, repeated))
+                        try:
+                            measure["expression"] = place_filter(
+                                expression, modifier)
+                        except FilterPlacementError as exc:
+                            return {
+                                "error": f"Measure {label!r}: {exc}",
+                                "error_category": "invalid_argument",
+                                "failed_step": "filters",
+                            }
+                    else:
+                        checked.append({"label": label, "_contexts":
+                                        set_contexts(expression)})
+                        continue
+                    contexts = [c for c in set_contexts(measure["expression"])
+                                if holds_filter(c, modifier)]
+                    missed = element_set_warning(label, measure["expression"],
+                                                 modifier)
+                    if missed:
+                        outer_warnings.append(missed)
+                    checked.append({"label": label,
+                                    "filters_applied": built.get("applied", []),
+                                    "modifier": modifier,
+                                    **({"_contexts": contexts} if contexts else {})})
+                if not marked:
+                    notes.append((
+                        "No measure marks where the filters go, so each "
+                        "measure took them as an outer set in front of its "
+                        "whole expression, which reaches every aggregation "
+                        "in it. Mark {filter} to narrow one aggregation "
+                        "only."))
                 filters_applied = built.get("applied", [])
+            else:
+                checked = [{"label": str(m.get("label") or m.get("expression")),
+                            "_contexts": set_contexts(m.get("expression") or "")}
+                           for m in converted_measures]
 
             # Hard limits enforced in our layer — NOT in Qlik Engine.
             # The intent is to force the LLM to design narrow, focused
@@ -963,9 +1022,41 @@ class EngineHypercubeMixin:
             validation = self._validate_cube_inputs(
                 app_handle, converted_dimensions, converted_measures)
             timings["validate_seconds"] = round(time.monotonic() - t_step, 3)
+            input_warnings: List[str] = list(validation.get("warnings", []))
             if validation.get("error"):
-                return validation
-            input_warnings: List[str] = validation.get("warnings", [])
+                # An object's own expressions are computed the way the
+                # object computes them: a name the model lacks - often in a
+                # branch of if() a variable switches off - is null there too.
+                if validation.get("error_category") != "field_not_found" or strict_fields:
+                    return validation
+                input_warnings.append(
+                    f"{validation['error']}. Qlik computes a name it does not have as "
+                    f"null, and so does the object; its values here are what it shows.")
+
+            # The same checks engine_query runs, over the measures as they
+            # will be sent: the ends of a bounded filter's field as each
+            # measure reads it, and the dates a filter on a repeating
+            # calendar reaches. Asked before the cube, which they cost a
+            # fraction of: a query that sums other periods' dates is said
+            # so at once instead of after minutes of computing (measured,
+            # 156 s on a 1.16-billion-row app), unless the caller accepts it.
+            step = "checks"
+            t_step = time.monotonic()
+            checks = (self._cube_checks(app_handle, checked, converted_dimensions)
+                      if run_checks else {})
+            if run_checks:
+                timings["checks_seconds"] = round(time.monotonic() - t_step, 3)
+            if checks.get("fan_out_check") and not accept_fan_out:
+                return {
+                    "error": " ".join(fan_out_notes(checks["fan_out_check"]))
+                             + " Not computed: add the condition for one row per "
+                               "date, or pass accept_fan_out=true to compute it as "
+                               "written.",
+                    "error_category": "fan_out",
+                    "failed_step": "checks",
+                    "fan_out_check": fan_out_public(checks["fan_out_check"]),
+                    "timings": timings,
+                }
 
             step = "CreateSessionObject"
             logger.info(
@@ -1090,7 +1181,7 @@ class EngineHypercubeMixin:
             temporal_columns = self._temporal_columns(hypercube)
             rows = self._matrix_to_rows(initial_pages, column_names,
                                         temporal_columns)
-            warnings = list(input_warnings)
+            warnings = list(outer_warnings) + list(input_warnings)
             if not rows and converted_measures:
                 # No rows at all is the *strongest* version of the same
                 # signal, and `suppress_zero` turns a table of zeros into
@@ -1118,7 +1209,20 @@ class EngineHypercubeMixin:
                     f"get_app_field before trusting this as a real zero."
                 )
 
+            # What the checks before the cube said, first among the warnings.
+            alarms = fan_out_notes(checks.get("fan_out_check", []))
+            for check in checks.get("period_check", []):
+                if check.get("filter_applied") is False:
+                    alarms.append(check["note"])
+                elif check.get("filter_applied") is None and check.get("note"):
+                    alarms.append(f"The period on {check.get('field')} is not "
+                                  f"confirmed: {check['note']}")
+                if check.get("fan_out"):
+                    alarms.append(check["fan_out"]["note"])
+            warnings[:0] = alarms
+
             response: Dict[str, Any] = {
+                **({"warnings": warnings} if alarms else {}),
                 "columns": column_names,
                 "rows": rows,
                 "total_rows": total_rows_on_server,
@@ -1170,6 +1274,12 @@ class EngineHypercubeMixin:
                 # period actually selected and how many values of the field
                 # fall inside it.
                 response["filters_applied"] = filters_applied
+            if notes:
+                response["notes"] = notes
+            if checks.get("period_check"):
+                response["period_check"] = checks["period_check"]
+            if checks.get("fan_out_check"):
+                response["fan_out_check"] = fan_out_public(checks["fan_out_check"])
             if include_raw_layout:
                 # Opt-in: the full qHyperCube (qDimensionInfo, qMeasureInfo,
                 # qDataPages with qElemNumber/qState per cell). Costs several

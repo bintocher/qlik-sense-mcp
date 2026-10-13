@@ -32,6 +32,15 @@ class QlikEngineError(QlikError):
     """Raised when Engine API returns an error."""
 
 
+class ToolTimeLimitError(QlikError, TimeoutError):
+    """Raised when a request would run past the tool call's time limit.
+
+    Kept apart from an ordinary socket timeout: the connection is fine and
+    Engine was asked to cancel the request; it is the question that was too
+    big for one call.
+    """
+
+
 class QlikProbeUnavailable(Exception):
     """A check this server relies on could not be run at all.
 

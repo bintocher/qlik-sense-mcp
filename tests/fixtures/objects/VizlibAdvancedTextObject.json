@@ -1,0 +1,60 @@
+{
+ "description": "A Vizlib text: an expression, shown on a condition.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "va1",
+    "qType": "VizlibAdvancedTextObject"
+   },
+   "visualization": "VizlibAdvancedTextObject",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "text": {
+    "qStringExpression": {
+     "qExpr": "='Selected: ' & GetFieldSelections(Region)"
+    }
+   },
+   "showHideCondition": "GetSelectedCount(Region) > 0",
+   "ttp": "This is my Vizlib Tooltip",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [],
+    "qInterColumnSortOrder": []
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "VizlibAdvancedTextObject: text ='Selected: ' & GetFieldSelections(Region); shown if GetSelectedCount(Region) > 0",
+  "checks": {
+   "conditions.0.condition": "GetSelectedCount(Region) > 0"
+  },
+  "fields_used": [
+   "Region"
+  ]
+ }
+}

@@ -1,0 +1,176 @@
+{
+ "description": "A combo chart: bar and line on a second axis, alternative measures kept out of sight.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "combo1",
+    "qType": "combochart"
+   },
+   "visualization": "combochart",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "Sales and orders",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {},
+     "qMsg": {}
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": [
+       {
+        "qDef": {
+         "qLabel": "Cost",
+         "qDef": "Sum(Cost)",
+         "qGrouping": "N",
+         "autoSort": true,
+         "numFormatFromTemplate": true
+        },
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qSortBy": {
+         "qSortByNumeric": -1
+        },
+        "qMiniChartDef": {
+         "qOtherTotalSpec": {
+          "qOtherMode": "OTHER_OFF"
+         }
+        }
+       },
+       {
+        "qDef": {
+         "qLabel": "Average sale",
+         "qDef": "//old\nAvg(Amount)",
+         "qGrouping": "N",
+         "autoSort": true,
+         "numFormatFromTemplate": true
+        },
+        "qCalcCondition": {
+         "qCond": {},
+         "qMsg": {}
+        },
+        "qSortBy": {
+         "qSortByNumeric": -1
+        },
+        "qMiniChartDef": {
+         "qOtherTotalSpec": {
+          "qOtherMode": "OTHER_OFF"
+         }
+        }
+       }
+      ]
+     }
+    },
+    "qDimensions": [
+     {
+      "qDef": {
+       "qGrouping": "N",
+       "qFieldDefs": [
+        "OrderMonth"
+       ],
+       "qFieldLabels": [
+        "Month"
+       ],
+       "autoSort": true
+      },
+      "qNullSuppression": false,
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qOtherTotalSpec": {
+       "qOtherMode": "OTHER_OFF"
+      }
+     }
+    ],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Sales",
+       "qDef": "Sum(Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "series": {
+        "type": "bar",
+        "axis": 0
+       }
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     },
+     {
+      "qDef": {
+       "qLabel": "Orders",
+       "qDef": "Count(distinct OrderID)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "series": {
+        "type": "line",
+        "axis": 1
+       }
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0,
+     1,
+     2
+    ]
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "combochart \"Sales and orders\": dims [Month]=OrderMonth; bar \"Sales\" = Sum(Amount), line (axis 2) \"Orders\" = Count(distinct OrderID); alt measures \"Cost\" = Sum(Cost), \"Average sale\" = Avg(Amount)",
+  "checks": {
+   "measures.1.role": "line (axis 2)",
+   "alt_measures.1.expression": "Avg(Amount)"
+  },
+  "fields_used": [
+   "Amount",
+   "Cost",
+   "OrderID",
+   "OrderMonth"
+  ]
+ }
+}

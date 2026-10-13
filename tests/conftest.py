@@ -249,8 +249,16 @@ def data_model(call, app_id):
 @pytest.fixture(scope="session")
 def text_field(data_model):
     """A real non-system field of the test app."""
-    for field in data_model.get("fields") or []:
+    for field in (f for t in data_model.get("tables") or [] for f in t.get("fields") or []):
         name = field.get("name", "")
         if name and not name.startswith("$"):
             return field
     pytest.skip("test app has no usable field")
+
+
+@pytest.fixture(autouse=True)
+def _no_session_cache(monkeypatch, tmp_path):
+    """A kept proxy session is per machine; a test must not find one a
+    neighbouring test left, nor leave one behind."""
+    monkeypatch.setenv("QLIK_SESSION_CACHE", "false")
+    monkeypatch.setenv("QLIK_SESSION_CACHE_DIR", str(tmp_path / "sessions"))

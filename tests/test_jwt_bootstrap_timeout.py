@@ -38,6 +38,9 @@ class _Client:
             request=httpx.Request("GET", url))
         return response
 
+    def close(self):
+        pass
+
 
 def _session():
     return JwtSession(QlikSenseConfig(
@@ -48,7 +51,10 @@ def _session():
 class TestBootstrapDeadline:
     def test_the_bootstrap_sets_its_own_timeout(self):
         client = _Client()
-        _session().ensure(client)
+        session = _session()
+        # The login runs on its own cookieless client, not the shared one.
+        session._build_bootstrap_client = lambda: client
+        session.ensure(_Client())
         assert client.timeouts == [BOOTSTRAP_TIMEOUT_SECONDS]
 
 

@@ -72,6 +72,7 @@ from urllib.parse import urljoin
 
 import httpx
 
+from . import session_cache
 from .config import QlikSenseConfig
 from .utils import looks_like_qlik_session_name, pick_qlik_session_cookie
 
@@ -199,6 +200,12 @@ class FormSession:
         self._cookie_value: Optional[str] = None
         self._csrf_token: Optional[str] = None
         self._fetched_at: float = 0.0
+        # A session a previous start of this server left behind is taken
+        # up again rather than a new one opened: see session_cache.
+        self._cache_key = session_cache.key_for(
+            "form", config.qlik_base_host, config.virtual_proxy_prefix,
+            config.user_directory, config.user_id)
+        self._cache_checked = False
 
     # ─── public surface ────────────────────────────────────────────────
 
@@ -229,6 +236,8 @@ class FormSession:
             self._csrf_token = None
             self._fetched_at = 0.0
             self._cookie_name = None
+            self._cache_checked = True
+        session_cache.forget(self._cache_key)
 
     def logout(self) -> bool:
         """Ask the proxy to end this user's Qlik session, and forget it.
@@ -321,6 +330,9 @@ class FormSession:
         and a session that loses it gets a 403 that the existing re-login path
         already handles.
         """
+        if not self._cookie_value and not self._cache_checked:
+            self._cache_checked = True
+            session_cache.restore(self, self._cache_key, self._ttl)
         if not self._cookie_value:
             return False
         return (time.time() - self._fetched_at) < self._ttl
@@ -481,6 +493,7 @@ class FormSession:
         self._cookie_value = cookie_value
         self._csrf_token = self._fetch_csrf_token(client)
         self._fetched_at = time.time()
+        session_cache.store(self, self._cache_key)
         logger.info(
             "Form session bootstrap OK (cookie=%s, csrf_present=%s)",
             cookie_name, bool(self._csrf_token),

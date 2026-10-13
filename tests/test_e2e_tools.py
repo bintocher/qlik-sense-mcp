@@ -21,12 +21,11 @@ class TestDiscovery:
 
 class TestDataModel:
     def test_details_describe_the_real_model(self, data_model):
-        assert data_model["tables_count"] >= 1, "a reloaded app has tables"
-        assert data_model["fields_count"] >= 1
-        assert len(data_model["tables"]) == data_model["tables_count"]
+        assert data_model["tables"], "a reloaded app has tables"
         for table in data_model["tables"]:
-            assert table["name"]
+            assert table["name"] and table["role"]
             assert table["rows"] >= 0
+        assert data_model["tables"][0]["fields"], "the fact table lists its fields"
 
 
 
@@ -38,9 +37,9 @@ class TestFields:
     def test_field_values_come_from_the_field(self, call, app_id, text_field):
         result = call("get_app_field", app_id=app_id, field_name=text_field["name"], limit=5)
         values = result.get("field_values") or []
-        assert values, f"field {text_field['name']} has {text_field['distinct_values']} distinct values"
+        assert values, f"field {text_field['name']} has {text_field['distinct']} distinct values"
         assert len(values) <= 5
-        assert len(values) <= text_field["distinct_values"]
+        assert len(values) <= text_field["distinct"]
 
 
 

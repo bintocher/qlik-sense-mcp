@@ -1,0 +1,51 @@
+{
+ "description": "A date picker on one field with a default range.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "dp1",
+    "qType": "qlik-date-picker"
+   },
+   "visualization": "qlik-date-picker",
+   "version": "1.0.0",
+   "showTitles": true,
+   "qListObjectDef": {
+    "qDef": {
+     "qFieldDefs": [
+      "OrderDate"
+     ]
+    },
+    "qInitialDataFetch": [
+     {
+      "qHeight": 10000,
+      "qWidth": 1
+     }
+    ]
+   },
+   "props": {
+    "startDate": {
+     "qStringExpression": {
+      "qExpr": "=Min([OrderDate])"
+     }
+    },
+    "endDate": {
+     "qStringExpression": {
+      "qExpr": "=Max([OrderDate])"
+     }
+    },
+    "today": "Today",
+    "locale": "en"
+   }
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "qlik-date-picker: on OrderDate, date range, default =Min([OrderDate]) .. =Max([OrderDate])",
+  "checks": {
+   "controls.0.field": "OrderDate"
+  },
+  "fields_used": [
+   "OrderDate"
+  ]
+ }
+}

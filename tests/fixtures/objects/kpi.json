@@ -1,0 +1,94 @@
+{
+ "description": "A KPI: one measure with a format, a calculation condition and a variable.",
+ "node": {
+  "qProperty": {
+   "qInfo": {
+    "qId": "kpi1",
+    "qType": "kpi"
+   },
+   "visualization": "kpi",
+   "version": "1.0.0",
+   "showTitles": true,
+   "title": "",
+   "qHyperCubeDef": {
+    "qReductionMode": "N",
+    "qMode": "S",
+    "qPseudoDimPos": -1,
+    "qNoOfLeftDims": -1,
+    "qMaxStackedCells": 5000,
+    "qCalcCondition": {
+     "qCond": {
+      "qv": "GetSelectedCount(Region)>0"
+     },
+     "qMsg": {
+      "qv": "Select a region"
+     }
+    },
+    "qInitialDataFetch": [
+     {
+      "qLeft": 0,
+      "qTop": 0,
+      "qWidth": 10,
+      "qHeight": 500
+     }
+    ],
+    "qLayoutExclude": {
+     "qHyperCubeDef": {
+      "qDimensions": [],
+      "qMeasures": []
+     }
+    },
+    "qDimensions": [],
+    "qMeasures": [
+     {
+      "qDef": {
+       "qLabel": "Revenue",
+       "qDef": "Sum({<Year={$(vYear)}>} Amount)",
+       "qGrouping": "N",
+       "autoSort": true,
+       "numFormatFromTemplate": true,
+       "qNumFormat": {
+        "qType": "F",
+        "qFmt": "#,##0"
+       }
+      },
+      "qCalcCondition": {
+       "qCond": {},
+       "qMsg": {}
+      },
+      "qSortBy": {
+       "qSortByNumeric": -1
+      },
+      "qMiniChartDef": {
+       "qOtherTotalSpec": {
+        "qOtherMode": "OTHER_OFF"
+       }
+      }
+     }
+    ],
+    "qInterColumnSortOrder": [
+     0
+    ]
+   },
+   "conditionalColoring": {
+    "useConditionalColoring": false
+   },
+   "fontSize": "M"
+  },
+  "qChildren": []
+ },
+ "expect": {
+  "summary": "kpi: measure \"Revenue\" = Sum({<Year={$(vYear)}>} Amount) [format #,##0]; calculated if GetSelectedCount(Region)>0 (else \"Select a region\"); variables vYear",
+  "checks": {
+   "measures.0.format": "#,##0",
+   "conditions.0.message": "Select a region",
+   "variables": [
+    "vYear"
+   ]
+  },
+  "fields_used": [
+   "Amount",
+   "Year"
+  ]
+ }
+}
