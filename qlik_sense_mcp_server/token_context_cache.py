@@ -1,0 +1,165 @@
+"""Bounded, in-memory cache for Qlik-authenticated token contexts.
+
+This module is a building block only. It is not connected to the MCP
+transport. The supplied factory MUST authenticate the exact JWT against Qlik
+before returning a context; time checks alone do not authenticate tokens.
+Contexts must expose close(), which must not log out other Qlik sessions.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import os
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Callable, Iterator
+
+from .jwt_validity import InvalidToken, token_expiration
+
+
+class CacheBusy(RuntimeError):
+    """No safely evictable cache slot is currently available."""
+
+
+@dataclass
+class _Entry:
+    context: Any
+    expires_at: float
+    created: float
+    touched: float
+    active: int = 0
+
+
+class TokenContextCache:
+    """Cache independently authenticated contexts without storing raw keys.
+
+    Leases pin a context until the caller completes, including on exception.
+    An expired or idle context is never given to a new caller. The factory
+    runs outside the global lock, with one in-flight creation per token, so
+    different users can authenticate concurrently.
+    """
+
+    def __init__(self, factory: Callable[[str], Any], *, max_entries: int = 128,
+                 idle_seconds: float = 900, max_age_seconds: float = 1500):
+        if max_entries < 1 or idle_seconds <= 0 or max_age_seconds <= 0:
+            raise ValueError("Cache limits must be positive")
+        self._factory = factory
+        self._max_entries = max_entries
+        self._idle_seconds = idle_seconds
+        self._max_age_seconds = max_age_seconds
+        self._key = os.urandom(32)
+        self._condition = threading.Condition()
+        self._entries: dict[bytes, _Entry] = {}
+        self._creating: set[bytes] = set()
+        self._closed = False
+
+    def _fingerprint(self, token: str) -> bytes:
+        return hmac.new(self._key, token.encode("ascii"), hashlib.sha256).digest()
+
+    def _stale(self, entry: _Entry, wall: float, mono: float) -> bool:
+        return (wall >= entry.expires_at or
+                mono - entry.touched >= self._idle_seconds or
+                mono - entry.created >= self._max_age_seconds)
+
+    @staticmethod
+    def _close(context: Any) -> None:
+        try:
+            context.close()
+        except Exception:
+            # Cleanup must not disclose credentials or stop other evictions.
+            pass
+
+    @contextmanager
+    def lease(self, token: str) -> Iterator[Any]:
+        """Lease the exact token's authenticated context until the call ends."""
+        expiration = token_expiration(token)
+        try:
+            fingerprint = self._fingerprint(token)
+        except UnicodeEncodeError:
+            raise InvalidToken("Invalid bearer token") from None
+        entry = None
+        while entry is None:
+            to_close = []
+            create = False
+            with self._condition:
+                if self._closed:
+                    raise RuntimeError("Token context cache is closed")
+                token_expiration(token)
+                wall, mono = time.time(), time.monotonic()
+                for key, candidate in list(self._entries.items()):
+                    if not candidate.active and self._stale(candidate, wall, mono):
+                        del self._entries[key]
+                        to_close.append(candidate.context)
+                current = self._entries.get(fingerprint)
+                if current is not None:
+                    if self._stale(current, wall, mono):
+                        raise CacheBusy("The previous context is still in use")
+                    current.active += 1
+                    current.touched = mono
+                    entry = current
+                elif fingerprint in self._creating:
+                    # Wake periodically to re-check token expiry and shutdown.
+                    self._condition.wait(timeout=1)
+                else:
+                    occupied = len(self._entries) + len(self._creating)
+                    if occupied >= self._max_entries:
+                        available = [(k, v) for k, v in self._entries.items() if not v.active]
+                        if not available:
+                            raise CacheBusy("All token contexts are in use")
+                        key, victim = min(available, key=lambda pair: pair[1].touched)
+                        del self._entries[key]
+                        to_close.append(victim.context)
+                    self._creating.add(fingerprint)
+                    create = True
+            for context in to_close:
+                self._close(context)
+            if not create:
+                continue
+            try:
+                built = self._factory(token)
+            except BaseException:
+                with self._condition:
+                    self._creating.discard(fingerprint)
+                    self._condition.notify_all()
+                raise
+            with self._condition:
+                self._creating.discard(fingerprint)
+                now_wall, now_mono = time.time(), time.monotonic()
+                if self._closed or now_wall >= expiration:
+                    entry = None
+                else:
+                    entry = _Entry(built, expiration, now_mono, now_mono, active=1)
+                    self._entries[fingerprint] = entry
+                self._condition.notify_all()
+            if entry is None:
+                self._close(built)
+                if self._closed:
+                    raise RuntimeError("Token context cache is closed")
+                raise InvalidToken("Bearer token has expired")
+        try:
+            yield entry.context
+        finally:
+            to_close = None
+            with self._condition:
+                entry.active -= 1
+                entry.touched = time.monotonic()
+                if entry.active == 0 and (self._closed or self._stale(entry, time.time(), entry.touched)):
+                    if self._entries.get(fingerprint) is entry:
+                        del self._entries[fingerprint]
+                        to_close = entry.context
+                self._condition.notify_all()
+            if to_close is not None:
+                self._close(to_close)
+
+    def close(self) -> None:
+        """Reject new leases and close idle contexts; active leases close on exit."""
+        with self._condition:
+            self._closed = True
+            idle = [entry.context for entry in self._entries.values() if not entry.active]
+            self._entries = {key: entry for key, entry in self._entries.items() if entry.active}
+            self._condition.notify_all()
+        for context in idle:
+            self._close(context)
