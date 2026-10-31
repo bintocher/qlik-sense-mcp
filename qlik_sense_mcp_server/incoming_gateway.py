@@ -75,11 +75,14 @@ class _Worker:
         env.pop("QLIK_PASSWORD", None)
         _workers.add(worker)
         try:
-            worker.process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "qlik_sense_mcp_server.incoming_worker", worker.socket,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, env=env,
-            )
+            # Shutdown cannot discard a worker before its pending spawn
+            # finishes publishing the process handle.
+            async with worker.stopping:
+                worker.process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "qlik_sense_mcp_server.incoming_worker", worker.socket,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL, env=env,
+                )
             worker.process.stdin.write((token + "\n").encode("ascii"))
             await worker.process.stdin.drain()
             worker.process.stdin.close()
