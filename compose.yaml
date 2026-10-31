@@ -1,0 +1,41 @@
+services:
+  qlik-mcp:
+    build:
+      context: .
+    image: qlik-sense-mcp:local
+    restart: unless-stopped
+    init: true
+    environment:
+      QLIK_MCP_MODE: incoming-jwt
+      QLIK_SERVER_URL: "${QLIK_SERVER_URL:?Set QLIK_SERVER_URL to the Qlik JWT virtual proxy URL}"
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      QLIK_VERIFY_SSL: "${QLIK_VERIFY_SSL:-false}"
+      QLIK_INCOMING_MAX_CONTEXTS: "${QLIK_INCOMING_MAX_CONTEXTS:-16}"
+      QLIK_INCOMING_IDLE_SECONDS: "${QLIK_INCOMING_IDLE_SECONDS:-900}"
+      QLIK_INCOMING_MAX_AGE_SECONDS: "${QLIK_INCOMING_MAX_AGE_SECONDS:-0}"
+      QLIK_INCOMING_START_TIMEOUT: "${QLIK_INCOMING_START_TIMEOUT:-120}"
+      QLIK_INCOMING_MAX_STARTS: "${QLIK_INCOMING_MAX_STARTS:-4}"
+      QLIK_INCOMING_STARTS_PER_MINUTE: "${QLIK_INCOMING_STARTS_PER_MINUTE:-30}"
+      QLIK_INCOMING_MAX_BODY_BYTES: "${QLIK_INCOMING_MAX_BODY_BYTES:-4194304}"
+      QLIK_INCOMING_BODY_TIMEOUT: "${QLIK_INCOMING_BODY_TIMEOUT:-30}"
+    # For a reverse proxy running on this Docker host. For a proxy on
+    # another machine, use a specific private host address and a firewall.
+    ports:
+      - "${MCP_PUBLISH_ADDRESS:-127.0.0.1}:${MCP_PUBLISH_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
