@@ -19,12 +19,22 @@ class ManagedJwtSession(JwtSession):
         self._cache_key = None
         self._cache_checked = True
         self._invalidated = invalidated
+        self._retired = False
+
+    def ensure(self, client):
+        if self._retired:
+            raise SessionInvalidated("Qlik session retired")
+        return super().ensure(client)
+
+    def ensure_standalone(self):
+        if self._retired:
+            raise SessionInvalidated("Qlik session retired")
+        return super().ensure_standalone()
 
     def invalidate(self):
         super().invalidate()
+        self._retired = True
         self._invalidated()
-        # Stop lower-level implicit reauthentication inside a logical call.
-        # The guard will rebuild *all* dependent state at the next boundary.
         raise SessionInvalidated("Qlik session invalidated; retry the tool call")
 
     def logout(self):
@@ -51,7 +61,6 @@ class WorkerSessionGuard:
         self.closed = False
 
     def _invalidated(self):
-        # Called from the active tool thread, after JwtSession's lock exits.
         self.dirty = True
         engine = self.context.engine_api
         if engine is not None:
@@ -59,7 +68,6 @@ class WorkerSessionGuard:
 
     def _drop(self):
         engine, repo = self.context.engine_api, self.context.repo_api
-        # Make stale clients unreachable before closing them.
         self.context.engine_api = None
         self.context.repo_api = None
         self.context.jwt_session = None
@@ -75,8 +83,6 @@ class WorkerSessionGuard:
                 repo.client.close()
             except Exception:
                 pass
-        # App details are the only tool-module data cache; other mutable
-        # Qlik caches belong to the Engine instance discarded above.
         import sys
         module = sys.modules.get("qlik_sense_mcp_server.tools.repository")
         if module is not None:
@@ -89,7 +95,6 @@ class WorkerSessionGuard:
         from .jwt_validity import token_expiration
         token_expiration(self.config.jwt_token)
         session = self.session_factory(self.config, self._invalidated)
-        # Clients are published only after authentication completes.
         session.ensure_standalone()
         repo = self.repo_factory(self.config, jwt_session=session)
         try:
@@ -108,8 +113,7 @@ class WorkerSessionGuard:
             self._build()
 
     def execute(self, function, *args, **kwargs):
-        # Every tool, including cache reads and Repository-only calls, uses
-        # this lock. An abandoned worker thread retains it until it exits.
+        # The lock lives in the actual tool thread, not its HTTP waiter.
         with self.lock:
             from .jwt_validity import token_expiration
             token_expiration(self.config.jwt_token)
