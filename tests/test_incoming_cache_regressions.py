@@ -92,3 +92,19 @@ def test_different_tokens_build_in_parallel():
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert all(pool.map(acquire, (token("a"), token("b"))))
     cache.close()
+
+
+def test_reaper_closes_idle_but_not_active_workers():
+    cache = TokenContextCache(lambda _: Context(), idle_seconds=0.03)
+    a, b = token("a"), token("b")
+    with cache.lease(a) as idle:
+        pass
+    with cache.lease(b) as active:
+        time.sleep(0.06)
+        assert cache.reap() == 1
+        assert idle.closed
+        assert not active.closed
+    time.sleep(0.06)
+    assert cache.reap() == 1
+    assert active.closed
+    cache.close()
