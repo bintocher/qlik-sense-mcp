@@ -1,52 +1,51 @@
-"""Local time checks for a Qlik-authenticated incoming bearer token.
-
-These checks do not authenticate a JWT or verify its signature. A token must
-be accepted by the configured Qlik virtual proxy before it can be cached or
-used for tool calls. This module only enforces the validity window locally.
-"""
+"""Local validity checks only; Qlik authenticates the exact token on cache miss."""
 
 import base64
 import binascii
 import json
 import math
+import re
 import time
+
+_COMPACT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", re.ASCII)
 
 
 class InvalidToken(ValueError):
-    """The bearer token cannot be used, without including its value."""
+    """A sanitized credential error that never contains the token."""
+
+
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidToken("Invalid bearer token validity window")
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise InvalidToken("Invalid bearer token validity window") from None
+    if not math.isfinite(number):
+        raise InvalidToken("Invalid bearer token validity window")
+    return number
 
 
 def token_expiration(token: str, *, now: float | None = None) -> float:
-    """Return a JWT's mandatory expiration, or raise a sanitized error.
+    """Enforce a mandatory finite exp and optional nbf without authenticating claims.
 
-    Claims are unverified: calling this function alone never authorizes a
-    request. Qlik must authenticate the exact token on the first cache miss.
-    There is deliberately no expiration grace period on cache hits.
+    Reject whitespace/control characters throughout the compact token, not
+    just in its payload. No token is authorized by these checks alone.
     """
-    if not isinstance(token, str) or not token or len(token) > 16384:
-        raise InvalidToken("Invalid bearer token")
-    parts = token.split(".")
-    if len(parts) != 3 or any(not part for part in parts):
+    if not isinstance(token, str) or len(token) > 16384 or not _COMPACT.fullmatch(token):
         raise InvalidToken("Invalid bearer token")
     try:
-        payload = parts[1].encode("ascii")
+        payload = token.split(".")[1].encode("ascii")
         payload += b"=" * (-len(payload) % 4)
         claims = json.loads(base64.b64decode(payload, altchars=b"-_", validate=True))
     except (UnicodeError, binascii.Error, ValueError, RecursionError):
         raise InvalidToken("Invalid bearer token") from None
     if not isinstance(claims, dict):
         raise InvalidToken("Invalid bearer token")
-
     now = time.time() if now is None else now
-    exp = claims.get("exp")
-    if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not math.isfinite(exp):
-        raise InvalidToken("Bearer token must have a valid expiration")
+    exp = _number(claims.get("exp"))
     if exp <= now:
         raise InvalidToken("Bearer token has expired")
-    nbf = claims.get("nbf")
-    if nbf is not None:
-        if isinstance(nbf, bool) or not isinstance(nbf, (int, float)) or not math.isfinite(nbf):
-            raise InvalidToken("Invalid bearer token validity window")
-        if nbf > now:
-            raise InvalidToken("Bearer token is not yet valid")
-    return float(exp)
+    if "nbf" in claims and _number(claims["nbf"]) > now:
+        raise InvalidToken("Bearer token is not yet valid")
+    return exp
