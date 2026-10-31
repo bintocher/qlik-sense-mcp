@@ -8,7 +8,6 @@ from starlette.responses import StreamingResponse
 
 
 def upstream_failed(error):
-    """Starlette/AnyIO may wrap streaming failures in an ExceptionGroup."""
     if isinstance(error, httpx.HTTPError):
         return True
     if isinstance(error, BaseExceptionGroup):
@@ -25,12 +24,27 @@ class OwnedProxyResponse(StreamingResponse):
 
     async def __call__(self, scope, receive, send):
         broken = False
+        started = False
+        completed = False
+
+        async def tracked_send(message):
+            nonlocal started, completed
+            await send(message)
+            if message["type"] == "http.response.start":
+                started = True
+            elif message["type"] == "http.response.body" and not message.get("more_body", False):
+                completed = True
+
         try:
-            with anyio.move_on_after(max(0, self.expires_at - time.time())):
-                await super().__call__(scope, receive, send)
+            with anyio.move_on_after(max(0, self.expires_at - time.time())) as deadline:
+                await super().__call__(scope, receive, tracked_send)
+            if deadline.cancel_called and started and not completed:
+                # A timed-out SSE response must still finish ASGI framing.
+                # No data is emitted after expiry, only the empty end marker.
+                with anyio.CancelScope(shield=True):
+                    await tracked_send({"type": "http.response.body", "body": b"", "more_body": False})
         except BaseException as error:
             broken = upstream_failed(error)
-            # Do not propagate upstream exception messages into ASGI logs.
             if broken:
                 import logging
                 logging.getLogger(__name__).warning("Gateway stream failed: upstream_transport")
