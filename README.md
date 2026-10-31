@@ -1,266 +1,146 @@
 # Qlik Sense MCP Server
 
-[![PyPI version](https://badge.fury.io/py/qlik-sense-mcp-server.svg)](https://pypi.org/project/qlik-sense-mcp-server/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/qlik-sense-mcp-server)](https://pypi.org/project/qlik-sense-mcp-server/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python versions](https://img.shields.io/pypi/pyversions/qlik-sense-mcp-server)](https://pypi.org/project/qlik-sense-mcp-server/)
+Community MCP integration for Qlik Sense Enterprise, exposing Repository
+HTTP and Engine WebSocket APIs for app discovery, model inspection, queries
+and optional reload-task administration. This fork adds incoming per-request
+Qlik JWT authentication with isolated token workers.
 
-[Model Context Protocol](https://modelcontextprotocol.io/) server for
-Qlik Sense Enterprise. Exposes Qlik's Repository (HTTP) and Engine
-(WebSocket) APIs as **28 MCP tools** so an LLM client can discover apps,
-inspect data models, query data, and manage reload tasks through a
-single uniform interface. In JWT and form (login/password) mode the 14
-reload-task tools are hidden by default: QRS task administration needs an
-admin role in the QMC, which a JWT analyst or a form login usually does
-not hold. That is a property of the identity, not of how it authenticated,
-so `QLIK_TASK_TOOLS=true` turns them on for an identity that does hold it.
+## Install this fork
 
-## What's in the box
+Use Python 3.12 or newer and install the checked-out feature branch, rather
+than assuming the upstream PyPI package contains these changes:
 
-| Area | Tools | Used for |
-|------|-------|----------|
-| Repository (apps & metadata) | `get_about`, `get_apps`, `get_app_details` | Discover apps, list tables and fields with cardinalities |
-| Engine (data & script)       | `engine_query`, `engine_create_hypercube`, `get_app_script`, `get_app_variables`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `search_app`, `get_app_field`, `engine_get_field_range`, `get_app_field_statistics` | Query data, read load script, list visualizations, inspect field values |
-| Reload tasks *(certificate mode by default; opt-in elsewhere, see below)* | `get_tasks`, `get_task_details`, `get_task_dependencies`, `get_task_schedule`, `get_task_executions`, `get_task_script_log`, `get_failed_tasks_with_logs`, `start_task`, `create_task`, `update_task`, `delete_task`, `create_task_schedule`, `update_task_schedule`, `delete_task_schedule` | Inspect, trigger and manage reload tasks |
-
-Full list with descriptions: [`docs/tools.md`](docs/tools.md).
-
-The main analysis call takes the question, not the Qlik syntax for it:
-
-```jsonc
-// engine_query — "revenue by region for 2024, biggest first"
-{
-  "app_id": "<app guid>",
-  "group_by": ["region_name"],
-  "metrics":  [{"field": "amount", "agg": "sum", "label": "Revenue"}],
-  "filters":  [{"field": "order_date", "period": "2024"}],
-  "sort_by": "Revenue",
-  "limit": 10
-}
+```sh
+python -m pip install -e .
 ```
 
-The server writes the set analysis, checks that the filter selects
-something, and answers with `period_check` — the earliest and latest
-date actually in the result — so a filter that failed to apply is
-visible instead of hiding behind a plausible number. Independent
-questions go in one call as `queries` and share three round-trips.
+For development tests:
 
-Harder questions stay in the same form. A share of the whole, with the
-numerator narrowed and the denominator not:
-
-```jsonc
-{
-  "group_by": ["region_name"],
-  "metrics": [{"label": "Share", "op": "divide", "of": [
-    {"field": "amount", "agg": "sum",
-     "filters": [{"field": "category", "values": ["Alpha"]}]},
-    {"field": "amount", "agg": "sum", "total": true}]}]
-}
+```sh
+python -m pip install -e '.[dev]'
+python -m pytest tests -m 'not e2e'
 ```
 
-The same form states an aggregation over an aggregation
-(`"inner_agg": "sum", "per": "order_id", "agg": "median"`), the clients
-who bought in one year and not the next (`matching` / `not_matching`),
-counting over a bookmark or ignoring selections (`scope`), and values
-kept, dropped, added or intersected on any field.
+## Docker behind your reverse proxy
 
-The app's own master measures are named rather than rebuilt -
-`"measures": [{"master": "Revenue"}]` - and take the query's filters as
-an outer set in front of them.
+A non-root Docker image and hardened Compose service are included. On your
+Docker host, set your Qlik JWT virtual-proxy URL in `.env`, then run:
 
-`engine_create_hypercube` takes the same shape with the expressions
-written by hand, for calculations the typed form cannot state.
-
-## Quick start
-
-```bash
-uvx qlik-sense-mcp-server
+```sh
+docker compose config
+docker compose up -d --build
 ```
 
-The server starts in [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
-mode on `http://127.0.0.1:8000/mcp`. Configure it via environment
-variables — see [`docs/configuration.md`](docs/configuration.md).
+Compose starts incoming-JWT mode and publishes port 8000 on host loopback
+by default. A proxy on the same host uses `http://127.0.0.1:8000/mcp`.
+For a proxy on another machine or in another container, change the network
+route as described in [the Docker guide](docs/DOCKER.md). Do not expose an
+unrestricted backend port or bake user JWTs into the image.
 
-For stdio mode (legacy MCP transport), pass `--stdio`.
+Docker image build/start has not been verified in the authoring environment.
+The container still needs live Qlik and full SDK acceptance testing.
 
-Three authentication modes are supported: client certificate (legacy,
-full QRS access), JWT via virtual proxy (per-analyst, no on-disk
-secrets), and login/password against a "Form based" virtual proxy
-(e.g. the in-box Windows credentials login page). See
-[`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) and
-[`docs/AUTH_FORM.md`](docs/AUTH_FORM.md) for setup.
+## One startup command, two routes
+
+```sh
+qlik-sense-mcp-server
+```
+
+Select the route in `.env` or the service environment:
+
+| Setting | Route |
+| --- | --- |
+| `QLIK_MCP_MODE=legacy` (default) | Existing certificate, environment-JWT or form authentication. |
+| `QLIK_MCP_MODE=incoming-jwt` | Each MCP HTTP request supplies its own Qlik JWT in the Authorization header. |
+
+Incoming-mode example:
+
+```dotenv
+QLIK_MCP_MODE=incoming-jwt
+QLIK_SERVER_URL=https://qlik.example.com/jwt
+MCP_PORT=8000
+```
+
+Start the same command shown above. The endpoint is
+`http://127.0.0.1:8000/mcp`; use an appropriately secured reverse proxy for
+remote access. Linux/macOS POSIX Unix sockets are required in incoming mode.
+The gateway does not use an environment service token as a fallback.
+The Docker image sets `MCP_HOST=0.0.0.0` inside the container; bare-host
+incoming-mode startup still defaults to `127.0.0.1`.
+
+Legacy stdio still uses `qlik-sense-mcp-server --stdio`. Incoming mode is
+HTTP-only and rejects `--stdio`. `python -m qlik_sense_mcp_server.cli` is an
+equivalent unified module entry point. The original server module remains a
+legacy entry point for compatibility.
+
+**TLS behavior is unchanged:** Qlik certificate verification remains optional
+through `QLIK_VERIFY_SSL` and `QLIK_CA_CERT_PATH`, with the original defaults.
+
+See [.env.incoming.example](.env.incoming.example) and
+[the incoming JWT guide](docs/INCOMING_JWT.md) for limits, failure behavior,
+client reinitialization, deployment and verification requirements.
+
+## Incoming JWT session semantics
+
+- The first use of an exact JWT authenticates against Qlik's configured JWT
+  virtual proxy and obtains a session cookie and CSRF token.
+- Cache hits reuse that session without another JWT-authentication request.
+  JWT expiration is enforced locally on requests, tool execution and streams.
+- Different JWTs have separate worker processes, clients, WebSockets and
+  caches. Same-token conversations intentionally share state.
+- When Qlik invalidates a session, its dependent clients and caches are
+  dropped. The failed tool is not replayed; the next call authenticates
+  afresh. Failed reauthentication cannot access the old state.
+- Worker startup, request-body size, upload time and cache capacity are
+  bounded. Failure logs contain fixed categories, not credentials or raw
+  authentication error bodies. Workers disable proxy-wide logout and disk
+  session persistence.
+- Incoming workers do not expose reload-task administration tools.
+
+This fork's incoming mode needs the full SDK integration suite and live Qlik
+acceptance tests before production rollout. Unit tests with mocked Qlik are
+not evidence of live authentication or Section Access correctness.
+
+## Tools
+
+| Area | Examples |
+| --- | --- |
+| Repository | `get_about`, `get_apps`, `get_app_details` |
+| Engine | `engine_query`, `engine_create_hypercube`, `get_app_field`, `get_app_field_statistics`, `get_app_sheets`, `get_app_sheet_objects`, `get_app_object`, `get_app_script`, `get_app_variables`, `search_app`, `engine_get_field_range` |
+| Reload tasks (legacy, optional) | Task discovery, execution, schedules and administration. Requires the appropriate Qlik role. |
+
+`engine_query` supports typed dimensions, metrics, filters and master
+measures. `engine_create_hypercube` supports handwritten Qlik expressions.
+Read the model with `get_app_details` before querying unfamiliar fields.
 
 ## Documentation
 
-| Document | What's inside |
-|----------|---------------|
-| [`docs/installation.md`](docs/installation.md) | Requirements, install via `uvx` / `pip` / source, certificate setup |
-| [`docs/configuration.md`](docs/configuration.md) | All `QLIK_*` environment variables, sample `.env`, MCP client config snippet |
-| [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md) | JWT authentication via virtual proxy: key generation, virtual proxy setup, `QLIK_JWT_TOKEN` usage |
-| [`docs/AUTH_FORM.md`](docs/AUTH_FORM.md) | Login/password authentication via a "Form based" virtual proxy: how the login flow works, `QLIK_PASSWORD` usage, overrides for non-default login pages |
-| [`docs/usage.md`](docs/usage.md) | Transports, server start commands, recommended call order, hard limits enforced by this server |
-| [`docs/tools.md`](docs/tools.md) | Inventory of all 28 tools, response/error envelope, error categories |
-| [`docs/architecture.md`](docs/architecture.md) | Project layout, components, connection caching, strict id-matching, two-tier timeout |
-| [`docs/development.md`](docs/development.md) | `make` targets, tests, versioning, how to add a new tool |
-| [`docs/troubleshooting.md`](docs/troubleshooting.md) | Common errors, hypercube planning failures, verbose logging, configuration self-test |
-| [`docs/llm-behaviour.md`](docs/llm-behaviour.md) | What models actually do with this server, measured: calls per question, where they go wrong, session limits, how to benchmark honestly |
-| [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
+- [Docker and reverse proxies](docs/DOCKER.md)
+- [Configuration](docs/configuration.md)
+- [Incoming per-request JWT authentication](docs/INCOMING_JWT.md)
+- [Legacy JWT virtual-proxy setup](docs/AUTH_JWT.md)
+- [Form authentication](docs/AUTH_FORM.md)
+- [Installation](docs/installation.md)
+- [Tools](docs/tools.md)
+- [Usage](docs/usage.md)
+- [Architecture](docs/architecture.md)
+- [Development](docs/development.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [LLM behavior](docs/llm-behaviour.md)
+- [Changelog](CHANGELOG.md)
 
-## Key facts
+## Requirements and disclaimer
 
-- **A wrong query is refused, not answered.** Qlik evaluates an unknown
-  field name as an expression worth 0, so a hypercube grouped by a typo
-  came back as a single row holding the grand total — a plausible number
-  with nothing to mark it as wrong. Every query is checked by Engine
-  before it runs: `ExpandExpression` resolves variables, `CheckExpression`
-  reports syntax and unknown names, `GetFieldsFromExpression` reports the
-  fields a set modifier actually filters on. The four checks cost about
-  4ms in one batch, against 75ms for the smallest hypercube.
-- **A period filter is measured, not assumed.** Comparison inside a set
-  modifier runs against the text Qlik displays for a value, so a serial
-  number range returns 0 on a field displayed as `01.01.2024` and works
-  on one displayed as `45292` — with no error either way. State the
-  period as a filter and the server writes it as a range in the field's
-  own display format, checks it against a reference count, falls back to
-  the numeric range and then to the form that always works, and reports
-  the period the result actually covers - and when a shifted calendar
-  made the period reach facts outside it.
-- **Filters reach the author's measures.** `{"master": "Revenue"}` with a
-  period is computed as `{&<period>} [Revenue]`, an outer set in front of
-  the measure, and the reply names a measure that sets a filtered field
-  itself or counts over a set of its own, where the filter does not
-  reach.
-- **One value, one writing.** A date in a query result reads as the text
-  Qlik displays for it, the same as the sample values in
-  `get_app_details` and the bounds from `engine_get_field_range`.
-- **A field name is always written in brackets.** A bare `Тип ставки` is
-  read by Qlik's parser as two tokens — "Garbage after expression:
-  'ставки'" — which used to refuse queries Qlik itself runs happily.
-- **Aggregating over groups, not rows.** `per` and `inner_agg` state
-  "sum per issue, then the 85th percentile across issues", which is a
-  different question from a percentile over rows and gives a different
-  number.
-- **A measure can narrow itself.** Its own `filters` override the
-  query's, so a KPI carries its numerator and its denominator in one
-  answer.
-- **Objects say what they show.** `get_app_sheet_objects` gives each object
-  one line - its dimensions, its measures with their expressions, the
-  conditions and variables it depends on, what a filter or button does -
-  and `fields_used`, including fields reached through master items and the
-  ones inside a filter pane's listboxes — so "what does this sheet work
-  with" is one call, with nothing calculated.
-- **Paging is done by Qlik, not after it.** App and task listings read
-  `/{entity}/table` with `skip`/`take` and take the total from
-  `/{entity}/count`, so nothing past the QRS record limit goes missing
-  and `total_found` is the real total. Field search and field paging
-  likewise happen in Engine — verified on a field with 200,000 distinct
-  values, where the old local scan simply could not see a match.
-- **A failure is never an empty answer.** A QRS 500, a refused
-  connection or an Engine error used to arrive as `[]`, `""` or "no
-  schedule", which reads as a tidy, empty Qlik. Every such path now
-  returns an `error_category` and the original cause.
-- **Column meanings, not just column names.** Fields and tables commented
-  in the load script (`COMMENT FIELD` / `COMMENT TABLE`) carry that text
-  into `get_app_details` as `comment`, and into `get_app_field` as
-  `field_comment`, so the model reads what a column means instead of
-  guessing from its name. Added in 1.7.2.
+The MCP host needs network access to Qlik. Legacy certificate mode connects
+to the Repository/Engine ports; JWT and form modes use the configured
+virtual proxy. App access, licensing, security rules and Section Access
+remain Qlik responsibilities.
 
-- **Runs on both MCP SDK lines.** SDK 2.0 dropped `FastMCP`; the server
-  now picks `MCPServer` (2.x) or `FastMCP` (1.x) at import time, so
-  `mcp>=1.8.0,<3.0.0` all work. Both lines are covered by the test
-  suite and were verified end to end against a live Qlik app.
-
-- **Ranked queries (top-N) in one call.** `engine_create_hypercube`
-  takes `sort_by` (a measure label, a measure expression or a dimension
-  field), `sort_order` (`desc` / `asc`) and `limit`, so "the 10 clients
-  with the highest GGR" is a single request. Before v1.6.0 sorting by a
-  measure silently did nothing — `qInterColumnSortOrder` was hard-coded
-  to the dimensions, so the server returned the alphabetically first
-  rows instead of the largest ones.
-- **NULL groups are visible, not hidden.** Facts with no value for the
-  grouping field collapse into Qlik's `"-"` row, which often holds a
-  large total and can take first place in a top-N. It is kept by
-  default — a fact with no grouping value is still a fact — and
-  `exclude_null_dimensions=true` leaves it out.
-- **Compact, LLM-friendly results.** The hypercube response is
-  `columns` + `rows` with real numbers, plus `grand_total` and
-  per-step `timings`. Pass `include_raw_layout=true` for the full Qlik
-  layout.
-- **Failures name the query that failed.** Every error reply, timeouts
-  included, echoes `tool` and `request` with the exact arguments sent.
-- **Fewer useless tools in JWT/form mode, by default.** Reload-task
-  administration needs QRS admin rights — a QMC role, not a property of
-  the authentication method — so those 14 tools default to on in
-  certificate mode and off in JWT/form mode: 28 tools with a certificate,
-  14 with a JWT or a login/password. `QLIK_TASK_TOOLS=true` turns them on
-  in JWT/form mode too, for an identity verified to hold those rights.
-- **One Qlik session per server.** Qlik's per-user limit (5 by default)
-  counts proxy sessions, and in JWT/form mode one is created by the
-  session bootstrap itself — before any WebSocket. The server therefore
-  bootstraps once and reuses that session for every call; restarting it
-  in a loop is what exhausts the quota, not the number of queries.
-- **JWT authentication via virtual proxy.** Set `QLIK_JWT_TOKEN`
-  instead of certificate paths and the server will authenticate every
-  Repository and Engine call as the analyst encoded in the token. No
-  certificates or private keys live on the host. The legacy
-  certificate mode is unchanged and still required for full QRS access.
-  Setup guide: [`docs/AUTH_JWT.md`](docs/AUTH_JWT.md).
-- **Login/password authentication via a "Form based" virtual proxy.**
-  Set `QLIK_PASSWORD` (plus `QLIK_USER_ID` and optionally
-  `QLIK_USER_DIRECTORY`) instead of a certificate or a JWT and the
-  server logs into the proxy's login page the way a browser would, then
-  reuses the resulting session cookie exactly like JWT mode does after
-  its own bootstrap. Setup guide: [`docs/AUTH_FORM.md`](docs/AUTH_FORM.md).
-- **Cached Engine WebSocket connections.** Once an app is opened, every
-  subsequent tool call against the same `app_id` reuses the same
-  WebSocket and the same open document. Switching `app_id` closes the
-  old document and opens the new one on the same socket. Dropped
-  connections are reopened transparently. Implementation:
-  [`engine/connection.py`](qlik_sense_mcp_server/engine/connection.py) and
-  [`docs/architecture.md`](docs/architecture.md).
-- **Streamable HTTP transport by default.** The server is a long-lived
-  process; multiple MCP clients can talk to it in parallel. The legacy
-  stdio mode still works behind `--stdio`.
-- **`tool_call_seconds`** is injected as the first key of every tool
-  response — wall-clock time of the call in milliseconds. Use it to
-  spot slow tools.
-- **Hard hypercube limits.** `engine_create_hypercube` rejects requests
-  with `max_rows > 5000` or `columns * max_rows > 9900` immediately,
-  with a structured error and a hint pointing at set-analysis or
-  top-N patterns. Qlik Engine itself returns
-  [error 7009 `calc-pages-too-large`](https://help.qlik.com/en-US/sense-developer/November2025/Subsystems/EngineJSONAPI/Content/service-genericobject-gethypercubedata.htm)
-  for any single page over 10000 cells.
-- **Two timeout knobs.** `QLIK_WS_TIMEOUT` (default `180.0` seconds)
-  controls both the WebSocket handshake and every Engine API call;
-  `QLIK_TOOL_TIMEOUT` (default `240.0`) bounds a whole tool call, so a
-  slow one ends with a clear error before the client gives up on it.
-
-## Requirements
-
-- Python 3.12 (the package is built and tested against this version; see [`pyproject.toml`](pyproject.toml))
-- Qlik Sense Enterprise (Repository on port 4242, Engine on port 4747 — the
-  [standard ports](https://help.qlik.com/en-US/sense-admin/Subsystems/DeployAdministerQSE/Content/Sense_DeployAdminister/QSEoW/Deploy_QSEoW/Ports.htm))
-- Client certificate, private key and root CA from the Qlik Sense node
-  (certificate mode only - JWT and form mode need nothing on disk beyond
-  the token or the password)
-- Network access from the host running this server to Qlik
-
-## Disclaimer
-
-This project is an independent, community-built integration. It is
-**NOT affiliated with, endorsed by, sponsored by, or supported by Qlik
-Technologies Inc., QlikTech International AB, or any other Qlik
-entity**. "Qlik", "Qlik Sense", "QlikView" and all related product
-names are trademarks of their respective owners.
-
-All information about Qlik Sense APIs, port allocations, error codes,
-protocol behavior and usage patterns used in this project was obtained
-exclusively from publicly available sources — the Qlik Developer Portal
-([help.qlik.com](https://help.qlik.com), [qlik.dev](https://qlik.dev)),
-the [Qlik Community](https://community.qlik.com) forums, and other
-public documentation. No proprietary, confidential or reverse-engineered
-material is used.
+This is an independent community integration, not affiliated with, endorsed
+by, sponsored by or supported by Qlik Technologies Inc. or other Qlik
+entities. Qlik-related names are trademarks of their respective owners.
 
 ## License
 
-[MIT](LICENSE) © 2025-2026 Stanislav Chernov
+[MIT](LICENSE). Original project by Stanislav Chernov:
+[bintocher/qlik-sense-mcp](https://github.com/bintocher/qlik-sense-mcp).
