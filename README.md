@@ -21,6 +21,25 @@ python -m pip install -e '.[dev]'
 python -m pytest tests -m 'not e2e'
 ```
 
+## Docker behind your reverse proxy
+
+A non-root Docker image and hardened Compose service are included. On your
+Docker host, set your Qlik JWT virtual-proxy URL in `.env`, then run:
+
+```sh
+docker compose config
+docker compose up -d --build
+```
+
+Compose starts incoming-JWT mode and publishes port 8000 on host loopback
+by default. A proxy on the same host uses `http://127.0.0.1:8000/mcp`.
+For a proxy on another machine or in another container, change the network
+route as described in [the Docker guide](docs/DOCKER.md). Do not expose an
+unrestricted backend port or bake user JWTs into the image.
+
+Docker image build/start has not been verified in the authoring environment.
+The container still needs live Qlik and full SDK acceptance testing.
+
 ## One startup command, two routes
 
 ```sh
@@ -46,6 +65,8 @@ Start the same command shown above. The endpoint is
 `http://127.0.0.1:8000/mcp`; use an appropriately secured reverse proxy for
 remote access. Linux/macOS POSIX Unix sockets are required in incoming mode.
 The gateway does not use an environment service token as a fallback.
+The Docker image sets `MCP_HOST=0.0.0.0` inside the container; bare-host
+incoming-mode startup still defaults to `127.0.0.1`.
 
 Legacy stdio still uses `qlik-sense-mcp-server --stdio`. Incoming mode is
 HTTP-only and rejects `--stdio`. `python -m qlik_sense_mcp_server.cli` is an
@@ -94,6 +115,7 @@ Read the model with `get_app_details` before querying unfamiliar fields.
 
 ## Documentation
 
+- [Docker and reverse proxies](docs/DOCKER.md)
 - [Configuration](docs/configuration.md)
 - [Incoming per-request JWT authentication](docs/INCOMING_JWT.md)
 - [Legacy JWT virtual-proxy setup](docs/AUTH_JWT.md)
