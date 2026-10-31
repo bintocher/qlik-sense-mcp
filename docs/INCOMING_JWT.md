@@ -3,9 +3,9 @@
 The gateway accepts an `Authorization: Bearer` Qlik JWT on each MCP HTTP
 request. A new token starts a dedicated Qlik MCP worker. That worker first
 validates the token with Qlik's JWT virtual proxy, then serves MCP over a
-private Unix-domain socket. Its Qlik clients, WebSocket, cookies and all
-original process-wide caches are isolated from other tokens by the process
-boundary. Requests for a cached token reuse its worker.
+private Unix-domain socket. Its Qlik clients, WebSocket, cookies and original
+process-wide caches are isolated from other tokens by the process boundary.
+Requests for a cached token reuse its worker.
 
 This implementation is experimental: it has not been validated against the
 supported MCP SDK versions or a live Qlik deployment. Do not use it in
@@ -37,16 +37,20 @@ No Qlik credential should be placed in this command or in a prompt.
   cookies are restored from disk. Each worker disables proxy-wide logout and
   task-administration tools.
 - Each request must contain exactly one bearer token with an `exp` claim.
-  Expired tokens are rejected locally even while a cached session exists.
+  Expired tokens are rejected locally even while a cached session exists;
+  a response stream is terminated when its token expires.
 - The session cache is per process; restarting the gateway or rotating a JWT
   creates a new Qlik session. Multiple gateway replicas do not share cache.
   Qlik user session limits and memory consumption must be considered.
 - Eviction closes the worker locally, but does not end the proxy-wide Qlik
   sessions. Qlik sessions can remain until the proxy's inactivity timeout.
 - Default limits: `QLIK_INCOMING_MAX_CONTEXTS=128`,
-  `QLIK_INCOMING_IDLE_SECONDS=900`, `QLIK_INCOMING_MAX_AGE_SECONDS=1500`,
-  `QLIK_INCOMING_START_TIMEOUT=120`. Changes in Qlik authorization or token
-  revocation may not be detected until a new Qlik bootstrap or session error.
+  `QLIK_INCOMING_IDLE_SECONDS=900`, `QLIK_INCOMING_MAX_AGE_SECONDS=0`
+  (absolute maximum age disabled), `QLIK_INCOMING_START_TIMEOUT=120`.
+  Idle contexts are evicted on a subsequent request. Expiry, Qlik session
+  errors and cache pressure can cause reauthentication. Changes in Qlik
+  authorization or token revocation may not be detected until a new Qlik
+  bootstrap or session error.
 - Requests sharing one JWT share one worker. Multiple MCP conversations with
   the same token can therefore share Qlik Engine selection state. Avoid
   concurrent conversations for the same token until this is tested or
