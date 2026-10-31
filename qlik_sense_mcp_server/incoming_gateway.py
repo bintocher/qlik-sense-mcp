@@ -160,7 +160,10 @@ async def endpoint(request):
         headers = [(k, v) for k, v in request.headers.raw
                    if k.lower() not in (b"authorization", b"host", b"connection", b"content-length",
                                         b"origin", b"cookie", b"proxy-authorization")]
-        headers.append((b"host", b"localhost"))
+        # MCP SDK 1.x permits localhost only with a port in its default host
+        # allowlist. The actual worker is reached through the Unix socket;
+        # this Host value is never used to select a TCP destination.
+        headers.append((b"host", b"localhost:8000"))
         transport = httpx.AsyncHTTPTransport(uds=worker.socket)
         client = httpx.AsyncClient(transport=transport, timeout=None)
         req = client.build_request(request.method, "http://localhost/mcp", headers=headers,
