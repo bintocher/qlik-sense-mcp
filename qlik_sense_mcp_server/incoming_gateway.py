@@ -20,13 +20,14 @@ import httpx
 from dotenv import load_dotenv
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .gateway_policy import (
-    AuthenticationRejected, ConfigurationFailure, CredentialExpired,
-    GatewayFailure, StartupAdmission, StartupFailure, proxy_headers, read_body,
+    AuthenticationRejected, ConfigurationFailure, GatewayFailure,
+    StartupAdmission, StartupFailure, proxy_headers, read_body,
 )
+from .gateway_response import OwnedProxyResponse as _ProxyResponse
 from .jwt_validity import InvalidToken, token_expiration
 from .token_context_cache import CacheBusy, TokenContextCache
 
@@ -37,9 +38,10 @@ logger = logging.getLogger(__name__)
 def _positive(name, default, *, integer=False, zero=False):
     try:
         value = int(os.getenv(name, str(default))) if integer else float(os.getenv(name, str(default)))
-    except ValueError:
+        finite = math.isfinite(value)
+    except (ValueError, OverflowError):
         raise ValueError(f"Invalid {name}") from None
-    if not math.isfinite(value) or value < 0 or (not zero and value == 0):
+    if not finite or value < 0 or (not zero and value == 0):
         raise ValueError(f"Invalid {name}")
     return value
 
@@ -51,6 +53,7 @@ _ROOT = None
 _loop = None
 _reaper_task = None
 _workers = set()
+_pending_acquisitions = set()
 _admission = StartupAdmission(
     concurrent=_positive("QLIK_INCOMING_MAX_STARTS", 4, integer=True),
     per_minute=_positive("QLIK_INCOMING_STARTS_PER_MINUTE", 30, integer=True),
@@ -144,7 +147,6 @@ _cache = TokenContextCache(
     max_entries=_positive("QLIK_INCOMING_MAX_CONTEXTS", 128, integer=True),
     idle_seconds=_positive("QLIK_INCOMING_IDLE_SECONDS", 900),
     max_age_seconds=_positive("QLIK_INCOMING_MAX_AGE_SECONDS", 0, zero=True),
-    # Invalid tokens cannot evict a legitimate worker to create a free slot.
     evict_idle=False,
 )
 
@@ -168,8 +170,6 @@ class _Resources:
         self.lock = asyncio.Lock()
 
     async def close(self, *, invalidate=False):
-        # Called by endpoint failures and Response.__call__, even if the
-        # body generator never starts or the initial ASGI send fails.
         with anyio.CancelScope(shield=True):
             async with self.lock:
                 if self.closed:
@@ -188,30 +188,7 @@ class _Resources:
                         await anyio.to_thread.run_sync(self.lease.__exit__, None, None, None)
 
 
-class _ProxyResponse(StreamingResponse):
-    def __init__(self, resources, expires_at, headers):
-        self.resources = resources
-        self.expires_at = expires_at
-        super().__init__(resources.upstream.aiter_raw(), status_code=resources.upstream.status_code)
-        self.raw_headers = headers + [(b"cache-control", b"no-store")]
-
-    async def __call__(self, scope, receive, send):
-        broken = False
-        try:
-            # The timeout scope encloses the full response in one ASGI task;
-            # no cancel scope is suspended across an async-generator yield.
-            with anyio.move_on_after(max(0, self.expires_at - time.time())):
-                await super().__call__(scope, receive, send)
-        except httpx.HTTPError:
-            broken = True
-            logger.warning("Gateway stream failed: upstream_transport")
-            raise
-        finally:
-            await self.resources.close(invalidate=broken)
-
-
 async def _acquire(lease):
-    # A cancelled requester does not abandon an initializing thread/lease.
     task = asyncio.create_task(asyncio.to_thread(lease.__enter__))
     try:
         with anyio.CancelScope(shield=True):
@@ -223,7 +200,9 @@ async def _acquire(lease):
             except Exception:
                 return
             await asyncio.to_thread(lease.__exit__, None, None, None)
-        asyncio.create_task(release_later())
+        cleanup = asyncio.create_task(release_later())
+        _pending_acquisitions.add(cleanup)
+        cleanup.add_done_callback(_pending_acquisitions.discard)
         raise
 
 
@@ -276,8 +255,7 @@ async def endpoint(request):
             resources.upstream = await resources.client.send(req, stream=True)
         if deadline.cancel_called:
             return _error(401, "expired")
-        response_headers = proxy_headers(resources.upstream.headers.raw)
-        response_headers = [(k, v) for k, v in response_headers if k != b"cache-control"]
+        response_headers = [(k, v) for k, v in proxy_headers(resources.upstream.headers.raw) if k != b"cache-control"]
         response = _ProxyResponse(resources, expires_at, response_headers)
         handed_off = True
         return response
@@ -305,7 +283,6 @@ async def startup():
     global _loop, _ROOT, _reaper_task
     if os.name != "posix":
         raise ValueError("incoming-jwt mode requires POSIX Unix sockets")
-    # Validate deployment configuration without supplying user credentials.
     from urllib.parse import urlparse
     parsed = urlparse(os.getenv("QLIK_SERVER_URL", ""))
     if parsed.scheme not in ("http", "https") or not parsed.hostname or not parsed.path.strip("/"):
@@ -329,6 +306,8 @@ async def shutdown():
         _reaper_task = None
     await asyncio.to_thread(_cache.close)
     await asyncio.gather(*(worker.stop() for worker in list(_workers)), return_exceptions=True)
+    if _pending_acquisitions:
+        await asyncio.gather(*list(_pending_acquisitions), return_exceptions=True)
     if _ROOT is not None:
         shutil.rmtree(_ROOT, ignore_errors=True)
         _ROOT = None
