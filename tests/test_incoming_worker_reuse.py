@@ -1,56 +1,98 @@
-"""Validate per-session reuse semantics of the JWT worker."""
+"""Worker state is rebuilt atomically, never replaying a failed tool."""
 
-import os
+import base64
+import json
 import sys
-from io import StringIO
-from types import ModuleType, SimpleNamespace
+import time
+import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from qlik_sense_mcp_server.worker_session import SessionInvalidated, WorkerSessionGuard
 
-def test_worker_reuses_qs_session_without_periodic_bootstrap(monkeypatch):
-    import qlik_sense_mcp_server as package
-    from qlik_sense_mcp_server import incoming_worker
 
-    events = []
-    session = SimpleNamespace(_ttl=1500, ensure_standalone=lambda: events.append("authenticated"))
-    context = SimpleNamespace(jwt_session=session, repo_api=object(), engine_api=object(),
-                              shutdown=lambda: events.append("shutdown"))
-    tools = ModuleType("qlik_sense_mcp_server.tools")
-    tools.context = context
-    server = ModuleType("qlik_sense_mcp_server.server")
-    server.mcp = SimpleNamespace(streamable_http_app=lambda: object())
-    uvicorn = ModuleType("uvicorn")
-    uvicorn.Config = lambda *args, **kwargs: object()
+def token():
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": time.time()+60}).encode()).rstrip(b"=").decode()
+    return f"header.{payload}.signature"
 
-    class FakeServer:
-        def __init__(self, config):
-            self.started = False
 
-        async def serve(self):
-            self.started = True
+class Session:
+    def __init__(self, config, invalidate):
+        self.invalidate_callback = invalidate
+    def ensure_standalone(self): pass
+    def invalidate(self):
+        self.invalidate_callback()
+        raise SessionInvalidated()
 
-    uvicorn.Server = FakeServer
 
-    class NoThread:
-        def __init__(self, *args, **kwargs):
-            pass
+class Repo:
+    def __init__(self, *args, **kwargs):
+        self.closed = False
+        self.client = SimpleNamespace(close=self.close)
+    def close(self): self.closed = True
 
-        def start(self):
-            pass
 
-    monkeypatch.setattr(sys, "argv", ["worker", "/tmp/fake.sock"])
-    monkeypatch.setattr(sys, "stdin", StringIO("example.jwt.token\n"))
-    monkeypatch.setattr(incoming_worker.threading, "Thread", NoThread)
-    monkeypatch.setitem(sys.modules, "qlik_sense_mcp_server.tools", tools)
-    monkeypatch.setitem(sys.modules, "qlik_sense_mcp_server.server", server)
-    monkeypatch.setattr(package, "tools", tools, raising=False)
-    monkeypatch.setattr(package, "server", server, raising=False)
-    monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
-    monkeypatch.setenv("QLIK_VERIFY_SSL", "true")
-    with patch.dict(os.environ):
-        incoming_worker.main()
-        assert os.environ["QLIK_VERIFY_SSL"] == "true"
-        assert os.environ["QLIK_SESSION_CACHE"] == "false"
-        assert os.environ["QLIK_PROXY_LOGOUT"] == "false"
-    assert session._ttl == float("inf")
-    assert events == ["authenticated", "shutdown"]
+class Engine:
+    def __init__(self, *args, **kwargs): self.closed = False
+    def abort_socket(self): self.closed = True
+    def disconnect(self): self.closed = True
+
+
+class GuardTests(unittest.TestCase):
+    def make_guard(self):
+        ctx = SimpleNamespace(engine_api=None, repo_api=None, jwt_session=None, form_session=None)
+        guard = WorkerSessionGuard(ctx, SimpleNamespace(jwt_token=token()),
+            session_factory=Session, repo_factory=Repo, engine_factory=Engine)
+        return ctx, guard
+
+    def test_invalidation_drops_all_state_and_never_replays_call(self):
+        ctx, guard = self.make_guard()
+        cache = {"app": {"sample": "secret"}}
+        module = SimpleNamespace(forget_app_details=cache.clear)
+        with patch.dict(sys.modules, {"qlik_sense_mcp_server.tools.repository": module}):
+            guard.initialize()
+            cache["app"] = "sample"
+            repo, engine = ctx.repo_api, ctx.engine_api
+            calls = []
+            def tool():
+                calls.append(1)
+                # Even if a lower layer swallows this exception, the guard
+                # must refuse to return a stale successful payload.
+                try: ctx.jwt_session.invalidate()
+                except SessionInvalidated: pass
+                return "stale"
+            with self.assertRaises(SessionInvalidated): guard.execute(tool)
+            self.assertEqual(calls, [1])
+            self.assertTrue(repo.closed and engine.closed)
+            self.assertEqual(cache, {})
+            self.assertIsNone(ctx.engine_api)
+            self.assertEqual(guard.execute(lambda: "fresh"), "fresh")
+            self.assertEqual(guard.generation, 2)
+            guard.close()
+
+    def test_failed_reauthentication_cannot_access_stale_clients_or_cache(self):
+        ctx, guard = self.make_guard()
+        guard.initialize()
+        old_engine = ctx.engine_api
+        with self.assertRaises(SessionInvalidated):
+            guard.execute(lambda: ctx.jwt_session.invalidate())
+        class Rejected(Session):
+            def ensure_standalone(self): raise RuntimeError("rejected")
+        guard.session_factory = Rejected
+        calls = []
+        with self.assertRaises(RuntimeError): guard.execute(lambda: calls.append(1))
+        self.assertEqual(calls, [])
+        self.assertIsNone(ctx.engine_api)
+        self.assertIsNone(ctx.repo_api)
+        self.assertTrue(old_engine.closed)
+        guard.close()
+
+    def test_cached_calls_do_not_reauthenticate(self):
+        ctx, guard = self.make_guard()
+        guard.initialize()
+        for _ in range(5): guard.execute(lambda: None)
+        self.assertEqual(guard.generation, 1)
+        guard.close()
+
+
+if __name__ == "__main__": unittest.main()
