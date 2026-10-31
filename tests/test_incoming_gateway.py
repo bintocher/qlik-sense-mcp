@@ -86,6 +86,10 @@ async def test_routes_each_token_to_its_own_worker(monkeypatch):
 
     async def backend(request):
         received.append(dict(request.headers))
+        # Match MCP SDK 1.x's default localhost:* host rule. A host without
+        # a port is rejected with 421 before MCP initialization.
+        if request.headers.get("host") != "localhost:8000":
+            return JSONResponse({"error": "invalid host"}, status_code=421)
         return JSONResponse({"ok": True}, headers={"mcp-session-id": "session"})
 
     fake_app = Starlette(routes=[Route("/mcp", backend, methods=["POST"])])
@@ -98,4 +102,5 @@ async def test_routes_each_token_to_its_own_worker(monkeypatch):
             assert response.headers["mcp-session-id"] == "session"
     assert len(workers) == 2
     assert all("authorization" not in headers for headers in received)
+    assert all(headers["host"] == "localhost:8000" for headers in received)
     cache.close()
