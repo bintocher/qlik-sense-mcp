@@ -71,7 +71,6 @@ class _Worker:
             pass
 
     def close(self) -> None:
-        # TokenContextCache invokes close in a worker thread.
         if self.loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.stop(), self.loop)
             future.result(timeout=10)
@@ -111,8 +110,6 @@ async def endpoint(request):
     try:
         token_expiration(token)
         lease = _cache.lease(token)
-        # Shield creation: if a request is cancelled while the thread is
-        # bootstrapping, wait for it and release its lease rather than leak it.
         acquisition = asyncio.create_task(asyncio.to_thread(lease.__enter__))
         try:
             worker = await asyncio.shield(acquisition)
@@ -139,7 +136,8 @@ async def endpoint(request):
             await asyncio.to_thread(_cache.invalidate, token)
             return _error(503, "Qlik worker unavailable; retry the request")
         headers = [(k, v) for k, v in request.headers.raw
-                   if k.lower() not in (b"authorization", b"host", b"connection", b"content-length")]
+                   if k.lower() not in (b"authorization", b"host", b"connection", b"content-length",
+                                        b"origin", b"cookie", b"proxy-authorization")]
         headers.append((b"host", b"localhost"))
         transport = httpx.AsyncHTTPTransport(uds=worker.socket)
         client = httpx.AsyncClient(transport=transport, timeout=None)
