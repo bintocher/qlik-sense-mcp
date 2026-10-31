@@ -35,6 +35,10 @@ Never place tokens in prompts or tool arguments. The JWT must be accepted
 by the configured Qlik virtual proxy and contain a finite numeric `exp`.
 The server does not issue tokens and does not require the JWT signing key.
 
+For Docker and an external reverse proxy, use [DOCKER.md](DOCKER.md).
+The image sets `MCP_HOST=0.0.0.0` inside the container; bare-host startup
+continues to default to `127.0.0.1`.
+
 ## Authentication and isolation
 
 - Each exact JWT selects a private worker process. A cache miss validates
@@ -60,6 +64,8 @@ The server does not issue tokens and does not require the JWT signing key.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
+| `MCP_HOST` | `127.0.0.1` | Public gateway bind address; Docker sets `0.0.0.0`. Does not change private worker sockets or TLS settings. |
+| `MCP_PORT` | `8000` | Gateway HTTP port. |
 | `QLIK_INCOMING_MAX_CONTEXTS` | `128` | Maximum cached workers and reserved startups. A new token cannot evict a healthy authenticated worker; capacity returns 503. |
 | `QLIK_INCOMING_IDLE_SECONDS` | `900` | Idle worker lifetime. Active streams are not idle. Cleanup runs every 30 seconds. |
 | `QLIK_INCOMING_MAX_AGE_SECONDS` | `0` | Optional absolute cache age; zero disables forced age reauthentication. |
@@ -89,10 +95,12 @@ private worker, and HTTP framing is regenerated. Responses are `no-store`.
 
 ## Deployment and compatibility
 
-The gateway listens on `127.0.0.1`; expose it through an appropriately secured
-reverse proxy when remote access is needed. Preserve MCP headers, disable
-stream buffering, and do not log authorization values. Each worker listens
-on a random Unix socket in a private directory, not a public TCP port.
+The gateway defaults to `127.0.0.1`; expose it through an appropriately secured
+reverse proxy when remote access is needed. Containers need `MCP_HOST=0.0.0.0`
+inside their network namespace, with published ports restricted separately.
+Preserve MCP headers, disable stream buffering, and do not log authorization
+values. Each worker listens on a random Unix socket in a private directory,
+not a public TCP port. Forwarded headers are not trusted as user identity.
 
 **TLS verification toward Qlik is unchanged and optional.** Existing
 `QLIK_VERIFY_SSL` and `QLIK_CA_CERT_PATH` behavior and defaults are preserved.
