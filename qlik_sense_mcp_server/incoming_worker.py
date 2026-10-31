@@ -9,7 +9,6 @@ import time
 
 
 def _report(category):
-    # Only fixed categories cross the startup control pipe.
     print(json.dumps({"status": category}), flush=True)
 
 
@@ -51,7 +50,6 @@ def main():
         from .worker_tools import install_tool_guard
         guard = WorkerSessionGuard(context, config)
         guard.initialize()
-        # Registration happens on importing server; install before then.
         install_tool_guard(helpers, guard)
         from . import server
         import uvicorn
@@ -72,10 +70,13 @@ def main():
             await task
         asyncio.run(serve())
     except Exception as exc:
-        from .jwt_session import JwtBootstrapError
+        # Imports may themselves fail (e.g. a broken installation); classify
+        # that without re-importing a dependency that already failed.
+        session_module = sys.modules.get("qlik_sense_mcp_server.jwt_session")
+        bootstrap_type = getattr(session_module, "JwtBootstrapError", ())
         if isinstance(exc, InvalidToken):
             _report("authentication")
-        elif isinstance(exc, JwtBootstrapError):
+        elif bootstrap_type and isinstance(exc, bootstrap_type):
             text = str(exc)
             if "returned 401" in text or "returned 400" in text:
                 _report("authentication")
