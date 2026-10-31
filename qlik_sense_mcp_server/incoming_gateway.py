@@ -224,6 +224,8 @@ async def endpoint(request):
         return _error(401, "invalid_or_expired_token")
     except GatewayFailure as exc:
         return _error(exc.status, exc.category)
+    except CacheBusy:
+        return _error(503, "session_capacity")
     except ValueError:
         return _error(400, "invalid_headers")
     except ClientDisconnect:
@@ -329,8 +331,8 @@ app = Starlette(routes=[Route("/mcp", endpoint, methods=["GET", "POST", "DELETE"
 
 
 def main():
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("MCP_PORT", "8000")), access_log=False)
+    from .gateway_http import serve_gateway
+    serve_gateway(app)
 
 
 if __name__ == "__main__":
