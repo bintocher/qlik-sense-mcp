@@ -1,10 +1,7 @@
-"""Streamable-HTTP gateway for isolated, Qlik-authenticated JWT workers.
+"""Experimental bearer-JWT MCP gateway with process-isolated Qlik state.
 
-Start separately with ``python -m qlik_sense_mcp_server.incoming_gateway``.
-POSIX is required for private Unix-domain sockets. Workers authenticate an
-uncached JWT with Qlik and isolate *all* original process-wide Qlik state.
-This gateway is experimental until its MCP SDK integration and Qlik behavior
-have been verified in the target deployment.
+Run separately: ``python -m qlik_sense_mcp_server.incoming_gateway``.
+Requires POSIX Unix sockets. Test with the target MCP SDK and Qlik before use.
 """
 
 from __future__ import annotations
@@ -19,39 +16,34 @@ import tempfile
 
 import httpx
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .jwt_validity import InvalidToken, token_expiration
 from .token_context_cache import CacheBusy, TokenContextCache
 
-
 _ROOT = pathlib.Path(tempfile.mkdtemp(prefix="qlik-mcp-"))
 os.chmod(_ROOT, 0o700)
 _TIMEOUT = float(os.getenv("QLIK_INCOMING_START_TIMEOUT", "120"))
+_loop = None
 
 
 class _Worker:
-    def __init__(self, token: str):
-        self.socket = str(_ROOT / (secrets.token_hex(16) + ".sock"))
-        self.process = None
-        self.loop = None
-        raise RuntimeError("Workers must be started asynchronously")
-
     @classmethod
     async def start(cls, token: str) -> "_Worker":
         worker = object.__new__(cls)
         worker.socket = str(_ROOT / (secrets.token_hex(16) + ".sock"))
         worker.loop = asyncio.get_running_loop()
+        worker.process = None
         env = os.environ.copy()
         env.pop("QLIK_JWT_TOKEN", None)
         env.pop("QLIK_PASSWORD", None)
-        worker.process = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "qlik_sense_mcp_server.incoming_worker", worker.socket,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env=env,
-        )
         try:
+            worker.process = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "qlik_sense_mcp_server.incoming_worker", worker.socket,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, env=env,
+            )
             worker.process.stdin.write((token + "\n").encode("ascii"))
             await worker.process.stdin.drain()
             worker.process.stdin.close()
@@ -65,12 +57,14 @@ class _Worker:
 
     async def stop(self) -> None:
         if self.process is not None and self.process.returncode is None:
-            self.process.terminate()
             try:
+                self.process.terminate()
                 await asyncio.wait_for(self.process.wait(), 5)
             except asyncio.TimeoutError:
                 self.process.kill()
                 await self.process.wait()
+            except ProcessLookupError:
+                pass
         try:
             os.unlink(self.socket)
         except FileNotFoundError:
@@ -78,17 +72,12 @@ class _Worker:
 
     def close(self) -> None:
         # TokenContextCache invokes close in a worker thread.
-        if self.loop is not None and self.loop.is_running():
+        if self.loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self.stop(), self.loop)
             future.result(timeout=10)
 
 
-_loop = None
-
-
 def _factory(token: str) -> _Worker:
-    # Cache factories run in a worker thread; subprocesses belong to the ASGI
-    # loop so the transport can stream while startup runs independently.
     if _loop is None:
         raise RuntimeError("Gateway has not started")
     future = asyncio.run_coroutine_threadsafe(_Worker.start(token), _loop)
@@ -107,7 +96,7 @@ _cache = TokenContextCache(
 )
 
 
-async def _error(status: int, text: str) -> JSONResponse:
+def _error(status: int, text: str) -> JSONResponse:
     headers = {"WWW-Authenticate": "Bearer"} if status == 401 else {}
     return JSONResponse({"error": text}, status_code=status, headers=headers)
 
@@ -115,26 +104,40 @@ async def _error(status: int, text: str) -> JSONResponse:
 async def endpoint(request):
     authorization = request.headers.getlist("authorization")
     if len(authorization) != 1:
-        return await _error(401, "Bearer token required")
+        return _error(401, "Bearer token required")
     scheme, separator, token = authorization[0].partition(" ")
     if not separator or scheme.lower() != "bearer" or not token or token.strip() != token:
-        return await _error(401, "Invalid bearer token")
+        return _error(401, "Invalid bearer token")
     try:
         token_expiration(token)
         lease = _cache.lease(token)
-        worker = await asyncio.to_thread(lease.__enter__)
+        # Shield creation: if a request is cancelled while the thread is
+        # bootstrapping, wait for it and release its lease rather than leak it.
+        acquisition = asyncio.create_task(asyncio.to_thread(lease.__enter__))
+        try:
+            worker = await asyncio.shield(acquisition)
+        except asyncio.CancelledError:
+            try:
+                await acquisition
+            except Exception:
+                pass
+            else:
+                await asyncio.to_thread(lease.__exit__, None, None, None)
+            raise
     except InvalidToken:
-        return await _error(401, "Invalid or expired bearer token")
+        return _error(401, "Invalid or expired bearer token")
     except CacheBusy:
-        return await _error(503, "Qlik session capacity reached")
+        return _error(503, "Qlik session capacity reached")
     except Exception:
-        return await _error(401, "Qlik authentication failed or unavailable")
+        return _error(401, "Qlik authentication failed or unavailable")
 
     client = None
     upstream = None
+    handed_off = False
     try:
         if worker.process.returncode is not None:
-            return await _error(503, "Qlik worker unavailable")
+            await asyncio.to_thread(_cache.invalidate, token)
+            return _error(503, "Qlik worker unavailable; retry the request")
         headers = [(k, v) for k, v in request.headers.raw
                    if k.lower() not in (b"authorization", b"host", b"connection", b"content-length")]
         headers.append((b"host", b"localhost"))
@@ -145,7 +148,6 @@ async def endpoint(request):
         upstream = await client.send(req, stream=True)
         response_headers = [(k, v) for k, v in upstream.headers.raw
                             if k.lower() not in (b"connection", b"transfer-encoding", b"content-length")]
-        status = upstream.status_code
 
         async def stream():
             try:
@@ -156,18 +158,21 @@ async def endpoint(request):
                 await client.aclose()
                 await asyncio.to_thread(lease.__exit__, None, None, None)
 
-        response = StreamingResponse(stream(), status_code=status)
+        response = StreamingResponse(stream(), status_code=upstream.status_code)
         response.raw_headers = response_headers
+        handed_off = True
         return response
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        if upstream is not None:
-            await upstream.aclose()
-        if client is not None:
-            await client.aclose()
-        await asyncio.to_thread(lease.__exit__, None, None, None)
-        return await _error(502, "Qlik MCP worker failed")
+        await asyncio.to_thread(_cache.invalidate, token)
+        return _error(502, "Qlik MCP worker failed; retry the request")
     finally:
-        if worker.process.returncode is not None and client is None:
+        if not handed_off:
+            if upstream is not None:
+                await upstream.aclose()
+            if client is not None:
+                await client.aclose()
             await asyncio.to_thread(lease.__exit__, None, None, None)
 
 
