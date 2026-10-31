@@ -42,8 +42,12 @@ def main() -> None:
 
     if context.jwt_session is None or context.repo_api is None or context.engine_api is None:
         raise SystemExit(2)
-    # With disk persistence disabled, this always validates this exact token
-    # with the configured Qlik JWT virtual proxy on first creation.
+    # This worker is bound to one exact JWT. Authenticate it with Qlik on
+    # startup, then reuse its cookie until Qlik rejects or invalidates it.
+    # The gateway enforces JWT expiry on every request and response stream.
+    # Existing QRS/Engine retry logic calls invalidate() on session errors.
+    # Disk session persistence is disabled above.
+    context.jwt_session._ttl = float("inf")
     context.jwt_session.ensure_standalone()
     from . import server  # registers the tools after the clients exist
     import uvicorn
