@@ -47,10 +47,10 @@ No Qlik credential should be placed in this command or in a prompt.
 - Default limits: `QLIK_INCOMING_MAX_CONTEXTS=128`,
   `QLIK_INCOMING_IDLE_SECONDS=900`, `QLIK_INCOMING_MAX_AGE_SECONDS=0`
   (absolute maximum age disabled), `QLIK_INCOMING_START_TIMEOUT=120`.
-  Idle contexts are evicted on a subsequent request. Expiry, Qlik session
-  errors and cache pressure can cause reauthentication. Changes in Qlik
-  authorization or token revocation may not be detected until a new Qlik
-  bootstrap or session error.
+  Idle contexts are checked for eviction every 30 seconds and on requests.
+  Expiry, Qlik session errors and cache pressure can cause reauthentication.
+  Changes in Qlik authorization or token revocation may not be detected until
+  a new Qlik bootstrap or session error.
 - Requests sharing one JWT share one worker. Multiple MCP conversations with
   the same token can therefore share Qlik Engine selection state. Avoid
   concurrent conversations for the same token until this is tested or
