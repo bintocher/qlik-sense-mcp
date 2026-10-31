@@ -13,7 +13,9 @@ import secrets
 import shutil
 import sys
 import tempfile
+import time
 
+import anyio
 import httpx
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, StreamingResponse
@@ -91,13 +93,28 @@ _cache = TokenContextCache(
     _factory,
     max_entries=int(os.getenv("QLIK_INCOMING_MAX_CONTEXTS", "128")),
     idle_seconds=float(os.getenv("QLIK_INCOMING_IDLE_SECONDS", "900")),
-    max_age_seconds=float(os.getenv("QLIK_INCOMING_MAX_AGE_SECONDS", "1500")),
+    max_age_seconds=float(os.getenv("QLIK_INCOMING_MAX_AGE_SECONDS", "0")),
 )
 
 
 def _error(status: int, text: str) -> JSONResponse:
     headers = {"WWW-Authenticate": "Bearer"} if status == 401 else {}
     return JSONResponse({"error": text}, status_code=status, headers=headers)
+
+
+async def _release(upstream, client, lease):
+    # StreamingResponse may cancel the stream on disconnect. Ensure the
+    # client and cache lease are released even inside a cancelled task group.
+    with anyio.CancelScope(shield=True):
+        try:
+            if upstream is not None:
+                await upstream.aclose()
+        finally:
+            try:
+                if client is not None:
+                    await client.aclose()
+            finally:
+                await asyncio.to_thread(lease.__exit__, None, None, None)
 
 
 async def endpoint(request):
@@ -108,18 +125,19 @@ async def endpoint(request):
     if not separator or scheme.lower() != "bearer" or not token or token.strip() != token:
         return _error(401, "Invalid bearer token")
     try:
-        token_expiration(token)
+        expires_at = token_expiration(token)
         lease = _cache.lease(token)
         acquisition = asyncio.create_task(asyncio.to_thread(lease.__enter__))
         try:
             worker = await asyncio.shield(acquisition)
         except asyncio.CancelledError:
-            try:
-                await acquisition
-            except Exception:
-                pass
-            else:
-                await asyncio.to_thread(lease.__exit__, None, None, None)
+            with anyio.CancelScope(shield=True):
+                try:
+                    await acquisition
+                except Exception:
+                    pass
+                else:
+                    await asyncio.to_thread(lease.__exit__, None, None, None)
             raise
     except InvalidToken:
         return _error(401, "Invalid or expired bearer token")
@@ -132,6 +150,10 @@ async def endpoint(request):
     upstream = None
     handed_off = False
     try:
+        try:
+            token_expiration(token)
+        except InvalidToken:
+            return _error(401, "Invalid or expired bearer token")
         if worker.process.returncode is not None:
             await asyncio.to_thread(_cache.invalidate, token)
             return _error(503, "Qlik worker unavailable; retry the request")
@@ -143,18 +165,24 @@ async def endpoint(request):
         client = httpx.AsyncClient(transport=transport, timeout=None)
         req = client.build_request(request.method, "http://localhost/mcp", headers=headers,
                                    content=await request.body())
-        upstream = await client.send(req, stream=True)
+        # An upstream that hangs must not keep a request alive past token expiry.
+        with anyio.move_on_after(max(0, expires_at - time.time())) as deadline:
+            upstream = await client.send(req, stream=True)
+        if deadline.cancel_called:
+            return _error(401, "Bearer token expired")
         response_headers = [(k, v) for k, v in upstream.headers.raw
                             if k.lower() not in (b"connection", b"transfer-encoding", b"content-length")]
 
         async def stream():
             try:
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
+                # The user must reconnect with a valid token after expiry.
+                with anyio.move_on_after(max(0, expires_at - time.time())):
+                    async for chunk in upstream.aiter_raw():
+                        if time.time() >= expires_at:
+                            break
+                        yield chunk
             finally:
-                await upstream.aclose()
-                await client.aclose()
-                await asyncio.to_thread(lease.__exit__, None, None, None)
+                await _release(upstream, client, lease)
 
         response = StreamingResponse(stream(), status_code=upstream.status_code)
         response.raw_headers = response_headers
@@ -167,11 +195,7 @@ async def endpoint(request):
         return _error(502, "Qlik MCP worker failed; retry the request")
     finally:
         if not handed_off:
-            if upstream is not None:
-                await upstream.aclose()
-            if client is not None:
-                await client.aclose()
-            await asyncio.to_thread(lease.__exit__, None, None, None)
+            await _release(upstream, client, lease)
 
 
 async def startup():
