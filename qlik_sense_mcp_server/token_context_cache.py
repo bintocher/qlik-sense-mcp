@@ -37,12 +37,13 @@ class TokenContextCache:
     """Per-token cache; in-flight factories and active leases are protected."""
 
     def __init__(self, factory: Callable[[str], Any], *, max_entries: int = 128,
-                 idle_seconds: float = 900, max_age_seconds: float = 1500):
-        if max_entries < 1 or idle_seconds <= 0 or max_age_seconds <= 0:
-            raise ValueError("Cache limits must be positive")
+                 idle_seconds: float = 900, max_age_seconds: float = 0):
+        if max_entries < 1 or idle_seconds <= 0 or max_age_seconds < 0:
+            raise ValueError("Invalid cache limits")
         self._factory = factory
         self._max_entries = max_entries
         self._idle_seconds = idle_seconds
+        # Zero disables absolute age eviction. JWT expiry is always enforced.
         self._max_age_seconds = max_age_seconds
         self._key = os.urandom(32)
         self._condition = threading.Condition()
@@ -57,9 +58,12 @@ class TokenContextCache:
             raise InvalidToken("Invalid bearer token") from None
 
     def _stale(self, entry: _Entry, wall: float, mono: float) -> bool:
+        # An active streaming request is not idle. Never retire a live entry
+        # for age while its leases are held; expiry/invalidation still wins.
+        age_expired = self._max_age_seconds > 0 and mono - entry.created >= self._max_age_seconds
+        idle_expired = mono - entry.touched >= self._idle_seconds
         return (entry.invalid or wall >= entry.expires_at or
-                mono - entry.touched >= self._idle_seconds or
-                mono - entry.created >= self._max_age_seconds)
+                (entry.active == 0 and (idle_expired or age_expired)))
 
     @staticmethod
     def _close(context: Any) -> None:
