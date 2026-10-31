@@ -28,6 +28,7 @@ _ROOT = pathlib.Path(tempfile.mkdtemp(prefix="qlik-mcp-"))
 os.chmod(_ROOT, 0o700)
 _TIMEOUT = float(os.getenv("QLIK_INCOMING_START_TIMEOUT", "120"))
 _loop = None
+_reaper_task = None
 
 
 class _Worker:
@@ -201,12 +202,27 @@ async def endpoint(request):
             await _release(upstream, client, lease)
 
 
+async def _reap_idle_contexts():
+    while True:
+        await asyncio.sleep(30)
+        await asyncio.to_thread(_cache.reap)
+
+
 async def startup():
-    global _loop
+    global _loop, _reaper_task
     _loop = asyncio.get_running_loop()
+    _reaper_task = asyncio.create_task(_reap_idle_contexts())
 
 
 async def shutdown():
+    global _reaper_task
+    if _reaper_task is not None:
+        _reaper_task.cancel()
+        try:
+            await _reaper_task
+        except asyncio.CancelledError:
+            pass
+        _reaper_task = None
     await asyncio.to_thread(_cache.close)
     shutil.rmtree(_ROOT, ignore_errors=True)
 
