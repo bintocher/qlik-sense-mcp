@@ -72,6 +72,21 @@ class TokenContextCache:
         except Exception:
             pass
 
+    def reap(self) -> int:
+        """Close stale idle contexts without waiting for a new request."""
+        stale = []
+        with self._condition:
+            wall, mono = time.time(), time.monotonic()
+            for key, entry in list(self._entries.items()):
+                if not entry.active and self._stale(entry, wall, mono):
+                    del self._entries[key]
+                    stale.append(entry.context)
+            if stale:
+                self._condition.notify_all()
+        for context in stale:
+            self._close(context)
+        return len(stale)
+
     def invalidate(self, token: str) -> None:
         """Retire one context; an active context is closed after its last lease."""
         key = self._fingerprint(token)
