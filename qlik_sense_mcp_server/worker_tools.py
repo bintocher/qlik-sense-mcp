@@ -1,7 +1,6 @@
 """Gate tool execution behind one worker session without changing tool schemas."""
 
 import functools
-import inspect
 
 
 def install_tool_guard(helpers, guard):
@@ -16,10 +15,10 @@ def install_tool_guard(helpers, guard):
             except Exception:
                 return helpers._err("Qlik session unavailable; retry the tool call",
                                     error_category="authentication_or_session")
-        # The outer legacy backstop otherwise aborts context.engine_api after
-        # an abandoned thread finishes, which can race a replacement client.
-        # GuardSession owns the per-call cleanup and lock; disabling that
-        # global backstop avoids aborting another generation's Engine socket.
+        # The legacy outer backstop aborts context.engine_api after a timeout.
+        # In a coordinated worker that global may already be a new generation.
+        # Keep the deadline and timeout reply, but not this global socket abort;
+        # the executing thread holds the session guard until it actually exits.
         execute.__engine_serialised__ = False
         return original(execute)
 
